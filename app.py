@@ -348,7 +348,42 @@ if submit_button:
         st.title("📊 代谢组学分析报告")
         st.caption(f"对比: {case_grp} vs {ctrl_grp} | 特征数: {len(feats)} | Scaling: {scale_m}")
 
+        # --- 新增: 质量控制 (QC Check) ---
+        # 如果做了 SERRF，显示 RSD 改善情况
+        if 'serrf_stats' in locals() and serrf_stats: # 检查是否有 SERRF 结果变量
+             # 注意：这需要您在前面的循环里收集所有文件的 serrf_stats，或者只显示最后一个
+             # 为了简单，我们这里只显示当前的 RSD（如果是合并后的数据，重新算一下当前 QC 的 RSD）
+             pass
+        
+        # 实时计算当前数据的 QC RSD
+        qc_mask = df_sub[group_col] == (qc_label if 'qc_label' in locals() else 'QC')
+        # 如果没找到叫 QC 的组，尝试找包含 QC 字符的
+        if qc_mask.sum() == 0:
+             qc_mask = df_sub[group_col].astype(str).str.contains('QC', case=False)
+        
+        if qc_mask.sum() >= 2:
+             with st.expander("🔍 质量控制 (QC Quality Check)", expanded=True):
+                 qc_data = df_sub.loc[qc_mask, feats]
+                 # 计算每个特征的 RSD
+                 qc_rsd = (qc_data.std() / qc_data.mean()) * 100
+                 median_rsd = qc_rsd.median()
+                 
+                 c1, c2 = st.columns([1, 3])
+                 c1.metric("QC Median RSD", f"{median_rsd:.1f}%", help="< 20% 为优，< 30% 可接受")
+                 
+                 # 绘制 RSD 分布直方图
+                 fig_rsd = px.histogram(qc_rsd, nbins=50, title="QC RSD Distribution", 
+                                        labels={'value': 'RSD (%)'}, width=600, height=300)
+                 fig_rsd.add_vline(x=20, line_dash="dash", line_color="green", annotation_text="Excellent (20%)")
+                 fig_rsd.add_vline(x=30, line_dash="dash", line_color="orange", annotation_text="Acceptable (30%)")
+                 fig_rsd.update_layout(showlegend=False, margin=dict(l=20, r=20, t=40, b=20))
+                 c2.plotly_chart(fig_rsd, use_container_width=True)
+                 
+                 if median_rsd > 30:
+                     st.warning("⚠️ 警告：QC 样本的变异系数 (RSD) 较高 (>30%)。这可能解释了为什么 PCA 中 QC 比较分散。请检查 SERRF 参数或原始数据质量。")
+
         tabs = st.tabs(["📊 PCA", "🎯 PLS-DA", "⭐ VIP 特征", "🌋 火山图", "🔥 热图", "📑 详情"])
+
 
         # PCA
         with tabs[0]:
@@ -486,3 +521,4 @@ if submit_button:
                     fig_box.update_traces(width=0.6, marker=dict(size=7, opacity=0.6, line=dict(width=1, color='black')), jitter=0.5, pointpos=0)
                     update_layout_square(fig_box, target_feat, "Group", "Log2 Intensity", width=500, height=500)
                     st.plotly_chart(fig_box, use_container_width=False)
+
