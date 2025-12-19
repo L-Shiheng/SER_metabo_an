@@ -36,7 +36,6 @@ st.markdown("""
         font-size: 16px; font-weight: bold; padding: 10px 15px;
         background-color: white; border-radius: 5px 5px 0 0;
     }
-    /* 区分两个主要按钮的颜色 */
     div[data-testid="stForm"] button {
         width: 100%; background-color: #ff4b4b; color: white; font-weight: bold; border: none; padding: 0.5rem;
     }
@@ -111,7 +110,7 @@ def run_pairwise_statistics(df, group_col, case, control, features, equal_var=Fa
     return res_df
 
 # ==========================================
-# 2. Session State 初始化 (用于持久化数据)
+# 2. Session State 初始化
 # ==========================================
 if 'raw_df' not in st.session_state:
     st.session_state.raw_df = None
@@ -126,11 +125,10 @@ if 'data_loaded' not in st.session_state:
 with st.sidebar:
     st.header("🛠️ 数据控制台")
     
-    # --- Step 1: 文件选择 (不会触发处理，只保存文件对象) ---
+    # --- Step 1: 文件选择 ---
     st.markdown("#### 1. 上传 Sample Info (必选 for SERRF)")
     sample_info_file = st.file_uploader("Sample Info (.csv/.xlsx)", type=["csv", "xlsx"], key="info")
     
-    # 预读取 Info 表供 SERRF 选项使用 (非常快，不影响体验)
     info_df = None
     if sample_info_file:
         try:
@@ -147,7 +145,6 @@ with st.sidebar:
         if info_df is not None:
             c1, c2, c3 = st.columns(3)
             cols = list(info_df.columns)
-            # 智能猜测列名
             idx_order = next((i for i, c in enumerate(cols) if 'order' in c.lower()), 0)
             idx_class = next((i for i, c in enumerate(cols) if 'class' in c.lower() or 'type' in c.lower()), 0)
             
@@ -163,14 +160,12 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # --- Step 2: 手动触发数据处理 ---
-    # 使用 container 包裹按钮以应用自定义样式
+    # --- Step 2: 手动触发数据处理 (只处理数据，不渲染UI) ---
     process_container = st.container()
     process_container.markdown('<div class="process-btn">', unsafe_allow_html=True)
     start_process = process_container.button("📥 开始处理数据 (Load & Process)")
     process_container.markdown('</div>', unsafe_allow_html=True)
 
-    # --- 核心处理逻辑 (仅点击按钮后运行) ---
     if start_process:
         if not uploaded_files:
             st.error("请先上传数据文件！")
@@ -178,7 +173,7 @@ with st.sidebar:
             with st.spinner("正在解析、校正并合并数据，请稍候..."):
                 parsed_results = []
                 
-                # 1. 循环解析
+                # 循环解析
                 for i, file in enumerate(uploaded_files):
                     try:
                         file.seek(0)
@@ -190,14 +185,14 @@ with st.sidebar:
                             st.warning(f"{file.name}: {err}")
                             continue
                         
-                        # 2. 对齐 Info
+                        # 对齐 Info
                         if info_df is not None:
                             info_aligned = align_sample_info(df_t, info_df)
                             g_col = next((c for c in info_aligned.columns if c.lower() in ['group', 'class']), None)
                             if g_col:
                                 df_t['Group'] = info_aligned[g_col].fillna(df_t['Group']).values
                         
-                        # 3. SERRF 校正
+                        # SERRF 校正
                         if use_serrf and serrf_ready and info_df is not None:
                             if run_order_col in info_aligned.columns and sample_type_col in info_aligned.columns:
                                 num_cols = df_t.select_dtypes(include=[np.number]).columns.tolist()
@@ -229,14 +224,14 @@ with st.sidebar:
                     
                     st.session_state.data_loaded = True
                     st.success("✅ 数据加载完成！请在下方设置参数并运行分析。")
+                    # 强制重新运行以刷新主界面显示
+                    st.rerun() 
                 else:
                     st.error("没有成功加载任何文件")
 
-    # --- Step 3: 显示已加载状态 & 下载 ---
+    # --- Step 3: 显示状态与下载 (常驻) ---
     if st.session_state.data_loaded and st.session_state.raw_df is not None:
         raw_df = st.session_state.raw_df
-        feature_meta = st.session_state.feature_meta
-        
         st.info(f"当前数据: {len(raw_df)} 样本 x {len(raw_df.columns)-2} 特征")
         
         csv_data = raw_df.to_csv(index=False).encode('utf-8')
@@ -244,7 +239,7 @@ with st.sidebar:
         
         st.divider()
 
-        # --- Step 4: 参数设置与分析 (Form) ---
+        # --- Step 4: 统计分析表单 (放在侧边栏) ---
         with st.form(key='analysis_form'):
             st.markdown("### ⚙️ 统计分析参数")
             
@@ -280,9 +275,10 @@ with st.sidebar:
             submit_button = st.form_submit_button(label='🚀 运行统计分析 (Run Stats)')
 
 # ==========================================
-# 4. 主面板展示区
+# 4. 主面板展示区 (受 Session State 控制)
 # ==========================================
 
+# 场景 1: 未加载数据
 if not st.session_state.data_loaded:
     st.title("🧬 MetaboAnalyst Pro")
     st.info("👈 请在左侧上传数据并点击 **“开始处理数据”** 按钮。")
@@ -295,10 +291,16 @@ if not st.session_state.data_loaded:
     """)
     st.stop()
 
-# 以下逻辑只有在 data_loaded = True 且 点击了 submit_button 后运行
-# 或者为了保持页面显示，如果是刚加载完数据，可以先不显示结果，或者显示默认结果
-# 这里我们设计为：必须点击 Form 的提交按钮才计算统计，避免卡顿
+# 场景 2: 已加载数据，但未点击“运行统计分析”
+if not submit_button:
+    st.title("✅ 数据已准备就绪")
+    st.markdown("👈 请在左侧 **“统计分析参数”** 表单中选择组别，然后点击 **“运行统计分析”**。")
+    # 可选：显示原始数据预览
+    st.subheader("数据预览")
+    st.dataframe(st.session_state.raw_df.head(50))
+    st.stop()
 
+# 场景 3: 点击了“运行统计分析” (开始计算)
 if submit_button:
     if len(selected_groups) < 2:
         st.error("请至少选择 2 个组！")
@@ -406,8 +408,9 @@ if submit_button:
                     fig_vip.add_vline(x=1.0, line_dash="dash", line_color="black")
                     fig_vip.update_traces(marker_line_color='black', marker_line_width=1.0)
                     fig_vip.update_layout(template="simple_white", width=800, height=700, 
-                                          title={'text': "VIP Scores", 'x':0.5, 'xanchor': 'center'},
-                                          xaxis=dict(title="VIP Score"), yaxis=dict(title=""),
+                                          title={'text': "VIP Scores", 'x':0.5, 'xanchor': 'center', 'font': dict(size=20, family="Arial, bold")},
+                                          xaxis=dict(title="VIP Score", showline=True, mirror=True, linewidth=2, linecolor='black'),
+                                          yaxis=dict(title="", showline=True, mirror=True, linewidth=2, linecolor='black'),
                                           coloraxis_showscale=False, margin=dict(l=200, r=40, t=60, b=60))
                     st.plotly_chart(fig_vip, use_container_width=False)
 
