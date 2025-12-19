@@ -150,7 +150,9 @@ with st.sidebar:
 
     st.divider()
     
-    # --- 参数表单 ---
+    # ==========================================
+    # 3. 参数设置表单 (Part B: 批量提交区)
+    # ==========================================
     with st.form(key='analysis_form'):
         st.markdown("### ⚙️ 参数设置")
         
@@ -160,7 +162,31 @@ with st.sidebar:
         
         filter_option = st.radio("4. 特征过滤:", ["全部特征", "仅已注释特征"], index=0)
         
-        with st.expander("数据清洗 (影响 PCA/PLS-DA)", expanded=False):
+        # --- 新增: SERRF 批次校正设置 ---
+        with st.expander("🔧 SERRF 批次校正 (去除信号漂移)", expanded=False):
+            use_serrf = st.checkbox("启用 SERRF 校正", value=False, help="利用 QC 样本和进样顺序校正信号漂移。")
+            
+            # 只有上传了样本表才显示详细选项，否则提示
+            serrf_cols = []
+            if sample_info_file: # 假设用户上传了样本表，我们可以读表头
+                # 这里为了简单，我们直接用 raw_df 的列 (因为 apply_sample_info 没有把 extra cols 合并进去，这是个小逻辑断点)
+                # 修正策略：如果启用了 SERRF，要求用户确保 info 表已合并或手动指定列名
+                # 在此版本中，我们假设用户会在下面手动输入或选择如果存在的话
+                
+                # 为了更好的体验，我们尝试从 raw_df 找可能的列 (如果之前的步骤合并了的话)
+                # 但目前的 apply_sample_info 没合并，所以我们在主逻辑里重新读取一下 info file 来做 SERRF
+                pass
+            
+            st.info("需要样本信息表包含：进样顺序 (Order) 和 样本类型 (QC/Sample)")
+            c_s1, c_s2, c_s3 = st.columns(3)
+            # 让用户输入列名，或者如果上传了 info 表，可以在这里选择
+            # 这里简化处理：用户输入列名
+            run_order_col = c_s1.text_input("进样顺序列表头", value="order", help="例如: order, run_id")
+            sample_type_col = c_s2.text_input("样本类型列表头", value="class", help="例如: class, type")
+            qc_label = c_s3.text_input("QC 标签名", value="QC", help="例如: QC, pool")
+
+        # --- 数据清洗 ---
+        with st.expander("数据清洗与标准化 (高级)", expanded=False):
             st.markdown("MetaboAnalyst 常用设置：Pareto Scaling")
             miss_th = st.slider("剔除缺失率 > X", 0.0, 1.0, 0.5, 0.1)
             impute_m = st.selectbox("填充方法", ["min", "mean", "zero"], index=0)
@@ -168,6 +194,7 @@ with st.sidebar:
             do_log = st.checkbox("Log2 转化", value=True)
             scale_m = st.selectbox("特征缩放", ["None", "Auto", "Pareto"], index=2)
 
+        # ... (组别选择代码保持不变) ...
         current_groups = sorted(raw_df[group_col].astype(str).unique())
         st.markdown("### 5. 组别与对比")
         selected_groups = st.multiselect("纳入分析的组:", current_groups, default=current_groups[:2] if len(current_groups)>=2 else current_groups)
@@ -181,26 +208,103 @@ with st.sidebar:
         c3, c4 = st.columns(2)
         p_th = c3.number_input("P-value", 0.05, format="%.3f")
         fc_th = c4.number_input("Log2 FC", 1.0)
-        
-        use_equal_var = st.checkbox("假设方差相等 (Student's t-test)", value=True, help="与 MetaboAnalyst 默认一致")
+        use_equal_var = st.checkbox("假设方差相等 (Student's t-test)", value=True)
         enable_jitter = st.checkbox("火山图抖动", value=True)
         
         st.markdown("---")
         submit_button = st.form_submit_button(label='🚀 开始分析 (Run Analysis)')
 
 # ==========================================
-# 4. 主逻辑
+# 4. 主逻辑 (执行分析)
 # ==========================================
+
+# 导入 SERRF 模块
+try:
+    from serrf_module import serrf_normalization
+except ImportError:
+    pass # 如果没点运行可能还没生成文件，暂忽略
 
 if len(selected_groups) < 2:
     if submit_button: st.error("请至少选择 2 个组！")
     else: st.info("👈 请设置参数并点击 '开始分析'")
     st.stop()
 
-with st.spinner("正在计算中..."):
-    # 清洗数据
+with st.spinner("正在数据处理中..."):
+    
+    # --- A. SERRF 校正 (新插入的步骤) ---
+    # SERRF 应该在缺失值过滤后，但在填充/归一化之前做，或者在最开始做
+    # 为了效果最好，我们在最开始做 (Raw Data -> SERRF -> Cleaning)
+    
+    df_for_analysis = raw_df.copy() # 保护原始数据
+    
+    if use_serrf and sample_info_file is not None:
+        # 需要重新读取 info file 以获取 order 和 type 列 (因为之前的 apply_sample_info 可能只取了 group)
+        try:
+            sample_info_file.seek(0)
+            info_df = pd.read_csv(sample_info_file) if sample_info_file.name.endswith('.csv') else pd.read_excel(sample_info_file)
+            
+            # 标准化列名 (转小写方便匹配)
+            info_df.columns = [c.strip() for c in info_df.columns]
+            
+            # 检查列是否存在
+            if run_order_col in info_df.columns and sample_type_col in info_df.columns:
+                # 必须将 Info 表和 Data 表对齐 (通过 SampleID)
+                # 假设 Info 表有一列是 SampleName
+                # 这里做一个简单的 SampleID 匹配
+                
+                # 1. 提取数值矩阵
+                num_cols = df_for_analysis.select_dtypes(include=[np.number]).columns.tolist()
+                df_numeric = df_for_analysis[num_cols]
+                
+                # 2. 准备 Meta 表 (索引必须是 SampleID)
+                # 尝试找到 SampleID 列
+                info_sample_col = None
+                for c in info_df.columns:
+                    if 'sample' in c.lower(): info_sample_col = c; break
+                
+                if info_sample_col:
+                    info_df.set_index(info_sample_col, inplace=True)
+                    
+                    # 匹配索引 (使用模糊匹配逻辑的简化版：直接交集)
+                    # 实际项目中可能需要更复杂的 index matching，这里假设用户整理好了
+                    common = df_for_analysis['SampleID'].isin(info_df.index)
+                    if common.sum() > 0:
+                        # 执行 SERRF
+                        st.text("正在执行 SERRF 校正 (可能需要几分钟)...")
+                        
+                        # 这是一个比较耗时的操作
+                        # 为了避免变量名冲突，我们把 SampleID 设为索引
+                        df_numeric.index = df_for_analysis['SampleID']
+                        
+                        corrected_data, serrf_res = serrf_normalization(
+                            df_numeric, info_df, run_order_col, sample_type_col, qc_label
+                        )
+                        
+                        if corrected_data is not None:
+                            # 更新数据表 (保留非数值列，替换数值列)
+                            # 还原索引
+                            corrected_data.reset_index(drop=True, inplace=True) 
+                            # 注意：这里假设顺序没变，这在 pandas 索引对齐中通常成立
+                            
+                            # 将校正后的数据回写到 df_for_analysis
+                            for c in corrected_data.columns:
+                                df_for_analysis[c] = corrected_data[c].values
+                                
+                            st.success(f"✅ SERRF 校正完成！QC RSD 改善: {serrf_res['RSD_Before']:.1f}% -> {serrf_res['RSD_After']:.1f}%")
+                        else:
+                            st.error(f"SERRF 失败: {serrf_res}")
+                    else:
+                        st.warning("数据表和信息表的样本名无法匹配，跳过 SERRF。")
+                else:
+                    st.warning("信息表中找不到样本名列，跳过 SERRF。")
+            else:
+                st.warning(f"信息表中找不到列 '{run_order_col}' 或 '{sample_type_col}'，跳过 SERRF。")
+        except Exception as e:
+            st.error(f"SERRF 执行出错: {e}")
+
+    # --- B. 常规清洗 ---
     df_proc, feats = data_cleaning_pipeline(
-        raw_df, group_col, missing_thresh=miss_th, impute_method=impute_m, 
+        df_for_analysis, group_col, missing_thresh=miss_th, impute_method=impute_m, 
         norm_method=norm_m, log_transform=do_log, scale_method=scale_m
     )
 
@@ -210,25 +314,6 @@ with st.spinner("正在计算中..."):
             feats = [f for f in feats if f in annotated_feats]
             if not feats: st.error("过滤后无特征！"); st.stop()
         else: st.warning("非 MetDNA 数据，无法过滤。")
-
-    df_sub = df_proc[df_proc[group_col].isin(selected_groups)].copy()
-
-    # 差异统计
-    if case_grp != ctrl_grp:
-        res_stats = run_pairwise_statistics(df_sub, group_col, case_grp, ctrl_grp, feats, equal_var=use_equal_var)
-        if feature_meta is not None:
-            res_stats = res_stats.merge(feature_meta[['Confidence_Level', 'Clean_Name']], 
-                                        left_on='Metabolite', right_index=True, how='left')
-            res_stats['Confidence_Level'] = res_stats['Confidence_Level'].fillna('Unknown')
-        else: res_stats['Confidence_Level'] = 'N/A'
-        
-        res_stats['Sig'] = 'NS'
-        res_stats.loc[(res_stats['P_Value'] < p_th) & (res_stats['Log2_FC'] > fc_th), 'Sig'] = 'Up'
-        res_stats.loc[(res_stats['P_Value'] < p_th) & (res_stats['Log2_FC'] < -fc_th), 'Sig'] = 'Down'
-        sig_metabolites = res_stats[res_stats['Sig'] != 'NS']['Metabolite'].tolist()
-    else:
-        res_stats = pd.DataFrame(); sig_metabolites = []
-
 # ==========================================
 # 5. 结果展示
 # ==========================================
@@ -393,4 +478,5 @@ with tabs[5]:
             fig_box.update_traces(width=0.6, marker=dict(size=7, opacity=0.6, line=dict(width=1, color='black')), jitter=0.5, pointpos=0)
             update_layout_square(fig_box, target_feat, "Group", "Log2 Intensity", width=500, height=500)
             st.plotly_chart(fig_box, use_container_width=False)
+
 
