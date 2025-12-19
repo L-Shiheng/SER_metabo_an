@@ -5,8 +5,9 @@ import os
 
 def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     """
-    解析 MetDNA 导出文件 (v3.2)
+    解析 MetDNA 导出文件 (v3.2 智能去重版)
     """
+    # 1. 读取文件
     try:
         if file_type == 'csv':
             df = pd.read_csv(file_buffer)
@@ -15,7 +16,7 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     except Exception as e:
         return None, None, f"读取失败: {str(e)}"
 
-    # 2. 智能识别样本列
+    # 2. 智能识别样本列 (数值列检测)
     known_meta_cols = [
         'peak_name', 'mz', 'rt', 'id', 'id_zhulab', 'name', 'formula', 
         'confidence_level', 'smiles', 'inchikey', 'isotope', 'adduct', 
@@ -26,9 +27,11 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     ]
     
     sample_cols = []
+    
     for col in df.columns:
         if col in known_meta_cols: continue
         try:
+            # 简单判断：如果是数值列且大部分非空，认为是样本
             numeric_series = pd.to_numeric(df[col], errors='coerce')
             if numeric_series.notna().mean() > 0.5:
                 sample_cols.append(col)
@@ -78,7 +81,6 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     df_transposed.reset_index(inplace=True)
     df_transposed.rename(columns={'index': 'SampleID'}, inplace=True)
     
-    # 默认猜测分组 (会被 sample info 覆盖)
     def guess_group(s):
         s_no = re.sub(r'\d+$', '', str(s))
         return s_no.rstrip('._-') or "Unknown"
@@ -93,7 +95,6 @@ def merge_multiple_dfs(results_list):
     """
     if not results_list: return None, None, "无数据"
     
-    # 1. 竞选最佳代谢物
     best_features = {}
     for file_idx, (df, meta, fname) in enumerate(results_list):
         numeric_df = df.select_dtypes(include=[np.number])
@@ -103,7 +104,6 @@ def merge_multiple_dfs(results_list):
             try:
                 clean_name = meta.loc[feat_id, 'Clean_Name']
             except KeyError: continue
-            
             curr_score = intensities.get(feat_id, 0)
             
             if clean_name not in best_features:
@@ -113,19 +113,16 @@ def merge_multiple_dfs(results_list):
                 if curr_score > prev_score:
                     best_features[clean_name] = (file_idx, feat_id, curr_score)
     
-    # 2. 构建保留列表
     files_features_to_keep = {i: [] for i in range(len(results_list))}
     for c_name, (f_idx, f_id, score) in best_features.items():
         files_features_to_keep[f_idx].append(f_id)
         
-    # 3. 拼接
     dfs_to_concat = []
     base_group_series = None
     
     for i, (df, meta, fname) in enumerate(results_list):
         if 'SampleID' in df.columns: df = df.set_index('SampleID')
         
-        # 暂时移除 Group，最后再加
         if 'Group' in df.columns:
             if base_group_series is None: base_group_series = df['Group']
             df = df.drop(columns=['Group'])
@@ -150,74 +147,82 @@ def merge_multiple_dfs(results_list):
     full_df.reset_index(inplace=True)
     full_df.rename(columns={'index': 'SampleID'}, inplace=True)
     
-    # 4. 整理元数据
     final_ids = [fid for f_list in files_features_to_keep.values() for fid in f_list]
     all_meta = pd.concat([res[1] for res in results_list])
     merged_meta = all_meta.loc[final_ids]
     
     return full_df, merged_meta, None
 
+def align_sample_info(data_df, info_df):
+    """
+    关键函数：将 info_df 对齐到 data_df 的样本ID
+    解决样本名不一致的问题 (如 . vs -)
+    """
+    # 1. 自动寻找 SampleID 列
+    sample_col = None
+    for c in info_df.columns:
+        if c.lower() in ['sample', 'sampleid', 'sample.name', 'name', 'id']:
+            sample_col = c
+            break
+            
+    if not sample_col:
+        # 如果没找到，尝试假设第一列
+        sample_col = info_df.columns[0]
+        
+    # 2. 构建归一化映射 (Normalize)
+    # 去除所有非字母数字符号，转小写
+    def normalize(s): return re.sub(r'[^a-zA-Z0-9]', '', str(s)).lower()
+    
+    # 建立 info 字典: normalized_name -> info_row
+    info_map = {}
+    for idx, row in info_df.iterrows():
+        key = normalize(row[sample_col])
+        info_map[key] = row
+        
+    # 3. 重建一个新的对齐后的 info dataframe
+    aligned_data = []
+    
+    for sid in data_df['SampleID']:
+        key = normalize(sid)
+        if key in info_map:
+            aligned_data.append(info_map[key])
+        else:
+            # 如果没匹配上，填充空行
+            empty_row = pd.Series([np.nan]*len(info_df.columns), index=info_df.columns)
+            aligned_data.append(empty_row)
+            
+    aligned_df = pd.DataFrame(aligned_data)
+    # 确保索引和 data_df 完全一致
+    aligned_df.index = data_df.index 
+    
+    return aligned_df
+
 def apply_sample_info(df, info_file):
     """
-    应用样本信息表覆盖默认分组
-    支持模糊匹配 (忽略 . - _ 和大小写)
+    应用样本信息表覆盖默认分组 (旧版，用于合并后)
     """
     try:
-        if info_file.name.endswith('.csv'):
-            info_df = pd.read_csv(info_file)
-        else:
-            info_df = pd.read_excel(info_file)
-    except Exception as e:
-        return df, f"样本表读取失败: {e}"
+        if info_file.name.endswith('.csv'): info_df = pd.read_csv(info_file)
+        else: info_df = pd.read_excel(info_file)
+    except: return df, "样本表读取失败"
         
-    # 1. 识别列名
-    # 寻找 Sample 和 Group 列
-    sample_col = None
-    group_col = None
+    # 直接利用 align_sample_info 的逻辑
+    aligned_info = align_sample_info(df, info_df)
     
-    cols_lower = [c.lower() for c in info_df.columns]
+    # 寻找 Group 列
+    grp_col = None
+    for c in aligned_info.columns:
+        if c.lower() in ['group', 'class', 'type']: grp_col = c; break
     
-    # 找 Sample 列
-    if 'sample.name' in cols_lower: sample_col = info_df.columns[cols_lower.index('sample.name')]
-    elif 'sample' in cols_lower: sample_col = info_df.columns[cols_lower.index('sample')]
-    elif 'sampleid' in cols_lower: sample_col = info_df.columns[cols_lower.index('sampleid')]
+    match_count = aligned_info[grp_col].notna().sum() if grp_col else 0
     
-    # 找 Group 列
-    if 'group' in cols_lower: group_col = info_df.columns[cols_lower.index('group')]
-    elif 'class' in cols_lower: group_col = info_df.columns[cols_lower.index('class')]
-    
-    if not sample_col or not group_col:
-        return df, "在信息表中未找到 Sample 或 Group 列，请检查表头。"
-        
-    # 2. 构建映射字典 (Normalizer)
-    # MetDNA 可能会把 '-' 变成 '.'，这里我们把两者都统一成纯字母数字来匹配
-    def normalize_name(s):
-        return re.sub(r'[^a-zA-Z0-9]', '', str(s)).lower()
-        
-    # 构建: normalized_name -> group
-    info_map = {}
-    for _, row in info_df.iterrows():
-        key = normalize_name(row[sample_col])
-        info_map[key] = row[group_col]
-        
-    # 3. 应用映射
-    mapped_groups = []
-    match_count = 0
-    
-    for _, row in df.iterrows():
-        sid = row['SampleID']
-        norm_sid = normalize_name(sid)
-        
-        if norm_sid in info_map:
-            mapped_groups.append(info_map[norm_sid])
-            match_count += 1
-        else:
-            # 没匹配上就保留原来的 (或者标记 Unknown)
-            mapped_groups.append(row.get('Group', 'Unknown'))
-            
-    df['Group'] = mapped_groups
-    
-    return df, f"成功匹配 {match_count}/{len(df)} 个样本的分组信息。"
+    if grp_col:
+        # 填充原来的 Group
+        # 使用 combine_first: 如果 aligned 有值就用 aligned，否则保留原值
+        df['Group'] = aligned_info[grp_col].fillna(df['Group']).values
+        return df, f"成功匹配 {match_count} 个样本"
+    else:
+        return df, "未在信息表中找到 Group 列"
 
 def make_unique(series):
     seen = set()
@@ -232,7 +237,7 @@ def make_unique(series):
         result.append(new_item)
     return result
 
-# --- 清洗管道 (不变) ---
+# --- 清洗管道 ---
 def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min', 
                            norm_method='None', log_transform=True, scale_method='None'):
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
