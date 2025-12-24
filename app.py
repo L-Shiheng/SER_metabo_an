@@ -292,13 +292,24 @@ if not submit_button:
         cols = st.columns(len(st.session_state.qc_report))
         for idx, (fname, report) in enumerate(st.session_state.qc_report.items()):
             with cols[idx % 3]:
-                if report['Status'] == 'Success':
+                before = report.get('RSD_Before', 0)
+                after = report.get('RSD_After', 0)
+                status = report['Status']
+                
+                # 计算变化量：正数代表RSD升高(变差)，负数代表RSD降低(变好)
+                delta_val = after - before
+                
+                if status == 'Success':
                     st.success(f"📄 {fname}")
-                    before = report['RSD_Before']
-                    after = report['RSD_After']
-                    delta = before - after
-                    st.metric("QC RSD", f"{after:.1f}%", f"-{delta:.1f}% (原{before:.1f}%)")
-                else: st.error(f"📄 {fname}: {report['Status']}")
+                    # delta_color="inverse" : 下降(负数)显示绿色，上升(正数)显示红色
+                    st.metric("QC RSD", f"{after:.1f}%", f"{delta_val:.1f}%", delta_color="inverse")
+                    st.caption(f"原 RSD: {before:.1f}%")
+                elif status == 'Skipped (Worse)':
+                    st.warning(f"📄 {fname}")
+                    st.metric("QC RSD (保持原值)", f"{before:.1f}%", f"校正后会变差 (+{delta_val:.1f}%)", delta_color="off")
+                    st.caption("已自动回滚为原始数据")
+                else:
+                    st.error(f"📄 {fname}: {status}")
     st.markdown("---")
     st.subheader("数据预览")
     st.dataframe(st.session_state.raw_df.head(50))
@@ -428,3 +439,4 @@ if submit_button:
                     box_df = df_sub[[group_col, target_feat]].copy(); fig_box = px.box(box_df, x=group_col, y=target_feat, color=group_col, color_discrete_sequence=GROUP_COLORS, points="all", width=500, height=500)
                     fig_box.update_traces(width=0.6, marker=dict(size=7, opacity=0.6, line=dict(width=1, color='black')), jitter=0.5, pointpos=0); update_layout_square(fig_box, target_feat, "Group", "Log2 Intensity", width=500, height=500)
                     st.plotly_chart(fig_box, use_container_width=False)
+
