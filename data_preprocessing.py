@@ -2,12 +2,27 @@ import pandas as pd
 import numpy as np
 import re
 import os
+import streamlit as st
+
+# ====================
+# 核心解析与合并逻辑
+# ====================
+
+def make_unique(series):
+    seen = set()
+    result = []
+    for item in series:
+        new_item = item
+        counter = 1
+        while new_item in seen:
+            new_item = f"{item}_{counter}"
+            counter += 1
+        seen.add(new_item)
+        result.append(new_item)
+    return result
 
 def parse_metdna_file(file_buffer, file_name, file_type='csv'):
-    """
-    解析 MetDNA 导出文件 (v3.2 智能去重版)
-    """
-    # 1. 读取文件
+    """解析 MetDNA 导出文件"""
     try:
         if file_type == 'csv':
             df = pd.read_csv(file_buffer)
@@ -16,7 +31,7 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     except Exception as e:
         return None, None, f"读取失败: {str(e)}"
 
-    # 2. 智能识别样本列 (数值列检测)
+    # 智能识别样本列 (数值列检测)
     known_meta_cols = [
         'peak_name', 'mz', 'rt', 'id', 'id_zhulab', 'name', 'formula', 
         'confidence_level', 'smiles', 'inchikey', 'isotope', 'adduct', 
@@ -27,11 +42,9 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     ]
     
     sample_cols = []
-    
     for col in df.columns:
         if col in known_meta_cols: continue
         try:
-            # 简单判断：如果是数值列且大部分非空，认为是样本
             numeric_series = pd.to_numeric(df[col], errors='coerce')
             if numeric_series.notna().mean() > 0.5:
                 sample_cols.append(col)
@@ -40,7 +53,7 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     if not sample_cols:
         return None, None, "未找到样本数据列。"
 
-    # 3. 构建元数据
+    # 构建元数据
     file_tag = os.path.splitext(os.path.basename(file_name))[0]
     file_tag = re.sub(r'[^a-zA-Z0-9]', '_', file_tag)
     
@@ -72,15 +85,16 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     meta_df['Metabolite_ID'] = make_unique(meta_df['Metabolite_ID'])
     meta_df.set_index('Metabolite_ID', inplace=True)
     
-    # 4. 提取数据
+    # 提取数据
     df_data = df[sample_cols].copy()
     df_data.index = meta_df.index
     df_transposed = df_data.T
     
-    # 5. 生成 SampleID
+    # 生成 SampleID
     df_transposed.reset_index(inplace=True)
     df_transposed.rename(columns={'index': 'SampleID'}, inplace=True)
     
+    # 默认分组
     def guess_group(s):
         s_no = re.sub(r'\d+$', '', str(s))
         return s_no.rstrip('._-') or "Unknown"
@@ -90,9 +104,7 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     return df_transposed, meta_df, None
 
 def merge_multiple_dfs(results_list):
-    """
-    合并多文件逻辑 (智能保留最大峰面积)
-    """
+    """合并多文件逻辑"""
     if not results_list: return None, None, "无数据"
     
     best_features = {}
@@ -122,7 +134,6 @@ def merge_multiple_dfs(results_list):
     
     for i, (df, meta, fname) in enumerate(results_list):
         if 'SampleID' in df.columns: df = df.set_index('SampleID')
-        
         if 'Group' in df.columns:
             if base_group_series is None: base_group_series = df['Group']
             df = df.drop(columns=['Group'])
@@ -154,98 +165,80 @@ def merge_multiple_dfs(results_list):
     return full_df, merged_meta, None
 
 def align_sample_info(data_df, info_df):
-    """
-    关键函数：将 info_df 对齐到 data_df 的样本ID
-    解决样本名不一致的问题 (如 . vs -)
-    """
-    # 1. 自动寻找 SampleID 列
+    """对齐样本信息表"""
     sample_col = None
     for c in info_df.columns:
         if c.lower() in ['sample', 'sampleid', 'sample.name', 'name', 'id']:
-            sample_col = c
-            break
-            
-    if not sample_col:
-        # 如果没找到，尝试假设第一列
-        sample_col = info_df.columns[0]
+            sample_col = c; break
+    if not sample_col: sample_col = info_df.columns[0]
         
-    # 2. 构建归一化映射 (Normalize)
-    # 去除所有非字母数字符号，转小写
     def normalize(s): return re.sub(r'[^a-zA-Z0-9]', '', str(s)).lower()
     
-    # 建立 info 字典: normalized_name -> info_row
     info_map = {}
     for idx, row in info_df.iterrows():
         key = normalize(row[sample_col])
         info_map[key] = row
         
-    # 3. 重建一个新的对齐后的 info dataframe
     aligned_data = []
-    
     for sid in data_df['SampleID']:
         key = normalize(sid)
-        if key in info_map:
-            aligned_data.append(info_map[key])
-        else:
-            # 如果没匹配上，填充空行
-            empty_row = pd.Series([np.nan]*len(info_df.columns), index=info_df.columns)
-            aligned_data.append(empty_row)
+        if key in info_map: aligned_data.append(info_map[key])
+        else: aligned_data.append(pd.Series([np.nan]*len(info_df.columns), index=info_df.columns))
             
     aligned_df = pd.DataFrame(aligned_data)
-    # 确保索引和 data_df 完全一致
     aligned_df.index = data_df.index 
-    
     return aligned_df
 
 def apply_sample_info(df, info_file):
-    """
-    应用样本信息表覆盖默认分组 (旧版，用于合并后)
-    """
+    """简单的样本信息应用"""
     try:
         if info_file.name.endswith('.csv'): info_df = pd.read_csv(info_file)
         else: info_df = pd.read_excel(info_file)
-    except: return df, "样本表读取失败"
-        
-    # 直接利用 align_sample_info 的逻辑
+    except: return df, "读取失败"
     aligned_info = align_sample_info(df, info_df)
-    
-    # 寻找 Group 列
-    grp_col = None
-    for c in aligned_info.columns:
-        if c.lower() in ['group', 'class', 'type']: grp_col = c; break
-    
-    match_count = aligned_info[grp_col].notna().sum() if grp_col else 0
-    
+    grp_col = next((c for c in aligned_info.columns if c.lower() in ['group', 'class', 'type']), None)
     if grp_col:
-        # 填充原来的 Group
-        # 使用 combine_first: 如果 aligned 有值就用 aligned，否则保留原值
         df['Group'] = aligned_info[grp_col].fillna(df['Group']).values
-        return df, f"成功匹配 {match_count} 个样本"
-    else:
-        return df, "未在信息表中找到 Group 列"
+        return df, "成功匹配"
+    return df, "无Group列"
 
-def make_unique(series):
-    seen = set()
-    result = []
-    for item in series:
-        new_item = item
-        counter = 1
-        while new_item in seen:
-            new_item = f"{item}_{counter}"
-            counter += 1
-        seen.add(new_item)
-        result.append(new_item)
-    return result
+# ====================
+# 数据清洗与归一化
+# ====================
 
-# --- 清洗管道 ---
+def pqn_normalization(df):
+    """
+    PQN (Probabilistic Quotient Normalization)
+    适用于生物流体 (尿液/血清) 的金标准归一化方法
+    """
+    # 1. 计算参考谱 (中位数)
+    reference = df.median(axis=0)
+    # 防止除以0
+    reference[reference <= 0] = 1e-6
+    
+    # 2. 计算每个样本相对于参考谱的商 (Quotients)
+    quotients = df.div(reference, axis=1)
+    
+    # 3. 计算每个样本的稀释因子 (商的中位数)
+    dilution_factors = quotients.median(axis=1)
+    
+    # 4. 归一化
+    return df.div(dilution_factors, axis=0)
+
+@st.cache_data(show_spinner=False)
 def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min', 
                            norm_method='None', log_transform=True, scale_method='None'):
+    """
+    数据清洗管道 (带缓存)
+    """
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     if group_col in numeric_cols: numeric_cols.remove(group_col)
+    
     meta_cols = [c for c in df.columns if c not in numeric_cols]
     data_df = df[numeric_cols].copy()
     meta_df = df[meta_cols].copy()
     
+    # 1. 缺失值处理
     missing_ratio = data_df.isnull().mean()
     cols_to_keep = missing_ratio[missing_ratio <= missing_thresh].index
     data_df = data_df[cols_to_keep]
@@ -257,19 +250,30 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
         elif impute_method == 'zero': data_df = data_df.fillna(0)
         data_df = data_df.fillna(0)
 
+    # 2. 样本归一化 (新增 PQN)
     if norm_method == 'Sum':
         data_df = data_df.div(data_df.sum(axis=1), axis=0) * data_df.sum(axis=1).mean()
     elif norm_method == 'Median':
         data_df = data_df.div(data_df.median(axis=1), axis=0) * data_df.median(axis=1).mean()
+    elif norm_method == 'PQN':
+        data_df = pqn_normalization(data_df)
 
+    # 3. 对数转化
     if log_transform:
-        if not (data_df < 0).any().any(): data_df = np.log2(data_df + 1)
+        # 加上微小值防止 log(0)
+        if (data_df <= 0).any().any():
+            data_df = np.log2(data_df + 1)
+        else:
+            data_df = np.log2(data_df)
 
+    # 4. 特征缩放 (Scaling)
     if scale_method == 'Auto':
         data_df = (data_df - data_df.mean()) / data_df.std()
     elif scale_method == 'Pareto':
         data_df = (data_df - data_df.mean()) / np.sqrt(data_df.std())
 
+    # 移除方差极小的列
     var_mask = data_df.var() > 1e-9
     data_df = data_df.loc[:, var_mask]
+    
     return pd.concat([meta_df, data_df], axis=1), data_df.columns.tolist()
