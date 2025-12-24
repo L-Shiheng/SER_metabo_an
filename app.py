@@ -79,23 +79,14 @@ def get_ellipse_coordinates(x, y, std_mult=2):
     ell_coords = np.dot(R, np.array([ell_x, ell_y]))
     return ell_coords[0] + mean_x, ell_coords[1] + mean_y
 
-# --- 关键修复：calculate_vips 函数 ---
 def calculate_vips(model):
-    t = model.x_scores_
-    w = model.x_weights_
-    q = model.y_loadings_
-    p, h = w.shape
-    vips = np.zeros((p,))
-    
-    # 修复：移除 reshape，保持 s 为一维数组 (h,)
+    t = model.x_scores_; w = model.x_weights_; q = model.y_loadings_
+    p, h = w.shape; vips = np.zeros((p,))
     s = np.diag(t.T @ t @ q.T @ q)
     total_s = np.sum(s)
-    
     for i in range(p):
         weight = np.array([(w[i, j] / np.linalg.norm(w[:, j]))**2 for j in range(h)])
-        # 修复：此时 s @ weight 为标量，可以直接开方赋值
         vips[i] = np.sqrt(p * (s @ weight) / total_s)
-        
     return vips
 
 @st.cache_data
@@ -127,6 +118,8 @@ if 'feature_meta' not in st.session_state:
     st.session_state.feature_meta = None
 if 'data_loaded' not in st.session_state:
     st.session_state.data_loaded = False
+if 'qc_report' not in st.session_state:
+    st.session_state.qc_report = {} # 存储 SERRF 报告
 
 # ==========================================
 # 3. 侧边栏：数据上传与预处理
@@ -134,7 +127,7 @@ if 'data_loaded' not in st.session_state:
 with st.sidebar:
     st.header("🛠️ 数据控制台")
     
-    # --- Step 1: 文件选择 ---
+    # 1. 样本信息
     st.markdown("#### 1. 上传 Sample Info (必选 for SERRF)")
     sample_info_file = st.file_uploader("Sample Info (.csv/.xlsx)", type=["csv", "xlsx"], key="info")
     
@@ -143,10 +136,11 @@ with st.sidebar:
         try:
             if sample_info_file.name.endswith('.csv'): info_df = pd.read_csv(sample_info_file)
             else: info_df = pd.read_excel(sample_info_file)
-            st.caption("✅ Info 表已就绪")
+            st.caption(f"✅ Info 表已就绪 ({len(info_df)} 行)")
         except: pass
 
-    st.markdown("#### 2. SERRF 设置")
+    # 2. SERRF 设置
+    st.markdown("#### 2. SERRF 批次校正")
     use_serrf = st.checkbox("启用 SERRF 校正", value=False)
     serrf_ready = False
     
@@ -154,6 +148,7 @@ with st.sidebar:
         if info_df is not None:
             c1, c2, c3 = st.columns(3)
             cols = list(info_df.columns)
+            # 智能猜测列名
             idx_order = next((i for i, c in enumerate(cols) if 'order' in c.lower()), 0)
             idx_class = next((i for i, c in enumerate(cols) if 'class' in c.lower() or 'type' in c.lower()), 0)
             
@@ -164,25 +159,28 @@ with st.sidebar:
         else:
             st.warning("⚠️ 请先上传 Sample Info")
 
+    # 3. 数据上传
     st.markdown("#### 3. 上传 MetDNA 数据")
     uploaded_files = st.file_uploader("MetDNA文件 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
     
     st.markdown("---")
     
-    # --- Step 2: 手动触发数据处理 ---
+    # 4. 手动触发按钮
     process_container = st.container()
     process_container.markdown('<div class="process-btn">', unsafe_allow_html=True)
     start_process = process_container.button("📥 开始处理数据 (Load & Process)")
     process_container.markdown('</div>', unsafe_allow_html=True)
 
     if start_process:
+        st.session_state.qc_report = {} # 重置报告
+        
         if not uploaded_files:
             st.error("请先上传数据文件！")
         else:
             with st.spinner("正在解析、校正并合并数据，请稍候..."):
                 parsed_results = []
+                all_success = True
                 
-                # 循环解析
                 for i, file in enumerate(uploaded_files):
                     try:
                         file.seek(0)
@@ -194,30 +192,51 @@ with st.sidebar:
                             st.warning(f"{file.name}: {err}")
                             continue
                         
-                        # 对齐 Info
+                        # 对齐 Sample Info
+                        info_aligned = None
                         if info_df is not None:
                             info_aligned = align_sample_info(df_t, info_df)
                             g_col = next((c for c in info_aligned.columns if c.lower() in ['group', 'class']), None)
                             if g_col:
                                 df_t['Group'] = info_aligned[g_col].fillna(df_t['Group']).values
                         
-                        # SERRF 校正
-                        if use_serrf and serrf_ready and info_df is not None:
-                            if run_order_col in info_aligned.columns and sample_type_col in info_aligned.columns:
-                                num_cols = df_t.select_dtypes(include=[np.number]).columns.tolist()
-                                df_numeric = df_t[num_cols]
-                                corrected_data, serrf_stats = serrf_normalization(
-                                    df_numeric, info_aligned, run_order_col, sample_type_col, qc_label
-                                )
-                                if corrected_data is not None:
-                                    for c in corrected_data.columns: df_t[c] = corrected_data[c].values
+                        # 执行 SERRF
+                        if use_serrf and serrf_ready and info_aligned is not None:
+                            # --- 关键诊断：检查匹配数量 ---
+                            n_matched = info_aligned[run_order_col].notna().sum()
+                            n_total = len(df_t)
+                            
+                            if n_matched == 0:
+                                st.error(f"❌ {file.name}: 样本名匹配失败 (0/{n_total})！请检查 Info 表名字是否与数据一致。SERRF 已跳过。")
+                                # 记录失败
+                                st.session_state.qc_report[unique_name] = {"Status": "Failed (No Match)"}
                             else:
-                                st.warning(f"{file.name}: 缺少SERRF所需列，跳过")
+                                if run_order_col in info_aligned.columns and sample_type_col in info_aligned.columns:
+                                    num_cols = df_t.select_dtypes(include=[np.number]).columns.tolist()
+                                    df_numeric = df_t[num_cols]
+                                    
+                                    corrected_data, serrf_stats = serrf_normalization(
+                                        df_numeric, info_aligned, run_order_col, sample_type_col, qc_label
+                                    )
+                                    
+                                    if corrected_data is not None:
+                                        for c in corrected_data.columns: df_t[c] = corrected_data[c].values
+                                        # 记录成功报告
+                                        st.session_state.qc_report[unique_name] = {
+                                            "Status": "Success",
+                                            "RSD_Before": serrf_stats['RSD_Before'],
+                                            "RSD_After": serrf_stats['RSD_After']
+                                        }
+                                    else:
+                                        st.error(f"❌ {file.name}: SERRF 失败 (可能是QC数量不足)")
+                                else:
+                                    st.warning(f"{file.name}: 缺少SERRF所需列")
 
                         parsed_results.append((df_t, meta, unique_name))
                         
                     except Exception as e:
                         st.error(f"处理 {file.name} 失败: {e}")
+                        all_success = False
 
                 if parsed_results:
                     if len(parsed_results) == 1:
@@ -232,22 +251,21 @@ with st.sidebar:
                             st.session_state.feature_meta = m_meta
                     
                     st.session_state.data_loaded = True
-                    st.success("✅ 数据加载完成！请在下方设置参数并运行分析。")
+                    st.success("✅ 数据加载完成！")
                     st.rerun() 
                 else:
                     st.error("没有成功加载任何文件")
 
-    # --- Step 3: 显示状态与下载 (常驻) ---
+    # 显示下载按钮
     if st.session_state.data_loaded and st.session_state.raw_df is not None:
         raw_df = st.session_state.raw_df
         st.info(f"当前数据: {len(raw_df)} 样本 x {len(raw_df.columns)-2} 特征")
-        
         csv_data = raw_df.to_csv(index=False).encode('utf-8')
         st.download_button("📥 导出合并数据", csv_data, "processed_data.csv", "text/csv")
         
         st.divider()
 
-        # --- Step 4: 统计分析表单 ---
+        # 统计分析表单
         with st.form(key='analysis_form'):
             st.markdown("### ⚙️ 统计分析参数")
             
@@ -289,31 +307,39 @@ with st.sidebar:
 if not st.session_state.data_loaded:
     st.title("🧬 MetaboAnalyst Pro")
     st.info("👈 请在左侧上传数据并点击 **“开始处理数据”** 按钮。")
-    st.markdown("""
-    ### 使用指南
-    1. **上传文件**：支持多个 MetDNA 导出的 CSV/Excel 文件。
-    2. **样本信息**：如果需要做 SERRF 校正，请上传 Sample Info 表。
-    3. **点击处理**：点击绿色按钮进行解析、校正和合并。
-    4. **运行分析**：数据加载后，设置统计参数并运行。
-    """)
     st.stop()
 
-# 场景 2: 已加载数据，但未点击“运行统计分析”
+# 场景 2: 已加载数据
 if not submit_button:
     st.title("✅ 数据已准备就绪")
-    st.markdown("👈 请在左侧 **“统计分析参数”** 表单中选择组别，然后点击 **“运行统计分析”**。")
+    
+    # --- 新增: SERRF 效果评估面板 ---
+    if st.session_state.qc_report:
+        st.subheader("🔍 SERRF 校正效果评估")
+        cols = st.columns(len(st.session_state.qc_report))
+        for idx, (fname, report) in enumerate(st.session_state.qc_report.items()):
+            with cols[idx % 3]:
+                if report['Status'] == 'Success':
+                    st.success(f"📄 {fname}")
+                    before = report['RSD_Before']
+                    after = report['RSD_After']
+                    delta = before - after
+                    st.metric("QC RSD 改善", f"{after:.1f}%", f"-{delta:.1f}% (Before: {before:.1f}%)")
+                else:
+                    st.error(f"📄 {fname}: {report['Status']}")
+    
+    st.markdown("---")
+    st.markdown("👈 请在左侧选择组别，然后点击 **“运行统计分析”**。")
     st.subheader("数据预览")
     st.dataframe(st.session_state.raw_df.head(50))
     st.stop()
 
-# 场景 3: 点击了“运行统计分析”
+# 场景 3: 运行分析
 if submit_button:
     if len(selected_groups) < 2:
-        st.error("请至少选择 2 个组！")
-        st.stop()
+        st.error("请至少选择 2 个组！"); st.stop()
 
     with st.spinner("正在进行统计分析..."):
-        # 获取 Session 中的数据
         raw_df = st.session_state.raw_df
         feature_meta = st.session_state.feature_meta
 
@@ -354,23 +380,9 @@ if submit_button:
         st.title("📊 代谢组学分析报告")
         st.caption(f"对比: {case_grp} vs {ctrl_grp} | 特征数: {len(feats)} | Scaling: {scale_m}")
 
-        # QC Check
-        qc_mask = df_sub[group_col].astype(str).str.contains('QC', case=False)
-        if qc_mask.sum() >= 2:
-             with st.expander("🔍 质量控制 (QC Quality Check)", expanded=True):
-                 qc_data = df_sub.loc[qc_mask, feats]
-                 qc_rsd = (qc_data.std() / qc_data.mean()) * 100
-                 median_rsd = qc_rsd.median()
-                 c1, c2 = st.columns([1, 3])
-                 c1.metric("QC Median RSD", f"{median_rsd:.1f}%")
-                 fig_rsd = px.histogram(qc_rsd, nbins=50, title="QC RSD Distribution", 
-                                        labels={'value': 'RSD (%)'}, width=600, height=300)
-                 fig_rsd.add_vline(x=20, line_dash="dash", line_color="green")
-                 fig_rsd.update_layout(showlegend=False, margin=dict(l=20, r=20, t=40, b=20))
-                 c2.plotly_chart(fig_rsd, use_container_width=True)
-
         tabs = st.tabs(["📊 PCA", "🎯 PLS-DA", "⭐ VIP 特征", "🌋 火山图", "🔥 热图", "📑 详情"])
 
+        # PCA
         with tabs[0]:
             c1, c2, c3 = st.columns([1, 2, 1])
             with c2:
@@ -386,6 +398,7 @@ if submit_button:
                     update_layout_square(fig_pca, "PCA Score Plot", f"PC1 ({var[0]:.1%})", f"PC2 ({var[1]:.1%})")
                     st.plotly_chart(fig_pca, use_container_width=False)
 
+        # PLS-DA
         with tabs[1]:
             c1, c2, c3 = st.columns([1, 2, 1])
             with c2:
@@ -409,6 +422,7 @@ if submit_button:
                     update_layout_square(fig_pls, "PLS-DA Score Plot", "Component 1", "Component 2")
                     st.plotly_chart(fig_pls, use_container_width=False)
 
+        # VIP
         with tabs[2]:
             st.markdown("### Top 25 VIP Features")
             if 'pls_model' in locals():
@@ -432,6 +446,7 @@ if submit_button:
                                           coloraxis_showscale=False, margin=dict(l=200, r=40, t=60, b=60))
                     st.plotly_chart(fig_vip, use_container_width=False)
 
+        # Volcano
         with tabs[3]:
             c1, c2, c3 = st.columns([1, 2, 1])
             with c2:
@@ -454,6 +469,7 @@ if submit_button:
                 update_layout_square(fig_vol, f"Volcano: {case_grp} vs {ctrl_grp}", "Log2 Fold Change", "-Log10(P-value)")
                 st.plotly_chart(fig_vol, use_container_width=False)
 
+        # Heatmap
         with tabs[4]:
             if not sig_metabolites: st.info("无显著差异物")
             else:
@@ -478,6 +494,7 @@ if submit_button:
                         st.pyplot(g.fig)
                     except Exception as e: st.error(f"绘图错误: {e}")
 
+        # Details
         with tabs[5]:
             c1, c2 = st.columns([1.5, 1])
             with c1:
