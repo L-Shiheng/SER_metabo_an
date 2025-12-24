@@ -79,14 +79,23 @@ def get_ellipse_coordinates(x, y, std_mult=2):
     ell_coords = np.dot(R, np.array([ell_x, ell_y]))
     return ell_coords[0] + mean_x, ell_coords[1] + mean_y
 
+# --- 关键修复：calculate_vips 函数 ---
 def calculate_vips(model):
-    t = model.x_scores_; w = model.x_weights_; q = model.y_loadings_
-    p, h = w.shape; vips = np.zeros((p,))
-    s = np.diag(t.T @ t @ q.T @ q).reshape(h, -1)
+    t = model.x_scores_
+    w = model.x_weights_
+    q = model.y_loadings_
+    p, h = w.shape
+    vips = np.zeros((p,))
+    
+    # 修复：移除 reshape，保持 s 为一维数组 (h,)
+    s = np.diag(t.T @ t @ q.T @ q)
     total_s = np.sum(s)
+    
     for i in range(p):
         weight = np.array([(w[i, j] / np.linalg.norm(w[:, j]))**2 for j in range(h)])
-        vips[i] = np.sqrt(p * (s.T @ weight) / total_s)
+        # 修复：此时 s @ weight 为标量，可以直接开方赋值
+        vips[i] = np.sqrt(p * (s @ weight) / total_s)
+        
     return vips
 
 @st.cache_data
@@ -160,7 +169,7 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # --- Step 2: 手动触发数据处理 (只处理数据，不渲染UI) ---
+    # --- Step 2: 手动触发数据处理 ---
     process_container = st.container()
     process_container.markdown('<div class="process-btn">', unsafe_allow_html=True)
     start_process = process_container.button("📥 开始处理数据 (Load & Process)")
@@ -224,7 +233,6 @@ with st.sidebar:
                     
                     st.session_state.data_loaded = True
                     st.success("✅ 数据加载完成！请在下方设置参数并运行分析。")
-                    # 强制重新运行以刷新主界面显示
                     st.rerun() 
                 else:
                     st.error("没有成功加载任何文件")
@@ -239,7 +247,7 @@ with st.sidebar:
         
         st.divider()
 
-        # --- Step 4: 统计分析表单 (放在侧边栏) ---
+        # --- Step 4: 统计分析表单 ---
         with st.form(key='analysis_form'):
             st.markdown("### ⚙️ 统计分析参数")
             
@@ -275,10 +283,9 @@ with st.sidebar:
             submit_button = st.form_submit_button(label='🚀 运行统计分析 (Run Stats)')
 
 # ==========================================
-# 4. 主面板展示区 (受 Session State 控制)
+# 4. 主面板展示区
 # ==========================================
 
-# 场景 1: 未加载数据
 if not st.session_state.data_loaded:
     st.title("🧬 MetaboAnalyst Pro")
     st.info("👈 请在左侧上传数据并点击 **“开始处理数据”** 按钮。")
@@ -295,12 +302,11 @@ if not st.session_state.data_loaded:
 if not submit_button:
     st.title("✅ 数据已准备就绪")
     st.markdown("👈 请在左侧 **“统计分析参数”** 表单中选择组别，然后点击 **“运行统计分析”**。")
-    # 可选：显示原始数据预览
     st.subheader("数据预览")
     st.dataframe(st.session_state.raw_df.head(50))
     st.stop()
 
-# 场景 3: 点击了“运行统计分析” (开始计算)
+# 场景 3: 点击了“运行统计分析”
 if submit_button:
     if len(selected_groups) < 2:
         st.error("请至少选择 2 个组！")
@@ -348,44 +354,23 @@ if submit_button:
         st.title("📊 代谢组学分析报告")
         st.caption(f"对比: {case_grp} vs {ctrl_grp} | 特征数: {len(feats)} | Scaling: {scale_m}")
 
-        # --- 新增: 质量控制 (QC Check) ---
-        # 如果做了 SERRF，显示 RSD 改善情况
-        if 'serrf_stats' in locals() and serrf_stats: # 检查是否有 SERRF 结果变量
-             # 注意：这需要您在前面的循环里收集所有文件的 serrf_stats，或者只显示最后一个
-             # 为了简单，我们这里只显示当前的 RSD（如果是合并后的数据，重新算一下当前 QC 的 RSD）
-             pass
-        
-        # 实时计算当前数据的 QC RSD
-        qc_mask = df_sub[group_col] == (qc_label if 'qc_label' in locals() else 'QC')
-        # 如果没找到叫 QC 的组，尝试找包含 QC 字符的
-        if qc_mask.sum() == 0:
-             qc_mask = df_sub[group_col].astype(str).str.contains('QC', case=False)
-        
+        # QC Check
+        qc_mask = df_sub[group_col].astype(str).str.contains('QC', case=False)
         if qc_mask.sum() >= 2:
              with st.expander("🔍 质量控制 (QC Quality Check)", expanded=True):
                  qc_data = df_sub.loc[qc_mask, feats]
-                 # 计算每个特征的 RSD
                  qc_rsd = (qc_data.std() / qc_data.mean()) * 100
                  median_rsd = qc_rsd.median()
-                 
                  c1, c2 = st.columns([1, 3])
-                 c1.metric("QC Median RSD", f"{median_rsd:.1f}%", help="< 20% 为优，< 30% 可接受")
-                 
-                 # 绘制 RSD 分布直方图
+                 c1.metric("QC Median RSD", f"{median_rsd:.1f}%")
                  fig_rsd = px.histogram(qc_rsd, nbins=50, title="QC RSD Distribution", 
                                         labels={'value': 'RSD (%)'}, width=600, height=300)
-                 fig_rsd.add_vline(x=20, line_dash="dash", line_color="green", annotation_text="Excellent (20%)")
-                 fig_rsd.add_vline(x=30, line_dash="dash", line_color="orange", annotation_text="Acceptable (30%)")
+                 fig_rsd.add_vline(x=20, line_dash="dash", line_color="green")
                  fig_rsd.update_layout(showlegend=False, margin=dict(l=20, r=20, t=40, b=20))
                  c2.plotly_chart(fig_rsd, use_container_width=True)
-                 
-                 if median_rsd > 30:
-                     st.warning("⚠️ 警告：QC 样本的变异系数 (RSD) 较高 (>30%)。这可能解释了为什么 PCA 中 QC 比较分散。请检查 SERRF 参数或原始数据质量。")
 
         tabs = st.tabs(["📊 PCA", "🎯 PLS-DA", "⭐ VIP 特征", "🌋 火山图", "🔥 热图", "📑 详情"])
 
-
-        # PCA
         with tabs[0]:
             c1, c2, c3 = st.columns([1, 2, 1])
             with c2:
@@ -401,7 +386,6 @@ if submit_button:
                     update_layout_square(fig_pca, "PCA Score Plot", f"PC1 ({var[0]:.1%})", f"PC2 ({var[1]:.1%})")
                     st.plotly_chart(fig_pca, use_container_width=False)
 
-        # PLS-DA
         with tabs[1]:
             c1, c2, c3 = st.columns([1, 2, 1])
             with c2:
@@ -425,7 +409,6 @@ if submit_button:
                     update_layout_square(fig_pls, "PLS-DA Score Plot", "Component 1", "Component 2")
                     st.plotly_chart(fig_pls, use_container_width=False)
 
-        # VIP
         with tabs[2]:
             st.markdown("### Top 25 VIP Features")
             if 'pls_model' in locals():
@@ -449,7 +432,6 @@ if submit_button:
                                           coloraxis_showscale=False, margin=dict(l=200, r=40, t=60, b=60))
                     st.plotly_chart(fig_vip, use_container_width=False)
 
-        # Volcano
         with tabs[3]:
             c1, c2, c3 = st.columns([1, 2, 1])
             with c2:
@@ -472,7 +454,6 @@ if submit_button:
                 update_layout_square(fig_vol, f"Volcano: {case_grp} vs {ctrl_grp}", "Log2 Fold Change", "-Log10(P-value)")
                 st.plotly_chart(fig_vol, use_container_width=False)
 
-        # Heatmap
         with tabs[4]:
             if not sig_metabolites: st.info("无显著差异物")
             else:
@@ -497,7 +478,6 @@ if submit_button:
                         st.pyplot(g.fig)
                     except Exception as e: st.error(f"绘图错误: {e}")
 
-        # Details
         with tabs[5]:
             c1, c2 = st.columns([1.5, 1])
             with c1:
@@ -521,4 +501,3 @@ if submit_button:
                     fig_box.update_traces(width=0.6, marker=dict(size=7, opacity=0.6, line=dict(width=1, color='black')), jitter=0.5, pointpos=0)
                     update_layout_square(fig_box, target_feat, "Group", "Log2 Intensity", width=500, height=500)
                     st.plotly_chart(fig_box, use_container_width=False)
-
