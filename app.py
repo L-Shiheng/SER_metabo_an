@@ -113,6 +113,8 @@ if 'raw_df' not in st.session_state: st.session_state.raw_df = None
 if 'feature_meta' not in st.session_state: st.session_state.feature_meta = None
 if 'data_loaded' not in st.session_state: st.session_state.data_loaded = False
 if 'qc_report' not in st.session_state: st.session_state.qc_report = {}
+# 新增：用于存储所有见过的样本名，方便用户选择剔除
+if 'all_sample_ids' not in st.session_state: st.session_state.all_sample_ids = []
 
 # ==========================================
 # 3. 侧边栏
@@ -131,13 +133,27 @@ with st.sidebar:
             st.caption(f"✅ 已加载 {len(info_df)} 行样本信息")
         except: st.error("文件读取失败")
 
-    # 2. Scope (逻辑修正：优先选择数据范围)
-    st.markdown("#### 2. 数据处理范围")
+    # --- 新增功能：样本剔除 (黑名单) ---
+    st.markdown("#### 2. 样本管理 (剔除异常点)")
+    # 如果已有加载的数据，使用数据里的ID；否则使用空列表（直到用户运行一次）
+    candidate_samples = st.session_state.all_sample_ids if st.session_state.all_sample_ids else []
+    
+    excluded_samples = st.multiselect(
+        "选择要剔除的样本 (Exclude):",
+        options=candidate_samples,
+        default=[],
+        help="在此处选中的样本将在读取数据后、分析开始前被直接删除。适用于去除 PCA 中的离群点或坏针。"
+    )
+    if excluded_samples:
+        st.warning(f"⚠️ 将剔除 {len(excluded_samples)} 个样本。请点击下方“开始处理”生效。")
+
+    # 3. Scope
+    st.markdown("#### 3. 数据处理范围")
     feature_scope = st.radio("加载特征范围:", ["仅已注释特征 (推荐)", "全部特征"], index=0, 
                            help="【仅已注释】：仅加载有名字的特征，速度快。\n【全部特征】：加载所有信号。")
 
-    # 3. SERRF
-    st.markdown("#### 3. SERRF 批次校正")
+    # 4. SERRF
+    st.markdown("#### 4. SERRF 批次校正")
     use_serrf = st.checkbox("启用 SERRF 校正", value=False)
     serrf_ready = False
     
@@ -172,18 +188,18 @@ with st.sidebar:
         else:
             st.warning("⚠️ 需上传 Info 表才能启用校正")
 
-    # 4. Upload
-    st.markdown("#### 4. 上传 MetDNA 数据")
+    # 5. Upload
+    st.markdown("#### 5. 上传 MetDNA 数据")
     uploaded_files = st.file_uploader("MetDNA文件 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
     st.markdown("---")
     
-    # 5. Button
+    # 6. Button
     process_container = st.container()
     process_container.markdown('<div class="process-btn">', unsafe_allow_html=True)
     start_process = process_container.button("📥 开始处理数据 (Load & Process)")
     process_container.markdown('</div>', unsafe_allow_html=True)
 
-    # 6. Logic
+    # 7. Logic
     if start_process:
         st.session_state.qc_report = {}
         if not uploaded_files:
@@ -194,6 +210,8 @@ with st.sidebar:
             
             with st.spinner("正在启动高性能处理引擎..."):
                 parsed_results = []
+                # 临时收集本轮所有样本ID，用于更新下拉框
+                current_run_samples = set()
                 
                 for i, file in enumerate(uploaded_files):
                     status_text.text(f"正在处理 ({i+1}/{len(uploaded_files)}): {file.name} ...")
@@ -205,11 +223,24 @@ with st.sidebar:
                         df_t, meta, err = parse_metdna_file(file, unique_name, file_type=file_type)
                         if err: st.warning(f"{file.name}: {err}"); continue
                         
-                        # Filter Scope (Global)
+                        # --- 关键修改：在此处执行样本剔除 ---
+                        if excluded_samples:
+                            # 记录剔除前数量
+                            n_before = len(df_t)
+                            # 过滤：保留不在黑名单里的样本
+                            df_t = df_t[~df_t['SampleID'].isin(excluded_samples)]
+                            n_after = len(df_t)
+                            if n_before > n_after:
+                                st.caption(f"📄 {unique_name}: 已剔除 {n_before - n_after} 个异常样本")
+                        
+                        # 收集样本ID用于下次选择
+                        current_run_samples.update(df_t['SampleID'].tolist())
+
+                        # Filter Feature Scope
                         if feature_scope.startswith("仅已注释"):
                             annotated_ids = meta[meta['Is_Annotated'] == True].index
                             cols_to_keep = ['SampleID', 'Group', 'Source_Files'] + [c for c in df_t.columns if c in annotated_ids]
-                            cols_to_keep = [c for c in cols_to_keep if c in df_t.columns] # Safety
+                            cols_to_keep = [c for c in cols_to_keep if c in df_t.columns] 
                             df_t = df_t[cols_to_keep]
                             meta = meta.loc[meta.index.isin(df_t.columns)]
                             
@@ -263,6 +294,9 @@ with st.sidebar:
                     progress_bar.progress((i + 1) / len(uploaded_files))
 
                 if parsed_results:
+                    # 更新 Session 中的所有样本列表，供 UI 使用
+                    st.session_state.all_sample_ids = sorted(list(current_run_samples))
+                    
                     if len(parsed_results) == 1:
                         st.session_state.raw_df = parsed_results[0][0]
                         st.session_state.feature_meta = parsed_results[0][1]
@@ -295,13 +329,11 @@ with st.sidebar:
             default_grp_idx = non_num.index('Group') if 'Group' in non_num else 0
             group_col = st.selectbox("分组列", non_num, index=default_grp_idx)
             
-            # 这里保留用于二次筛选，例如加载了全部，但只想看注释的
             filter_option = st.radio("统计分析范围:", ["全部特征", "仅已注释特征"], index=0)
             
             with st.expander("数据清洗与归一化 (高级)", expanded=False):
                 miss_th = st.slider("剔除缺失率 > X", 0.0, 1.0, 0.5, 0.1)
                 
-                # KNN 逻辑
                 impute_m_display = st.selectbox("填充方法", ["min (推荐)", "KNN (高精度但慢)", "mean", "zero"], index=0)
                 if "min" in impute_m_display: impute_m = "min"
                 elif "KNN" in impute_m_display: impute_m = "KNN"
@@ -502,7 +534,6 @@ if submit_button:
                     box_df = df_sub[[group_col, target_feat]].copy()
                     points_arg = "all" if show_points else "outliers"
                     fig_box = px.box(box_df, x=group_col, y=target_feat, color=group_col, color_discrete_sequence=GROUP_COLORS, points=points_arg, width=500, height=500)
-                    # 修正：pointpos=0 让点居中
                     fig_box.update_traces(width=box_width, marker=dict(size=6, opacity=0.7, line=dict(width=1, color='black')), jitter=0.5, pointpos=0)
                     update_layout_square(fig_box, target_feat, "Group", "Log2 Intensity", width=500, height=500)
                     st.plotly_chart(fig_box, use_container_width=False)
