@@ -27,7 +27,6 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     try:
         if file_type == 'csv':
             try:
-                # Musk Opt: PyArrow 引擎极速读取
                 df = pd.read_csv(file_buffer, engine='pyarrow')
             except:
                 file_buffer.seek(0)
@@ -37,7 +36,7 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     except Exception as e:
         return None, None, f"读取失败: {str(e)}"
 
-    # 智能识别样本列 (向量化筛选)
+    # 智能识别样本列
     known_meta_cols = {
         'peak_name', 'mz', 'rt', 'id', 'id_zhulab', 'name', 'formula', 
         'confidence_level', 'smiles', 'inchikey', 'isotope', 'adduct', 
@@ -101,11 +100,20 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     return df_transposed, meta_df, None
 
 def merge_multiple_dfs(results_list):
-    """合并多文件逻辑"""
+    """合并多文件逻辑 (增加来源追踪)"""
     if not results_list: return None, None, "无数据"
     
     best_features = {}
+    # 用于记录每个样本出现在哪些文件中
+    sample_sources = {} 
+    
     for file_idx, (df, meta, fname) in enumerate(results_list):
+        # 记录样本来源
+        if 'SampleID' in df.columns:
+            for sid in df['SampleID']:
+                if sid not in sample_sources: sample_sources[sid] = set()
+                sample_sources[sid].add(fname) # fname 是 unique_name
+        
         numeric_df = df.select_dtypes(include=[np.number])
         intensities = numeric_df.sum(axis=0)
         
@@ -154,6 +162,13 @@ def merge_multiple_dfs(results_list):
         
     full_df.reset_index(inplace=True)
     full_df.rename(columns={'index': 'SampleID'}, inplace=True)
+    
+    # --- 新增：添加 Source_Files 列 ---
+    def get_source_str(sid):
+        sources = sample_sources.get(sid, set())
+        return "; ".join(sorted(list(sources)))
+    
+    full_df['Source_Files'] = full_df['SampleID'].apply(get_source_str)
     
     final_ids = [fid for f_list in files_features_to_keep.values() for fid in f_list]
     all_meta = pd.concat([res[1] for res in results_list])
@@ -205,7 +220,7 @@ def apply_sample_info(df, info_file):
     return df, "无Group列"
 
 # ====================
-# 清洗与归一化 (含 KNN & PQN)
+# 清洗与归一化
 # ====================
 
 def pqn_normalization(df):
@@ -220,8 +235,12 @@ def pqn_normalization(df):
 def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min', 
                            norm_method='None', log_transform=True, scale_method='None'):
     """数据清洗管道"""
+    # 排除非数值列 (现在包括 Source_Files)
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    if group_col in numeric_cols: numeric_cols.remove(group_col)
+    
+    # 确保 Group 和 Source_Files 不在数值列中
+    exclude_cols = [group_col, 'SampleID', 'Source_Files']
+    numeric_cols = [c for c in numeric_cols if c not in exclude_cols]
     
     meta_cols = [c for c in df.columns if c not in numeric_cols]
     data_df = df[numeric_cols].copy()
@@ -232,7 +251,7 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
     cols_to_keep = missing_ratio[missing_ratio <= missing_thresh].index
     data_df = data_df[cols_to_keep]
     
-    # 2. 填充 (KNN集成)
+    # 2. 填充
     if data_df.isnull().sum().sum() > 0:
         if impute_method == 'min': 
             data_df = data_df.fillna(data_df.min() * 0.5)
@@ -241,7 +260,6 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
         elif impute_method == 'median': 
             data_df = data_df.fillna(data_df.median())
         elif impute_method == 'KNN':
-            # KNN
             imputer = KNNImputer(n_neighbors=5)
             filled_vals = imputer.fit_transform(data_df)
             data_df = pd.DataFrame(filled_vals, columns=data_df.columns, index=data_df.index)
@@ -250,7 +268,7 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
         
         data_df = data_df.fillna(0)
 
-    # 3. 归一化 (PQN集成)
+    # 3. 归一化
     if norm_method == 'Sum':
         data_df = data_df.div(data_df.sum(axis=1), axis=0) * data_df.sum(axis=1).mean()
     elif norm_method == 'Median':
