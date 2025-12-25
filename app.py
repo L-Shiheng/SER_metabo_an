@@ -131,17 +131,20 @@ with st.sidebar:
             st.caption(f"✅ 已加载 {len(info_df)} 行样本信息")
         except: st.error("文件读取失败")
 
-    # 2. SERRF
-    st.markdown("#### 2. SERRF 批次校正")
+    # 2. Data Scope (Global Setting) - 逻辑修正：放到 SERRF 前面
+    st.markdown("#### 2. 数据处理范围")
+    # 这是一个全局设置，决定了后面所有操作的特征基数
+    feature_scope = st.radio("加载特征范围:", ["仅已注释特征 (推荐)", "全部特征"], index=0, 
+                           help="【仅已注释】：仅加载有名字的特征，速度快，适合发现生物学意义。\n【全部特征】：加载所有信号（包含未知物），适合全面探索。")
+
+    # 3. SERRF Setting
+    st.markdown("#### 3. SERRF 批次校正")
     use_serrf = st.checkbox("启用 SERRF 校正", value=False)
     serrf_ready = False
     
     if use_serrf:
         if info_df is not None:
-            serrf_scope = st.radio("校正范围:", ["仅已注释特征 (推荐)", "全部特征"], index=0, 
-                                   help="仅校正有名字的特征，未注释的特征将丢弃。速度快且保留精华。")
-            
-            # Auto-Detect
+            # Auto-Detect Columns
             cols = list(info_df.columns)
             cols_lower = [c.lower() for c in cols]
             
@@ -150,6 +153,8 @@ with st.sidebar:
             
             type_candidates = [i for i, c in enumerate(cols_lower) if any(x in c for x in ['class', 'type', 'group'])]
             final_type_idx = type_candidates[0] if type_candidates else 0
+            
+            # Find QC label
             found_qc_col = False
             for idx in type_candidates:
                 if info_df[cols[idx]].astype(str).str.contains('qc', case=False).any():
@@ -167,20 +172,22 @@ with st.sidebar:
             qc_label = c3.text_input("QC标签", value=default_qc_label)
             serrf_ready = True
         else:
-            st.warning("⚠️ 请先上传 Sample Info")
+            st.warning("⚠️ 需上传 Info 表才能启用校正")
 
-    # 3. Data
-    st.markdown("#### 3. 上传 MetDNA 数据")
+    # 4. Upload Data
+    st.markdown("#### 4. 上传 MetDNA 数据")
     uploaded_files = st.file_uploader("MetDNA文件 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
     st.markdown("---")
     
-    # 4. Button
+    # 5. Button
     process_container = st.container()
     process_container.markdown('<div class="process-btn">', unsafe_allow_html=True)
     start_process = process_container.button("📥 开始处理数据 (Load & Process)")
     process_container.markdown('</div>', unsafe_allow_html=True)
 
-    # 5. Logic
+    # ====================
+    # 处理逻辑
+    # ====================
     if start_process:
         st.session_state.qc_report = {}
         if not uploaded_files:
@@ -189,7 +196,7 @@ with st.sidebar:
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            with st.spinner("正在执行高性能处理流程..."):
+            with st.spinner("正在启动高性能处理引擎 (Vectorized Parsing & SERRF)..."):
                 parsed_results = []
                 
                 for i, file in enumerate(uploaded_files):
@@ -202,25 +209,25 @@ with st.sidebar:
                         df_t, meta, err = parse_metdna_file(file, unique_name, file_type=file_type)
                         if err: st.warning(f"{file.name}: {err}"); continue
                         
-                        # A. SERRF前置过滤
-                        if use_serrf and serrf_ready and serrf_scope.startswith("仅已注释"):
+                        # --- 逻辑修正：无论是否 SERRF，都先根据 scope 过滤 ---
+                        if feature_scope.startswith("仅已注释"):
                             annotated_ids = meta[meta['Is_Annotated'] == True].index
                             cols_to_keep = ['SampleID', 'Group'] + [c for c in df_t.columns if c in annotated_ids]
                             df_t = df_t[cols_to_keep]
                             meta = meta.loc[meta.index.isin(df_t.columns)]
                             
-                        # B. 对齐 Info
+                        # 对齐 Info
                         info_aligned = None
                         if info_df is not None:
                             info_aligned = align_sample_info(df_t, info_df)
                             g_col = next((c for c in info_aligned.columns if c.lower() in ['group', 'class']), None)
                             if g_col: df_t['Group'] = info_aligned[g_col].fillna(df_t['Group']).values
                         
-                        # C. 执行 SERRF (含智能回滚)
+                        # SERRF (仅在勾选且Info存在时执行)
                         if use_serrf and serrf_ready and info_aligned is not None:
                             n_matched = info_aligned[run_order_col].notna().sum()
                             if n_matched == 0:
-                                st.error(f"❌ {file.name}: 样本匹配失败，跳过校正。")
+                                st.error(f"❌ {file.name}: 样本名匹配失败，跳过校正。")
                                 st.session_state.qc_report[unique_name] = {"Status": "Failed (No Match)"}
                             else:
                                 if run_order_col in info_aligned.columns and sample_type_col in info_aligned.columns:
@@ -232,6 +239,7 @@ with st.sidebar:
                                     )
                                     
                                     if corrected_data is not None:
+                                        # 智能回滚
                                         rsd_before = serrf_stats['RSD_Before']
                                         rsd_after = serrf_stats['RSD_After']
                                         
@@ -245,7 +253,7 @@ with st.sidebar:
                                                 "Status": "Success", "RSD_Before": rsd_before, "RSD_After": rsd_after
                                             }
                                     else:
-                                        st.error(f"❌ {file.name}: SERRF 计算失败")
+                                        st.error(f"❌ {file.name}: SERRF 失败")
                                 else:
                                     st.warning(f"{file.name}: 缺少列")
 
@@ -275,7 +283,7 @@ with st.sidebar:
                 else:
                     st.error("加载失败")
 
-    # --- 常驻功能区 ---
+    # --- Export ---
     if st.session_state.data_loaded and st.session_state.raw_df is not None:
         raw_df = st.session_state.raw_df
         st.info(f"数据概览: {len(raw_df)} 样本 x {len(raw_df.columns)-2} 特征")
@@ -291,12 +299,12 @@ with st.sidebar:
             default_grp_idx = non_num.index('Group') if 'Group' in non_num else 0
             group_col = st.selectbox("分组列", non_num, index=default_grp_idx)
             
-            filter_option = st.radio("统计范围:", ["全部特征", "仅已注释特征"], index=0)
+            # 这里的 filter_option 是用于统计时的二次过滤，保持存在
+            filter_option = st.radio("统计分析范围:", ["全部特征", "仅已注释特征"], index=0)
             
             with st.expander("数据清洗与归一化 (高级)", expanded=False):
                 miss_th = st.slider("剔除缺失率 > X", 0.0, 1.0, 0.5, 0.1)
                 
-                # KNN 选项映射
                 impute_m_display = st.selectbox("填充方法", ["min (推荐)", "KNN (高精度但慢)", "mean", "zero"], index=0)
                 if "min" in impute_m_display: impute_m = "min"
                 elif "KNN" in impute_m_display: impute_m = "KNN"
@@ -344,7 +352,7 @@ if not submit_button:
                 elif report['Status'] == 'Skipped (Worse)':
                     st.warning(f"📄 {fname}")
                     delta = report['RSD_After'] - report['RSD_Before']
-                    st.metric("QC RSD (回滚)", f"{report['RSD_Before']:.1f}%", f"校正变差 (+{delta:.1f}%)", delta_color="off")
+                    st.metric("QC RSD (回滚)", f"{report['RSD_Before']:.1f}%", f"变差 (+{delta:.1f}%)", delta_color="off")
                 else: st.error(f"📄 {fname}: {report['Status']}")
     st.markdown("---")
     st.subheader("原始数据预览")
@@ -480,7 +488,7 @@ if submit_button:
                     st.dataframe(display_df[[c for c in ["Name", "Log2_FC", "P_Value", "FDR", "Confidence_Level"] if c in display_df]].style.format({"Log2_FC": "{:.2f}", "P_Value": "{:.2e}", "FDR": "{:.2e}"}).background_gradient(subset=['P_Value'], cmap="Reds_r", vmin=0, vmax=0.05), use_container_width=True, height=600)
             with c2:
                 st.subheader("箱线图")
-                # 箱线图修复：叠加散点
+                # 箱线图逻辑修复
                 c_box1, c_box2 = st.columns(2)
                 show_points = c_box1.checkbox("显示散点", value=True)
                 box_width = c_box2.slider("箱体宽度", 0.1, 1.0, 0.5)
@@ -488,9 +496,10 @@ if submit_button:
                 feat_options = sorted(feats); def_ix = feat_options.index(sig_metabolites[0]) if sig_metabolites else 0; target_feat = st.selectbox("选择代谢物", feat_options, index=def_ix)
                 if target_feat:
                     box_df = df_sub[[group_col, target_feat]].copy()
-                    # 修复点：pointpos=0 让点在中间
+                    # 关键修改：points=all 或 outliers
                     points_arg = "all" if show_points else "outliers"
                     fig_box = px.box(box_df, x=group_col, y=target_feat, color=group_col, color_discrete_sequence=GROUP_COLORS, points=points_arg, width=500, height=500)
+                    # 关键修改：pointpos=0 让点居中
                     fig_box.update_traces(width=box_width, marker=dict(size=6, opacity=0.7, line=dict(width=1, color='black')), jitter=0.5, pointpos=0)
                     update_layout_square(fig_box, target_feat, "Group", "Log2 Intensity", width=500, height=500)
                     st.plotly_chart(fig_box, use_container_width=False)
