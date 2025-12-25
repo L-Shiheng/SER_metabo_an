@@ -3,7 +3,7 @@ import numpy as np
 import re
 import os
 import streamlit as st
-from sklearn.impute import KNNImputer  # 导入 KNN
+from sklearn.impute import KNNImputer
 
 # ====================
 # 核心工具函数
@@ -23,11 +23,11 @@ def make_unique(series):
     return result
 
 def parse_metdna_file(file_buffer, file_name, file_type='csv'):
-    """解析 MetDNA 导出文件 (高性能版)"""
+    """解析 MetDNA 导出文件 (高性能向量化版)"""
     try:
         if file_type == 'csv':
-            # 尝试使用 pyarrow 引擎加速，失败则回退
             try:
+                # Musk Opt: PyArrow 引擎极速读取
                 df = pd.read_csv(file_buffer, engine='pyarrow')
             except:
                 file_buffer.seek(0)
@@ -37,7 +37,7 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     except Exception as e:
         return None, None, f"读取失败: {str(e)}"
 
-    # 智能识别样本列
+    # 智能识别样本列 (向量化筛选)
     known_meta_cols = {
         'peak_name', 'mz', 'rt', 'id', 'id_zhulab', 'name', 'formula', 
         'confidence_level', 'smiles', 'inchikey', 'isotope', 'adduct', 
@@ -47,11 +47,9 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
         'id_hmdb', 'id_metacyc', 'stereo_isomer_id', 'stereo_isomer_name'
     }
     
-    sample_cols = []
-    # 快速筛选：先排除已知元数据列，再检查是否为数值
     potential_cols = [c for c in df.columns if c not in known_meta_cols]
+    sample_cols = []
     if potential_cols:
-        # 抽样前5行检查，提高速度
         subset = df[potential_cols].head(5)
         is_numeric = subset.apply(lambda x: pd.to_numeric(x, errors='coerce').notna().all())
         sample_cols = is_numeric[is_numeric].index.tolist()
@@ -66,20 +64,17 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     if 'name' not in df.columns: df['name'] = ""
     if 'confidence_level' not in df.columns: df['confidence_level'] = 'Unknown'
     
-    # 向量化处理 ID 生成
+    # 向量化字符串操作
     df['name'] = df['name'].fillna("").astype(str)
     mask_annotated = (df['name'] != "") & (df['name'].str.lower() != "nan")
     
     clean_names = df['name'].str.split(';', expand=True)[0]
     
-    # 未注释ID: m/z_RT
     mz_str = df['mz'].map('{:.4f}'.format).astype(str) if 'mz' in df.columns else ""
     rt_str = df['rt'].map('{:.2f}'.format).astype(str) if 'rt' in df.columns else ""
     unannotated_ids = "m/z" + mz_str + "_RT" + rt_str + "_" + file_tag
     
     final_ids = np.where(mask_annotated, clean_names + "_" + file_tag, unannotated_ids)
-    
-    # 去重
     final_ids = make_unique(final_ids)
 
     meta_df = pd.DataFrame({
@@ -97,11 +92,10 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     df_data.index = meta_df.index
     df_transposed = df_data.T
     
-    # 生成 SampleID
     df_transposed.reset_index(inplace=True)
     df_transposed.rename(columns={'index': 'SampleID'}, inplace=True)
     
-    # 默认分组猜测
+    # 向量化 Group 提取
     df_transposed['Group'] = df_transposed['SampleID'].astype(str).str.extract(r'([^\d]+)')[0].str.strip('._-').fillna("Unknown")
     
     return df_transposed, meta_df, None
@@ -172,7 +166,6 @@ def align_sample_info(data_df, info_df):
     sample_col = None
     cols_lower = [c.lower() for c in info_df.columns]
     
-    # 找 SampleID 列
     candidates = ['sample', 'sampleid', 'sample.name', 'name', 'id']
     for cand in candidates:
         if cand in cols_lower:
@@ -199,7 +192,7 @@ def align_sample_info(data_df, info_df):
     return aligned_df
 
 def apply_sample_info(df, info_file):
-    """(辅助) 简单的样本信息应用"""
+    """(辅助) 简单应用样本信息"""
     try:
         if info_file.name.endswith('.csv'): info_df = pd.read_csv(info_file)
         else: info_df = pd.read_excel(info_file)
@@ -212,11 +205,11 @@ def apply_sample_info(df, info_file):
     return df, "无Group列"
 
 # ====================
-# 清洗与归一化
+# 清洗与归一化 (含 KNN & PQN)
 # ====================
 
 def pqn_normalization(df):
-    """PQN (概率商归一化) - 适用于生物流体"""
+    """PQN (概率商归一化)"""
     reference = df.median(axis=0)
     reference[reference <= 0] = 1e-6
     quotients = df.div(reference, axis=1)
@@ -226,7 +219,7 @@ def pqn_normalization(df):
 @st.cache_data(show_spinner=False)
 def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min', 
                            norm_method='None', log_transform=True, scale_method='None'):
-    """数据清洗管道 (集成 KNN)"""
+    """数据清洗管道"""
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     if group_col in numeric_cols: numeric_cols.remove(group_col)
     
@@ -239,7 +232,7 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
     cols_to_keep = missing_ratio[missing_ratio <= missing_thresh].index
     data_df = data_df[cols_to_keep]
     
-    # 2. 填充 (Impute)
+    # 2. 填充 (KNN集成)
     if data_df.isnull().sum().sum() > 0:
         if impute_method == 'min': 
             data_df = data_df.fillna(data_df.min() * 0.5)
@@ -248,17 +241,16 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
         elif impute_method == 'median': 
             data_df = data_df.fillna(data_df.median())
         elif impute_method == 'KNN':
-            # --- KNN Imputation ---
+            # KNN
             imputer = KNNImputer(n_neighbors=5)
             filled_vals = imputer.fit_transform(data_df)
             data_df = pd.DataFrame(filled_vals, columns=data_df.columns, index=data_df.index)
         elif impute_method == 'zero': 
             data_df = data_df.fillna(0)
         
-        # 兜底填充
         data_df = data_df.fillna(0)
 
-    # 3. 归一化 (Norm)
+    # 3. 归一化 (PQN集成)
     if norm_method == 'Sum':
         data_df = data_df.div(data_df.sum(axis=1), axis=0) * data_df.sum(axis=1).mean()
     elif norm_method == 'Median':
@@ -266,14 +258,14 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
     elif norm_method == 'PQN':
         data_df = pqn_normalization(data_df)
 
-    # 4. 对数转化
+    # 4. Log
     if log_transform:
         if (data_df <= 0).any().any():
             data_df = np.log2(data_df + 1)
         else:
             data_df = np.log2(data_df)
 
-    # 5. 特征缩放
+    # 5. Scale
     if scale_method != 'None':
         mean = data_df.mean()
         std = data_df.std()
@@ -282,7 +274,7 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
         elif scale_method == 'Pareto':
             data_df = (data_df - mean) / np.sqrt(std)
 
-    # 6. 移除极小方差
+    # 6. Var
     var_mask = data_df.var() > 1e-9
     data_df = data_df.loc[:, var_mask]
     
