@@ -131,7 +131,7 @@ with st.sidebar:
             st.caption(f"✅ 已加载 {len(info_df)} 行样本信息")
         except: st.error("文件读取失败")
 
-    # 2. Scope
+    # 2. Scope (逻辑修正：优先选择数据范围)
     st.markdown("#### 2. 数据处理范围")
     feature_scope = st.radio("加载特征范围:", ["仅已注释特征 (推荐)", "全部特征"], index=0, 
                            help="【仅已注释】：仅加载有名字的特征，速度快。\n【全部特征】：加载所有信号。")
@@ -205,10 +205,11 @@ with st.sidebar:
                         df_t, meta, err = parse_metdna_file(file, unique_name, file_type=file_type)
                         if err: st.warning(f"{file.name}: {err}"); continue
                         
-                        # Filter Scope
+                        # Filter Scope (Global)
                         if feature_scope.startswith("仅已注释"):
                             annotated_ids = meta[meta['Is_Annotated'] == True].index
-                            cols_to_keep = ['SampleID', 'Group'] + [c for c in df_t.columns if c in annotated_ids]
+                            cols_to_keep = ['SampleID', 'Group', 'Source_Files'] + [c for c in df_t.columns if c in annotated_ids]
+                            cols_to_keep = [c for c in cols_to_keep if c in df_t.columns] # Safety
                             df_t = df_t[cols_to_keep]
                             meta = meta.loc[meta.index.isin(df_t.columns)]
                             
@@ -294,11 +295,13 @@ with st.sidebar:
             default_grp_idx = non_num.index('Group') if 'Group' in non_num else 0
             group_col = st.selectbox("分组列", non_num, index=default_grp_idx)
             
+            # 这里保留用于二次筛选，例如加载了全部，但只想看注释的
             filter_option = st.radio("统计分析范围:", ["全部特征", "仅已注释特征"], index=0)
             
             with st.expander("数据清洗与归一化 (高级)", expanded=False):
                 miss_th = st.slider("剔除缺失率 > X", 0.0, 1.0, 0.5, 0.1)
                 
+                # KNN 逻辑
                 impute_m_display = st.selectbox("填充方法", ["min (推荐)", "KNN (高精度但慢)", "mean", "zero"], index=0)
                 if "min" in impute_m_display: impute_m = "min"
                 elif "KNN" in impute_m_display: impute_m = "KNN"
@@ -412,28 +415,14 @@ if submit_button:
                     X = StandardScaler().fit_transform(df_sub[feats])
                     pca = PCA(n_components=2).fit(X); pcs = pca.transform(X); var = pca.explained_variance_ratio_
                     
-                    # --- PCA 新增: Hover Data 增加 SampleID 和 Source_Files ---
-                    # 检查是否有 Source_Files 列
+                    # PCA Hover 修复
                     hover_cols = ["SampleID"]
-                    if "Source_Files" in df_sub.columns:
-                        hover_cols.append("Source_Files")
-                    
-                    # Plotly Express 自动支持 DataFrame 的列
-                    # 为了在 tooltip 显示，需要把这些列传给 hover_data
-                    # 但 df_sub 已经被清洗和过滤，需要确保 SampleID 和 Source_Files 还在
-                    # data_cleaning_pipeline 会保留 meta_cols。
-                    # Source_Files 应该是 meta_col。
-                    
-                    fig_pca = px.scatter(
-                        df_sub, # 直接传 df
-                        x=pcs[:,0], y=pcs[:,1], 
-                        color=group_col, 
-                        symbol=group_col,
-                        color_discrete_sequence=GROUP_COLORS, 
-                        width=600, height=600, 
-                        render_mode='webgl',
-                        hover_data=hover_cols # <--- 关键修改：显示样本ID和来源
-                    )
+                    if "Source_Files" in df_sub.columns: hover_cols.append("Source_Files")
+                    else: df_sub["Source_Files"] = "Unknown"; hover_cols.append("Source_Files")
+
+                    fig_pca = px.scatter(df_sub, x=pcs[:,0], y=pcs[:,1], color=group_col, symbol=group_col,
+                                         color_discrete_sequence=GROUP_COLORS, width=600, height=600, 
+                                         render_mode='webgl', hover_data=hover_cols)
                     fig_pca.update_traces(marker=dict(size=14, line=dict(width=1, color='black'), opacity=0.9))
                     update_layout_square(fig_pca, "PCA Score Plot", f"PC1 ({var[0]:.1%})", f"PC2 ({var[1]:.1%})")
                     st.plotly_chart(fig_pca, use_container_width=False)
@@ -513,6 +502,7 @@ if submit_button:
                     box_df = df_sub[[group_col, target_feat]].copy()
                     points_arg = "all" if show_points else "outliers"
                     fig_box = px.box(box_df, x=group_col, y=target_feat, color=group_col, color_discrete_sequence=GROUP_COLORS, points=points_arg, width=500, height=500)
+                    # 修正：pointpos=0 让点居中
                     fig_box.update_traces(width=box_width, marker=dict(size=6, opacity=0.7, line=dict(width=1, color='black')), jitter=0.5, pointpos=0)
                     update_layout_square(fig_box, target_feat, "Group", "Log2 Intensity", width=500, height=500)
                     st.plotly_chart(fig_box, use_container_width=False)
