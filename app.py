@@ -117,57 +117,70 @@ if 'qc_report' not in st.session_state: st.session_state.qc_report = {}
 if 'all_sample_ids' not in st.session_state: st.session_state.all_sample_ids = []
 
 # ==========================================
-# 3. 侧边栏 (请确保这一行没有缩进，顶格写)
+# 3. 侧边栏 (Sidebar)
 # ==========================================
 with st.sidebar:
     st.header("🛠️ 数据控制台")
     
-    # 1. Sample Info
+    # --- 1. Sample Info (最先上传，用于获取名单) ---
     st.markdown("#### 1. 上传 Sample Info (SERRF 必选)")
     sample_info_file = st.file_uploader("Sample Info (.csv/.xlsx)", type=["csv", "xlsx"], key="info")
     info_df = None
+    
+    # 这里的 candidate_samples 用于存储待剔除的名单
+    candidate_samples = []
+
     if sample_info_file:
         try:
             if sample_info_file.name.endswith('.csv'): info_df = pd.read_csv(sample_info_file)
             else: info_df = pd.read_excel(sample_info_file)
             st.caption(f"✅ 已加载 {len(info_df)} 行样本信息")
-        except: st.error("文件读取失败")
+            
+            # [关键改进] 立即从 Info 表提取样本名
+            # 智能查找样本列：通常是第一列，或者叫 'sample', 'name' 的列
+            cols_lower = [c.lower() for c in info_df.columns]
+            name_col_idx = 0
+            if 'sample.name' in cols_lower: name_col_idx = cols_lower.index('sample.name')
+            elif 'sample_name' in cols_lower: name_col_idx = cols_lower.index('sample_name')
+            elif 'sample' in cols_lower: name_col_idx = cols_lower.index('sample')
+            elif 'name' in cols_lower: name_col_idx = cols_lower.index('name')
+            
+            # 获取名单
+            candidate_samples = info_df.iloc[:, name_col_idx].astype(str).tolist()
+            
+        except Exception as e: 
+            st.error(f"文件读取失败: {e}")
 
-    # --- 👇 重点检查这里：样本剔除模块 👇 ---
+    # 如果 Info 表没上传，但之前运行过，也可以用之前缓存的名单
+    if not candidate_samples and 'all_sample_ids' in st.session_state and st.session_state.all_sample_ids:
+        candidate_samples = st.session_state.all_sample_ids
+
+    # --- 2. 样本剔除 (现在应该立即可见) ---
     st.markdown("#### 2. 样本管理 (剔除异常点)")
-    
-    # 获取候选样本列表 (如果还没运行过，就是空的)
-    if 'all_sample_ids' not in st.session_state:
-        st.session_state.all_sample_ids = []
-    
-    candidate_samples = st.session_state.all_sample_ids
-    
-    # 多选框
     excluded_samples = st.multiselect(
         "选择要剔除的样本:",
-        options=candidate_samples,
+        options=candidate_samples,  # 这里现在有值了
         default=[],
-        placeholder="运行一次后在此选择...",
-        help="在此处选中的样本将在读取数据后、分析开始前被直接删除。适用于去除 PCA 中的离群点或坏针。"
+        placeholder="请先上传 Sample Info...",
+        help="在此选中的样本将在分析前被直接删除。"
     )
     
     if excluded_samples:
-        st.warning(f"⚠️ 将剔除 {len(excluded_samples)} 个样本。请重新点击“开始处理”生效。")
-    # ---------------------------------------
+        st.warning(f"⚠️ 将剔除 {len(excluded_samples)} 个样本。")
 
-    # 3. Scope
+    # --- 3. Scope 设置 ---
     st.markdown("#### 3. 数据处理范围")
     feature_scope = st.radio("加载特征范围:", ["仅已注释特征 (推荐)", "全部特征"], index=0, 
                            help="【仅已注释】：仅加载有名字的特征，速度快。\n【全部特征】：加载所有信号。")
 
-    # 4. SERRF
+    # --- 4. SERRF 设置 ---
     st.markdown("#### 4. SERRF 批次校正")
     use_serrf = st.checkbox("启用 SERRF 校正", value=False)
     serrf_ready = False
     
     if use_serrf:
         if info_df is not None:
-            # Auto-Detect
+            # Auto-Detect Logic (保持之前的智能识别)
             cols = list(info_df.columns)
             cols_lower = [c.lower() for c in cols]
             
@@ -196,16 +209,17 @@ with st.sidebar:
         else:
             st.warning("⚠️ 需上传 Info 表才能启用校正")
 
-    # 5. Upload
+    # --- 5. 数据上传 ---
     st.markdown("#### 5. 上传 MetDNA 数据")
     uploaded_files = st.file_uploader("MetDNA文件 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
     st.markdown("---")
     
-    # 6. Button
+    # --- 6. 启动按钮 ---
     process_container = st.container()
     process_container.markdown('<div class="process-btn">', unsafe_allow_html=True)
     start_process = process_container.button("📥 开始处理数据 (Load & Process)")
     process_container.markdown('</div>', unsafe_allow_html=True)
+
 
     # 7. Logic
     if start_process:
@@ -545,4 +559,5 @@ if submit_button:
                     fig_box.update_traces(width=box_width, marker=dict(size=6, opacity=0.7, line=dict(width=1, color='black')), jitter=0.5, pointpos=0)
                     update_layout_square(fig_box, target_feat, "Group", "Log2 Intensity", width=500, height=500)
                     st.plotly_chart(fig_box, use_container_width=False)
+
 
