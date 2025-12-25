@@ -1,4 +1,3 @@
-# 文件名: serrf_module.py
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
@@ -9,11 +8,10 @@ import streamlit as st
 @st.cache_data(show_spinner=False)
 def serrf_normalization(df_data, df_meta, run_order_col, sample_type_col, qc_label, n_trees=100):
     """
-    SERRF 批次校正算法 (v4.0 Final)
-    特点：高精度 (100 trees) + 鲁棒性优化
+    SERRF 批次校正算法
+    稳健配置：100棵树，对数拟合，并行计算
     """
-    
-    # 1. 数据对齐与预检
+    # 1. 数据对齐
     common_idx = df_data.index.intersection(df_meta.index)
     if len(common_idx) < len(df_data): return None, "索引不匹配"
     
@@ -25,16 +23,15 @@ def serrf_normalization(df_data, df_meta, run_order_col, sample_type_col, qc_lab
         valid = meta[run_order_col].notna()
         X_raw = X_raw[valid]
         meta = meta[valid]
-    except: return None, "进样顺序格式错误"
+    except: return None, "进样顺序包含非数字"
     
     qc_mask = meta[sample_type_col] == qc_label
     if qc_mask.sum() < 3: return None, f"QC样本不足 ({qc_mask.sum()}<3)"
 
     run_orders = meta[[run_order_col]].values
     
-    # 2. 核心处理单元
+    # 2. 处理函数
     def process_metabolite(y_all, is_qc, run_orders):
-        # 排除无效值
         valid_val = (y_all > 0) & (~np.isnan(y_all))
         valid_qc = is_qc & valid_val
         
@@ -43,12 +40,12 @@ def serrf_normalization(df_data, df_meta, run_order_col, sample_type_col, qc_lab
         y_qc = y_all[valid_qc]
         X_qc = run_orders[valid_qc]
         
-        # Log空间拟合
+        # Log拟合更符合代谢物分布
         y_qc_log = np.log1p(y_qc)
         
-        # 训练 RF (高精度配置)
+        # 训练
         rf = RandomForestRegressor(
-            n_estimators=n_trees,   # 100
+            n_estimators=n_trees,
             min_samples_leaf=3,
             max_features='sqrt',
             random_state=42, 
@@ -60,7 +57,7 @@ def serrf_normalization(df_data, df_meta, run_order_col, sample_type_col, qc_lab
         y_pred = np.expm1(rf.predict(run_orders))
         qc_target = np.median(y_qc)
         
-        # 边界保护 (防止除以极小值)
+        # 保护机制
         min_pred = qc_target * 0.1
         y_pred = np.maximum(y_pred, min_pred)
         
@@ -68,8 +65,7 @@ def serrf_normalization(df_data, df_meta, run_order_col, sample_type_col, qc_lab
         
         return y_corrected
 
-    # 3. 并行计算
-    # 使用 threading 后端以节省内存 (因为数据在内存中共享)
+    # 3. 并行计算 (使用 threading 减少内存开销)
     results = Parallel(n_jobs=4, backend='threading')(
         delayed(process_metabolite)(X_raw[col].values, qc_mask.values, run_orders)
         for col in X_raw.columns
@@ -77,10 +73,9 @@ def serrf_normalization(df_data, df_meta, run_order_col, sample_type_col, qc_lab
     
     df_corrected = pd.DataFrame(np.array(results).T, index=X_raw.index, columns=X_raw.columns)
     
-    # 4. 评估指标
+    # 4. 评估
     def get_rsd(df, mask):
         qc = df.loc[mask]
-        # 排除全0列以免报错
         qc = qc.loc[:, (qc != 0).any(axis=0)]
         if qc.shape[1] == 0: return 0.0
         return (qc.std() / qc.mean() * 100).median()
