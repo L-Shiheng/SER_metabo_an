@@ -1,17 +1,12 @@
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import KFold
 from joblib import Parallel, delayed
 import streamlit as st
 
 @st.cache_data(show_spinner=False)
 def serrf_normalization(df_data, df_meta, run_order_col, sample_type_col, qc_label, n_trees=100):
-    """
-    SERRF 批次校正算法
-    稳健配置：100棵树，对数拟合，并行计算
-    """
-    # 1. 数据对齐
+    """SERRF: 100 Trees, Log-Space, Robust"""
     common_idx = df_data.index.intersection(df_meta.index)
     if len(common_idx) < len(df_data): return None, "索引不匹配"
     
@@ -23,49 +18,32 @@ def serrf_normalization(df_data, df_meta, run_order_col, sample_type_col, qc_lab
         valid = meta[run_order_col].notna()
         X_raw = X_raw[valid]
         meta = meta[valid]
-    except: return None, "进样顺序包含非数字"
+    except: return None, "Order列包含非数字"
     
     qc_mask = meta[sample_type_col] == qc_label
     if qc_mask.sum() < 3: return None, f"QC样本不足 ({qc_mask.sum()}<3)"
 
     run_orders = meta[[run_order_col]].values
     
-    # 2. 处理函数
     def process_metabolite(y_all, is_qc, run_orders):
         valid_val = (y_all > 0) & (~np.isnan(y_all))
         valid_qc = is_qc & valid_val
-        
         if valid_qc.sum() < 3: return y_all
         
         y_qc = y_all[valid_qc]
         X_qc = run_orders[valid_qc]
-        
-        # Log拟合更符合代谢物分布
         y_qc_log = np.log1p(y_qc)
         
-        # 训练
-        rf = RandomForestRegressor(
-            n_estimators=n_trees,
-            min_samples_leaf=3,
-            max_features='sqrt',
-            random_state=42, 
-            n_jobs=1
-        )
+        rf = RandomForestRegressor(n_estimators=n_trees, min_samples_leaf=3, max_features='sqrt', random_state=42, n_jobs=1)
         rf.fit(X_qc, y_qc_log)
         
-        # 预测
         y_pred = np.expm1(rf.predict(run_orders))
         qc_target = np.median(y_qc)
-        
-        # 保护机制
         min_pred = qc_target * 0.1
         y_pred = np.maximum(y_pred, min_pred)
         
-        y_corrected = y_all * (qc_target / y_pred)
-        
-        return y_corrected
+        return y_all * (qc_target / y_pred)
 
-    # 3. 并行计算 (使用 threading 减少内存开销)
     results = Parallel(n_jobs=4, backend='threading')(
         delayed(process_metabolite)(X_raw[col].values, qc_mask.values, run_orders)
         for col in X_raw.columns
@@ -73,7 +51,6 @@ def serrf_normalization(df_data, df_meta, run_order_col, sample_type_col, qc_lab
     
     df_corrected = pd.DataFrame(np.array(results).T, index=X_raw.index, columns=X_raw.columns)
     
-    # 4. 评估
     def get_rsd(df, mask):
         qc = df.loc[mask]
         qc = qc.loc[:, (qc != 0).any(axis=0)]
