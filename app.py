@@ -4,6 +4,7 @@ import numpy as np
 import os
 import gc
 import datetime
+import re  # <--- 【关键修复】补上了这个漏掉的库
 from scipy import stats
 import plotly.express as px
 import plotly.graph_objects as go
@@ -113,93 +114,82 @@ if 'raw_df' not in st.session_state: st.session_state.raw_df = None
 if 'feature_meta' not in st.session_state: st.session_state.feature_meta = None
 if 'data_loaded' not in st.session_state: st.session_state.data_loaded = False
 if 'qc_report' not in st.session_state: st.session_state.qc_report = {}
-# 新增：用于存储所有见过的样本名，方便用户选择剔除
 if 'all_sample_ids' not in st.session_state: st.session_state.all_sample_ids = []
 
 # ==========================================
-# 3. 侧边栏 (Sidebar)
+# 3. 侧边栏
 # ==========================================
 with st.sidebar:
     st.header("🛠️ 数据控制台")
     
-    # --- 1. Sample Info (最先上传，用于获取名单) ---
+    # 1. Sample Info
     st.markdown("#### 1. 上传 Sample Info (SERRF 必选)")
     sample_info_file = st.file_uploader("Sample Info (.csv/.xlsx)", type=["csv", "xlsx"], key="info")
     info_df = None
     
-    # 这里的 candidate_samples 用于存储待剔除的名单
+    # 立即获取名单逻辑
     candidate_samples = []
-
     if sample_info_file:
         try:
             if sample_info_file.name.endswith('.csv'): info_df = pd.read_csv(sample_info_file)
             else: info_df = pd.read_excel(sample_info_file)
             st.caption(f"✅ 已加载 {len(info_df)} 行样本信息")
             
-            # [关键改进] 立即从 Info 表提取样本名
-            # 智能查找样本列：通常是第一列，或者叫 'sample', 'name' 的列
+            # 智能提取第一列作为样本名候选
             cols_lower = [c.lower() for c in info_df.columns]
             name_col_idx = 0
-            if 'sample.name' in cols_lower: name_col_idx = cols_lower.index('sample.name')
-            elif 'sample_name' in cols_lower: name_col_idx = cols_lower.index('sample_name')
-            elif 'sample' in cols_lower: name_col_idx = cols_lower.index('sample')
-            elif 'name' in cols_lower: name_col_idx = cols_lower.index('name')
+            # 优先找 sample, name 等关键词
+            for kw in ['sample.name', 'sample_name', 'sample', 'name', 'id']:
+                if kw in cols_lower:
+                    name_col_idx = cols_lower.index(kw)
+                    break
+            candidate_samples = info_df.iloc[:, name_col_idx].astype(str).unique().tolist()
             
-            # 获取名单
-            candidate_samples = info_df.iloc[:, name_col_idx].astype(str).tolist()
-            
-        except Exception as e: 
-            st.error(f"文件读取失败: {e}")
+        except Exception as e: st.error(f"Info 读取失败: {e}")
 
-    # 如果 Info 表没上传，但之前运行过，也可以用之前缓存的名单
-    if not candidate_samples and 'all_sample_ids' in st.session_state and st.session_state.all_sample_ids:
+    # 回退：如果 Info 表还没传，或者没读到，但之前运行过，用之前的缓存
+    if not candidate_samples and st.session_state.all_sample_ids:
         candidate_samples = st.session_state.all_sample_ids
 
-    # --- 2. 样本剔除 (现在应该立即可见) ---
+    # 2. 剔除模块
     st.markdown("#### 2. 样本管理 (剔除异常点)")
     excluded_samples = st.multiselect(
         "选择要剔除的样本:",
-        options=candidate_samples,  # 这里现在有值了
+        options=candidate_samples,
         default=[],
-        placeholder="请先上传 Sample Info...",
+        placeholder="上传 Sample Info 后可见...",
         help="在此选中的样本将在分析前被直接删除。"
     )
-    
     if excluded_samples:
         st.warning(f"⚠️ 将剔除 {len(excluded_samples)} 个样本。")
 
-    # --- 3. Scope 设置 ---
+    # 3. Scope
     st.markdown("#### 3. 数据处理范围")
-    feature_scope = st.radio("加载特征范围:", ["仅已注释特征 (推荐)", "全部特征"], index=0, 
-                           help="【仅已注释】：仅加载有名字的特征，速度快。\n【全部特征】：加载所有信号。")
+    feature_scope = st.radio("加载特征范围:", ["仅已注释特征 (推荐)", "全部特征"], index=0)
 
-    # --- 4. SERRF 设置 ---
+    # 4. SERRF
     st.markdown("#### 4. SERRF 批次校正")
     use_serrf = st.checkbox("启用 SERRF 校正", value=False)
     serrf_ready = False
     
     if use_serrf:
         if info_df is not None:
-            # Auto-Detect Logic (保持之前的智能识别)
+            # Auto-Detect
             cols = list(info_df.columns)
             cols_lower = [c.lower() for c in cols]
             
-            order_candidates = [i for i, c in enumerate(cols_lower) if any(x in c for x in ['order', 'run', 'idx', 'seq'])]
-            idx_order = order_candidates[0] if order_candidates else 0
+            idx_order = next((i for i, c in enumerate(cols_lower) if any(x in c for x in ['order', 'run', 'idx', 'seq'])), 0)
             
-            type_candidates = [i for i, c in enumerate(cols_lower) if any(x in c for x in ['class', 'type', 'group'])]
-            final_type_idx = type_candidates[0] if type_candidates else 0
-            
-            found_qc_col = False
-            for idx in type_candidates:
-                if info_df[cols[idx]].astype(str).str.contains('qc', case=False).any():
-                    final_type_idx = idx; found_qc_col = True; break
+            type_cands = [i for i, c in enumerate(cols_lower) if any(x in c for x in ['class', 'type', 'group'])]
+            final_type_idx = type_cands[0] if type_cands else 0
+            for idx in type_cands:
+                if info_df[cols[idx]].astype(str).str.contains('qc', case=False).any(): final_type_idx = idx; break
             
             default_qc_label = "QC"
-            if found_qc_col:
-                type_vals = info_df.iloc[:, final_type_idx].unique().astype(str)
-                qc_match = next((v for v in type_vals if 'qc' in v.lower()), "QC")
-                default_qc_label = qc_match
+            try:
+                vals = info_df.iloc[:, final_type_idx].unique().astype(str)
+                default_qc_label = next((v for v in vals if 'qc' in v.lower()), "QC")
+            except: pass
 
             c1, c2, c3 = st.columns(3)
             run_order_col = c1.selectbox("Order列", cols, index=idx_order)
@@ -209,17 +199,16 @@ with st.sidebar:
         else:
             st.warning("⚠️ 需上传 Info 表才能启用校正")
 
-    # --- 5. 数据上传 ---
+    # 5. Upload
     st.markdown("#### 5. 上传 MetDNA 数据")
     uploaded_files = st.file_uploader("MetDNA文件 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
     st.markdown("---")
     
-    # --- 6. 启动按钮 ---
+    # 6. Button
     process_container = st.container()
     process_container.markdown('<div class="process-btn">', unsafe_allow_html=True)
     start_process = process_container.button("📥 开始处理数据 (Load & Process)")
     process_container.markdown('</div>', unsafe_allow_html=True)
-
 
     # 7. Logic
     if start_process:
@@ -232,8 +221,7 @@ with st.sidebar:
             
             with st.spinner("正在启动高性能处理引擎..."):
                 parsed_results = []
-                # 临时收集本轮所有样本ID，用于更新下拉框
-                current_run_samples = set()
+                current_run_samples = set() # 收集本次运行的所有样本名
                 
                 for i, file in enumerate(uploaded_files):
                     status_text.text(f"正在处理 ({i+1}/{len(uploaded_files)}): {file.name} ...")
@@ -245,43 +233,28 @@ with st.sidebar:
                         df_t, meta, err = parse_metdna_file(file, unique_name, file_type=file_type)
                         if err: st.warning(f"{file.name}: {err}"); continue
                         
-                        # --- 关键修复：强力样本剔除 (忽略符号差异) ---
+                        # === 剔除逻辑 (Robust) ===
                         if excluded_samples:
                             n_before = len(df_t)
                             
-                            # 1. 定义标准化函数 (只保留字母数字，转小写)
-                            def normalize_str(s): 
-                                return re.sub(r'[^a-zA-Z0-9]', '', str(s)).lower()
+                            # 定义归一化函数
+                            def normalize_str(s): return re.sub(r'[^a-zA-Z0-9]', '', str(s)).lower()
                             
-                            # 2. 将“黑名单”标准化
-                            excluded_norm = set([normalize_str(s) for s in excluded_samples])
+                            # 构建黑名单集合
+                            ex_norm = set([normalize_str(s) for s in excluded_samples])
                             
-                            # 3. 将当前数据的 SampleID 标准化并对比
-                            # 如果标准化后的名字在黑名单里，就标记为 True (要删除)
-                            mask_to_remove = df_t['SampleID'].apply(normalize_str).isin(excluded_norm)
-                            
-                            # 4. 执行删除 (取反)
-                            df_t = df_t[~mask_to_remove]
+                            # 匹配并剔除
+                            mask_remove = df_t['SampleID'].apply(normalize_str).isin(ex_norm)
+                            df_t = df_t[~mask_remove]
                             
                             n_after = len(df_t)
-                            
-                            # 5. 显示反馈信息
                             if n_before > n_after:
-                                st.success(f"✅ {file.name}: 成功剔除 {n_before - n_after} 个样本 (剩余 {n_after})")
-                            else:
-                                # 如果选了剔除但没删掉，可能是名字差异太大，打印出来帮您调试
-                                if len(excluded_samples) > 0:
-                                    st.warning(f"⚠️ {file.name}: 未能匹配到黑名单样本。")
-                                    # 调试信息: 显示前3个样本名对比
-                                    data_sample_example = df_t['SampleID'].iloc[0] if not df_t.empty else "None"
-                                    exclude_example = excluded_samples[0]
-                                    st.caption(f"Debug: 数据名 '{data_sample_example}' vs 黑名单 '{exclude_example}'")
-
+                                st.success(f"✅ {unique_name}: 已剔除 {n_before - n_after} 个样本")
                         
-                        # 收集样本ID用于下次选择
-                        current_run_samples.update(df_t['SampleID'].tolist())
+                        # 收集样本ID
+                        current_run_samples.update(df_t['SampleID'].astype(str).tolist())
 
-                        # Filter Feature Scope
+                        # Filter Scope
                         if feature_scope.startswith("仅已注释"):
                             annotated_ids = meta[meta['Is_Annotated'] == True].index
                             cols_to_keep = ['SampleID', 'Group', 'Source_Files'] + [c for c in df_t.columns if c in annotated_ids]
@@ -339,9 +312,13 @@ with st.sidebar:
                     progress_bar.progress((i + 1) / len(uploaded_files))
 
                 if parsed_results:
-                    # 更新 Session 中的所有样本列表，供 UI 使用
-                    st.session_state.all_sample_ids = sorted(list(current_run_samples))
-                    
+                    # 更新 Session 里的样本全集 (供下次剔除使用)
+                    # 优先使用 info 表里的，如果 info 表没涵盖全，则补充进去
+                    if current_run_samples:
+                        # 简单的合并去重
+                        combined = set(st.session_state.all_sample_ids) | current_run_samples
+                        st.session_state.all_sample_ids = sorted(list(combined))
+
                     if len(parsed_results) == 1:
                         st.session_state.raw_df = parsed_results[0][0]
                         st.session_state.feature_meta = parsed_results[0][1]
@@ -582,6 +559,3 @@ if submit_button:
                     fig_box.update_traces(width=box_width, marker=dict(size=6, opacity=0.7, line=dict(width=1, color='black')), jitter=0.5, pointpos=0)
                     update_layout_square(fig_box, target_feat, "Group", "Log2 Intensity", width=500, height=500)
                     st.plotly_chart(fig_box, use_container_width=False)
-
-
-
