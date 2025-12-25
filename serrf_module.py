@@ -44,6 +44,7 @@ def serrf_normalization(df_data, df_meta, run_order_col, sample_type_col, qc_lab
         
         return y_all * (qc_target / y_pred)
 
+    # 使用 threading 后端减少内存拷贝
     results = Parallel(n_jobs=4, backend='threading')(
         delayed(process_metabolite)(X_raw[col].values, qc_mask.values, run_orders)
         for col in X_raw.columns
