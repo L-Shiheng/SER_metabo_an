@@ -117,7 +117,7 @@ if 'qc_report' not in st.session_state: st.session_state.qc_report = {}
 if 'all_sample_ids' not in st.session_state: st.session_state.all_sample_ids = []
 
 # ==========================================
-# 3. 侧边栏
+# 3. 侧边栏 (请确保这一行没有缩进，顶格写)
 # ==========================================
 with st.sidebar:
     st.header("🛠️ 数据控制台")
@@ -133,19 +133,27 @@ with st.sidebar:
             st.caption(f"✅ 已加载 {len(info_df)} 行样本信息")
         except: st.error("文件读取失败")
 
-    # --- 新增功能：样本剔除 (黑名单) ---
+    # --- 👇 重点检查这里：样本剔除模块 👇 ---
     st.markdown("#### 2. 样本管理 (剔除异常点)")
-    # 如果已有加载的数据，使用数据里的ID；否则使用空列表（直到用户运行一次）
-    candidate_samples = st.session_state.all_sample_ids if st.session_state.all_sample_ids else []
     
+    # 获取候选样本列表 (如果还没运行过，就是空的)
+    if 'all_sample_ids' not in st.session_state:
+        st.session_state.all_sample_ids = []
+    
+    candidate_samples = st.session_state.all_sample_ids
+    
+    # 多选框
     excluded_samples = st.multiselect(
-        "选择要剔除的样本 (Exclude):",
+        "选择要剔除的样本:",
         options=candidate_samples,
         default=[],
+        placeholder="运行一次后在此选择...",
         help="在此处选中的样本将在读取数据后、分析开始前被直接删除。适用于去除 PCA 中的离群点或坏针。"
     )
+    
     if excluded_samples:
-        st.warning(f"⚠️ 将剔除 {len(excluded_samples)} 个样本。请点击下方“开始处理”生效。")
+        st.warning(f"⚠️ 将剔除 {len(excluded_samples)} 个样本。请重新点击“开始处理”生效。")
+    # ---------------------------------------
 
     # 3. Scope
     st.markdown("#### 3. 数据处理范围")
@@ -537,3 +545,4 @@ if submit_button:
                     fig_box.update_traces(width=box_width, marker=dict(size=6, opacity=0.7, line=dict(width=1, color='black')), jitter=0.5, pointpos=0)
                     update_layout_square(fig_box, target_feat, "Group", "Log2 Intensity", width=500, height=500)
                     st.plotly_chart(fig_box, use_container_width=False)
+
