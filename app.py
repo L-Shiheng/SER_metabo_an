@@ -245,15 +245,38 @@ with st.sidebar:
                         df_t, meta, err = parse_metdna_file(file, unique_name, file_type=file_type)
                         if err: st.warning(f"{file.name}: {err}"); continue
                         
-                        # --- 关键修改：在此处执行样本剔除 ---
+                        # --- 关键修复：强力样本剔除 (忽略符号差异) ---
                         if excluded_samples:
-                            # 记录剔除前数量
                             n_before = len(df_t)
-                            # 过滤：保留不在黑名单里的样本
-                            df_t = df_t[~df_t['SampleID'].isin(excluded_samples)]
+                            
+                            # 1. 定义标准化函数 (只保留字母数字，转小写)
+                            def normalize_str(s): 
+                                return re.sub(r'[^a-zA-Z0-9]', '', str(s)).lower()
+                            
+                            # 2. 将“黑名单”标准化
+                            excluded_norm = set([normalize_str(s) for s in excluded_samples])
+                            
+                            # 3. 将当前数据的 SampleID 标准化并对比
+                            # 如果标准化后的名字在黑名单里，就标记为 True (要删除)
+                            mask_to_remove = df_t['SampleID'].apply(normalize_str).isin(excluded_norm)
+                            
+                            # 4. 执行删除 (取反)
+                            df_t = df_t[~mask_to_remove]
+                            
                             n_after = len(df_t)
+                            
+                            # 5. 显示反馈信息
                             if n_before > n_after:
-                                st.caption(f"📄 {unique_name}: 已剔除 {n_before - n_after} 个异常样本")
+                                st.success(f"✅ {file.name}: 成功剔除 {n_before - n_after} 个样本 (剩余 {n_after})")
+                            else:
+                                # 如果选了剔除但没删掉，可能是名字差异太大，打印出来帮您调试
+                                if len(excluded_samples) > 0:
+                                    st.warning(f"⚠️ {file.name}: 未能匹配到黑名单样本。")
+                                    # 调试信息: 显示前3个样本名对比
+                                    data_sample_example = df_t['SampleID'].iloc[0] if not df_t.empty else "None"
+                                    exclude_example = excluded_samples[0]
+                                    st.caption(f"Debug: 数据名 '{data_sample_example}' vs 黑名单 '{exclude_example}'")
+
                         
                         # 收集样本ID用于下次选择
                         current_run_samples.update(df_t['SampleID'].tolist())
@@ -559,5 +582,6 @@ if submit_button:
                     fig_box.update_traces(width=box_width, marker=dict(size=6, opacity=0.7, line=dict(width=1, color='black')), jitter=0.5, pointpos=0)
                     update_layout_square(fig_box, target_feat, "Group", "Log2 Intensity", width=500, height=500)
                     st.plotly_chart(fig_box, use_container_width=False)
+
 
 
