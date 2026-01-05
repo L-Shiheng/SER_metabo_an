@@ -221,7 +221,7 @@ with st.sidebar:
     # --- 6. 运行 ---
     process_container = st.container()
     process_container.markdown('<div class="process-btn">', unsafe_allow_html=True)
-    start_process = process_container.button("📥 开始处理数据")
+    start_process = process_container.button("📥 开始")
     process_container.markdown('</div>', unsafe_allow_html=True)
 
 # ====================
@@ -450,3 +450,4 @@ if submit_button:
                     fb.update_traces(width=bw, marker=dict(size=6, opacity=0.7, line=dict(width=1, color='black')), jitter=0.5, pointpos=0)
                     update_layout_square(fb, tgt, "Group", "Log2 Int", 500, 500)
                     st.plotly_chart(fb, use_container_width=False)
+
