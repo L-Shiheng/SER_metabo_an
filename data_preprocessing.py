@@ -9,6 +9,7 @@ from sklearn.impute import KNNImputer
 # 辅助函数
 # ====================
 def make_unique(series):
+    """处理重名ID"""
     seen = set()
     result = []
     for item in series:
@@ -22,13 +23,14 @@ def make_unique(series):
     return result
 
 # ====================
-# 解析函数
+# 解析函数 (高性能向量化 + 来源追踪)
 # ====================
 def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     """解析 MetDNA 导出文件"""
     try:
         if file_type == 'csv':
             try:
+                # 尝试使用 pyarrow 引擎加速读取
                 df = pd.read_csv(file_buffer, engine='pyarrow')
             except:
                 file_buffer.seek(0)
@@ -38,7 +40,7 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     except Exception as e:
         return None, None, f"读取失败: {str(e)}"
 
-    # 1. 智能识别样本列
+    # 1. 智能识别样本列 (向量化筛选)
     known_meta_cols = {
         'peak_name', 'mz', 'rt', 'id', 'id_zhulab', 'name', 'formula', 
         'confidence_level', 'smiles', 'inchikey', 'isotope', 'adduct', 
@@ -51,6 +53,7 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     potential_cols = [c for c in df.columns if c not in known_meta_cols]
     sample_cols = []
     if potential_cols:
+        # 只检查前5行以提速
         subset = df[potential_cols].head(5)
         is_numeric = subset.apply(lambda x: pd.to_numeric(x, errors='coerce').notna().all())
         sample_cols = is_numeric[is_numeric].index.tolist()
@@ -58,15 +61,18 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     if not sample_cols:
         return None, None, "未找到样本数据列。"
 
-    # 2. 构建元数据
+    # 2. 构建元数据与ID
     file_tag = os.path.splitext(os.path.basename(file_name))[0]
+    # 清理文件名非法字符
     clean_tag = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', file_tag)
     
     if 'name' not in df.columns: df['name'] = ""
     if 'confidence_level' not in df.columns: df['confidence_level'] = 'Unknown'
     
+    # 向量化字符串处理
     df['name'] = df['name'].fillna("").astype(str)
     mask_annotated = (df['name'] != "") & (df['name'].str.lower() != "nan")
+    
     clean_names = df['name'].str.split(';', expand=True)[0]
     
     mz_str = df['mz'].map('{:.4f}'.format).astype(str) if 'mz' in df.columns else ""
@@ -86,7 +92,7 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     })
     meta_df.set_index('Metabolite_ID', inplace=True)
     
-    # 3. 提取数据
+    # 3. 提取数据并转置
     df_data = df[sample_cols].copy()
     df_data.index = meta_df.index
     df_transposed = df_data.T
@@ -94,30 +100,33 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     df_transposed.reset_index(inplace=True)
     df_transposed.rename(columns={'index': 'SampleID'}, inplace=True)
     
-    # 写入来源
+    # 关键：写入来源文件列
     df_transposed['Source_Files'] = clean_tag
     
-    # 默认Group (会被Info覆盖)
+    # 提取分组 (默认猜测)
     df_transposed['Group'] = df_transposed['SampleID'].astype(str).str.extract(r'([^\d]+)')[0].str.strip('._-').fillna("Unknown")
     
     return df_transposed, meta_df, None
 
 # ====================
-# 合并函数
+# 合并函数 (追踪来源)
 # ====================
 def merge_multiple_dfs(results_list):
+    """合并多文件并保留来源信息"""
     if not results_list: return None, None, "无数据"
     
     best_features = {}
-    sample_source_map = {}
+    sample_source_map = {} # Map: SampleID -> set of filenames
     
     for file_idx, (df, meta, fname) in enumerate(results_list):
+        # 1. 记录样本来源
         if 'SampleID' in df.columns and 'Source_Files' in df.columns:
             current_tag = df['Source_Files'].iloc[0]
             for sid in df['SampleID']:
                 if sid not in sample_source_map: sample_source_map[sid] = set()
                 sample_source_map[sid].add(current_tag)
         
+        # 2. 选择最佳特征 (基于强度)
         numeric_df = df.select_dtypes(include=[np.number])
         intensities = numeric_df.sum(axis=0)
         
@@ -143,12 +152,14 @@ def merge_multiple_dfs(results_list):
     
     for i, (df, meta, fname) in enumerate(results_list):
         if 'SampleID' in df.columns: df = df.set_index('SampleID')
+        # 暂时移除辅助列，避免合并冲突
         cols_to_drop = [c for c in ['Group', 'Source_Files'] if c in df.columns]
         
         if 'Group' in df.columns and base_group_series is None:
             base_group_series = df['Group']
             
         df_clean = df.drop(columns=cols_to_drop, errors='ignore')
+        
         cols_to_keep = files_features_to_keep[i]
         valid_cols = [c for c in cols_to_keep if c in df_clean.columns]
         dfs_to_concat.append(df_clean[valid_cols])
@@ -160,6 +171,7 @@ def merge_multiple_dfs(results_list):
     
     full_df.fillna(0, inplace=True)
     
+    # 还原 Group
     if base_group_series is not None:
         aligned_group = base_group_series.reindex(full_df.index).fillna('Unknown')
         full_df.insert(0, 'Group', aligned_group)
@@ -169,6 +181,7 @@ def merge_multiple_dfs(results_list):
     full_df.reset_index(inplace=True)
     full_df.rename(columns={'index': 'SampleID'}, inplace=True)
     
+    # 还原并合并 Source_Files
     def get_combined_source(sid):
         sources = sample_source_map.get(sid, set())
         return "; ".join(sorted(list(sources)))
@@ -182,33 +195,23 @@ def merge_multiple_dfs(results_list):
     return full_df, merged_meta, None
 
 # ====================
-# 信息对齐 (升级版：支持指定列)
+# 信息对齐
 # ====================
-def align_sample_info(data_df, info_df, sample_col_name=None):
-    """
-    对齐样本信息
-    sample_col_name: 用户指定的 SampleID 列名，如果不传则自动猜
-    """
-    target_col = None
-    
-    # 1. 确定 SampleID 列
-    if sample_col_name and sample_col_name in info_df.columns:
-        target_col = sample_col_name
-    else:
-        # 自动猜
-        cols_lower = [c.lower() for c in info_df.columns]
-        candidates = ['sample', 'sampleid', 'sample.name', 'name', 'id']
-        for cand in candidates:
-            if cand in cols_lower:
-                target_col = info_df.columns[cols_lower.index(cand)]
-                break
-        if not target_col: target_col = info_df.columns[0]
+def align_sample_info(data_df, info_df):
+    sample_col = None
+    cols_lower = [c.lower() for c in info_df.columns]
+    candidates = ['sample', 'sampleid', 'sample.name', 'name', 'id']
+    for cand in candidates:
+        if cand in cols_lower:
+            sample_col = info_df.columns[cols_lower.index(cand)]
+            break
+    if not sample_col: sample_col = info_df.columns[0]
         
     def normalize(s): return re.sub(r'[^a-zA-Z0-9]', '', str(s)).lower()
     
     info_map = {}
     for idx, row in info_df.iterrows():
-        key = normalize(row[target_col])
+        key = normalize(row[sample_col])
         info_map[key] = row
         
     aligned_data = []
@@ -221,10 +224,23 @@ def align_sample_info(data_df, info_df, sample_col_name=None):
     aligned_df.index = data_df.index 
     return aligned_df
 
+def apply_sample_info(df, info_file):
+    try:
+        if info_file.name.endswith('.csv'): info_df = pd.read_csv(info_file)
+        else: info_df = pd.read_excel(info_file)
+    except: return df, "读取失败"
+    aligned_info = align_sample_info(df, info_df)
+    grp_col = next((c for c in aligned_info.columns if c.lower() in ['group', 'class', 'type']), None)
+    if grp_col:
+        df['Group'] = aligned_info[grp_col].fillna(df['Group']).values
+        return df, "成功匹配"
+    return df, "无Group列"
+
 # ====================
-# 清洗与归一化
+# 清洗与归一化 (包含KNN/PQN)
 # ====================
 def pqn_normalization(df):
+    """PQN 归一化"""
     reference = df.median(axis=0)
     reference[reference <= 0] = 1e-6
     quotients = df.div(reference, axis=1)
@@ -234,10 +250,10 @@ def pqn_normalization(df):
 @st.cache_data(show_spinner=False)
 def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min', 
                            norm_method='None', log_transform=True, scale_method='None'):
-    
+    """数据清洗管道"""
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     
-    # 强制排除
+    # 强制排除非特征列
     exclude_cols = [group_col, 'SampleID', 'Source_Files']
     numeric_cols = [c for c in numeric_cols if c not in exclude_cols]
     
@@ -245,24 +261,25 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
     data_df = df[numeric_cols].copy()
     meta_df = df[meta_cols].copy()
     
-    # 1. Filter
+    # 1. 缺失值过滤
     missing_ratio = data_df.isnull().mean()
     cols_to_keep = missing_ratio[missing_ratio <= missing_thresh].index
     data_df = data_df[cols_to_keep]
     
-    # 2. Impute
+    # 2. 填充
     if data_df.isnull().sum().sum() > 0:
         if impute_method == 'min': data_df = data_df.fillna(data_df.min() * 0.5)
         elif impute_method == 'mean': data_df = data_df.fillna(data_df.mean())
         elif impute_method == 'median': data_df = data_df.fillna(data_df.median())
         elif impute_method == 'KNN':
+            # KNN 填充
             imputer = KNNImputer(n_neighbors=5)
             filled_vals = imputer.fit_transform(data_df)
             data_df = pd.DataFrame(filled_vals, columns=data_df.columns, index=data_df.index)
         elif impute_method == 'zero': data_df = data_df.fillna(0)
         data_df = data_df.fillna(0)
 
-    # 3. Norm
+    # 3. 归一化
     if norm_method == 'Sum':
         data_df = data_df.div(data_df.sum(axis=1), axis=0) * data_df.sum(axis=1).mean()
     elif norm_method == 'Median':
