@@ -5,7 +5,6 @@ import os
 import gc
 import datetime
 import re
-import traceback
 from scipy import stats
 import plotly.express as px
 import plotly.graph_objects as go
@@ -28,6 +27,7 @@ st.markdown("""
 <style>
     .block-container {padding-top: 2rem !important; padding-bottom: 3rem !important;}
     h1, h2, h3, div, p {font-family: 'Arial', sans-serif; color: #2c3e50;}
+    button[data-baseweb="tab"] {font-weight: bold;}
     div[data-testid="stForm"] button {
         width: 100%; background-color: #ff4b4b; color: white; font-weight: bold; border: none; padding: 0.5rem;
     }
@@ -37,24 +37,20 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 导入检查
 try:
     from data_preprocessing import data_cleaning_pipeline, parse_metdna_file, merge_multiple_dfs, apply_sample_info, align_sample_info
 except ImportError:
-    st.error("❌ 严重错误：未找到 'data_preprocessing.py'。请确保文件在同一目录下。")
+    st.error("❌ 严重错误：未找到 'data_preprocessing.py'。")
     st.stop()
 try:
     from serrf_module import serrf_normalization
 except ImportError:
     pass
 
-# ==========================================
-# 1. 辅助函数
-# ==========================================
+# ... (绘图和统计函数保持不变，为节省空间已省略，请确保保留原有的 update_layout_square 等函数) ...
 def update_layout_square(fig, title="", x_title="", y_title="", width=600, height=600):
     fig.update_layout(template="simple_white", width=width, height=height, title={'text': title, 'y':0.95, 'x':0.5, 'xanchor': 'center'}, xaxis=dict(title=x_title, showline=True, linewidth=2, mirror=True), yaxis=dict(title=y_title, showline=True, linewidth=2, mirror=True), legend=dict(yanchor="top", y=1, xanchor="left", x=1.15), margin=dict(l=80, r=180, t=80, b=80))
     return fig
-
 def get_ellipse_coordinates(x, y, std_mult=2):
     if len(x) < 3: return None, None
     mean_x, mean_y = np.mean(x), np.mean(y)
@@ -71,7 +67,6 @@ def get_ellipse_coordinates(x, y, std_mult=2):
     R = np.array([[np.cos(rad), -np.sin(rad)], [np.sin(rad), np.cos(rad)]])
     ell_coords = np.dot(R, np.array([ell_x, ell_y]))
     return ell_coords[0] + mean_x, ell_coords[1] + mean_y
-
 def calculate_vips(model):
     t = model.x_scores_; w = model.x_weights_; q = model.y_loadings_; p, h = w.shape; vips = np.zeros((p,))
     s = np.diag(t.T @ t @ q.T @ q); total_s = np.sum(s)
@@ -79,7 +74,6 @@ def calculate_vips(model):
         weight = np.array([(w[i, j] / np.linalg.norm(w[:, j]))**2 for j in range(h)])
         vips[i] = np.sqrt(p * (s @ weight) / total_s)
     return vips
-
 @st.cache_data
 def run_pairwise_statistics(df, group_col, case, control, features, equal_var=False):
     g1 = df[df[group_col] == case]; g2 = df[df[group_col] == control]; res = []
@@ -94,9 +88,7 @@ def run_pairwise_statistics(df, group_col, case, control, features, equal_var=Fa
     else: res_df['FDR'] = 1.0; res_df['-Log10_P'] = 0
     return res_df
 
-# ==========================================
-# 2. Session State
-# ==========================================
+# Session State
 if 'raw_df' not in st.session_state: st.session_state.raw_df = None
 if 'feature_meta' not in st.session_state: st.session_state.feature_meta = None
 if 'data_loaded' not in st.session_state: st.session_state.data_loaded = False
@@ -104,21 +96,18 @@ if 'qc_report' not in st.session_state: st.session_state.qc_report = {}
 if 'all_sample_ids' not in st.session_state: st.session_state.all_sample_ids = []
 
 # ==========================================
-# 3. 侧边栏 (Sidebar) - 重构版
+# 3. 侧边栏
 # ==========================================
 with st.sidebar:
     st.header("🛠️ 数据控制台")
     
-    # 调试开关
-    show_debug = st.checkbox("🔧 显示调试信息", value=False)
-
-    # --- 1. Info 上传 ---
+    # 1. Sample Info
     st.markdown("#### 1. 上传 Sample Info (必选)")
-    sample_info_file = st.file_uploader("Info表格 (.csv/.xlsx)", type=["csv", "xlsx"], key="info")
+    sample_info_file = st.file_uploader("Sample Info (.csv/.xlsx)", type=["csv", "xlsx"], key="info")
     info_df = None
     candidate_samples = []
     
-    # 关键变量初始化
+    # 变量初始化 (防止报错)
     user_sample_col = None
     user_group_col = None
     
@@ -127,78 +116,69 @@ with st.sidebar:
             if sample_info_file.name.endswith('.csv'): info_df = pd.read_csv(sample_info_file)
             else: info_df = pd.read_excel(sample_info_file)
             
-            # --- 智能列名映射 ---
+            # --- 智能列名映射 (基础层) ---
             cols = list(info_df.columns)
             cols_lower = [c.lower() for c in cols]
             
-            # 1. 找样本名列
+            # 1. 自动猜 Sample ID 列
             idx_sample = 0
             for kw in ['sample.name', 'sample_name', 'sample', 'name', 'id']:
                 if kw in cols_lower: idx_sample = cols_lower.index(kw); break
             
-            # 2. 找分组列 (Group)
+            # 2. 自动猜 Group 列
             idx_group = 1 if len(cols) > 1 else 0
             for kw in ['group', 'class', 'type', 'condition']:
                 if kw in cols_lower: idx_group = cols_lower.index(kw); break
             
-            # 强制让用户确认 (防止自动识别错误)
-            c1, c2 = st.columns(2)
-            user_sample_col = c1.selectbox("样本列", cols, index=idx_sample, help="Sample ID")
-            user_group_col = c2.selectbox("分组列", cols, index=idx_group, help="Group / Class")
+            c_base1, c_base2 = st.columns(2)
+            user_sample_col = c_base1.selectbox("样本名列", cols, index=idx_sample, help="指明哪一列是 Sample ID")
+            user_group_col = c_base2.selectbox("分组列", cols, index=idx_group, help="指明哪一列是分组信息 (Group)")
 
-            # 立即获取样本列表 (只要读到 Info 表，这里就会有值)
+            # 获取剔除名单
             if user_sample_col:
                 candidate_samples = info_df[user_sample_col].astype(str).unique().tolist()
-            
-            if show_debug:
-                st.write("Info预览:", info_df.head(2))
-                st.write("候选样本:", candidate_samples[:3])
                 
+            st.caption(f"✅ 已加载 {len(info_df)} 行样本信息")
+            
         except Exception as e: st.error(f"Info 读取失败: {e}")
 
-    # 回退逻辑: 如果还没传 Info，但之前运行过，用之前的缓存
+    # 回退缓存
     if not candidate_samples and st.session_state.all_sample_ids:
         candidate_samples = st.session_state.all_sample_ids
 
-    # --- 2. 样本剔除 (现在应该始终显示) ---
-    st.markdown("#### 2. 样本剔除 (黑名单)")
+    # 2. 剔除模块
+    st.markdown("#### 2. 样本管理 (剔除异常点)")
     excluded_samples = st.multiselect(
         "选择要剔除的样本:",
         options=candidate_samples,
         default=[],
-        placeholder="请先上传 Info 表...",
-        help="不管名字里有点(.)还是横杠(-)，只要选中都会被强制删除。"
+        placeholder="上传 Sample Info 后可见...",
+        help="在此选中的样本将在分析前被直接删除。"
     )
-    if excluded_samples:
-        st.error(f"⚠️ 已加入黑名单: {len(excluded_samples)} 个")
+    if excluded_samples: st.warning(f"⚠️ 将剔除 {len(excluded_samples)} 个样本。")
 
-    # --- 3. 处理范围 ---
-    st.markdown("#### 3. 数据范围")
-    feature_scope = st.radio("特征范围:", ["仅已注释特征 (推荐)", "全部特征"], index=0)
+    # 3. Scope
+    st.markdown("#### 3. 数据处理范围")
+    feature_scope = st.radio("加载特征范围:", ["仅已注释特征 (推荐)", "全部特征"], index=0)
 
-    # --- 4. SERRF (可选) ---
-    st.markdown("#### 4. SERRF 校正")
-    use_serrf = st.checkbox("启用 SERRF", value=False)
+    # 4. SERRF (高级层)
+    st.markdown("#### 4. SERRF 批次校正")
+    use_serrf = st.checkbox("启用 SERRF 校正", value=False)
     serrf_ready = False
     
     if use_serrf:
         if info_df is not None:
-            cols = list(info_df.columns); cols_lower = [c.lower() for c in cols]
-            # 找 Order
+            cols = list(info_df.columns)
+            cols_lower = [c.lower() for c in cols]
+            
             idx_order = next((i for i, c in enumerate(cols_lower) if any(x in c for x in ['order', 'run', 'idx', 'seq'])), 0)
-            # 找 Type (QC列)
+            
             type_cands = [i for i, c in enumerate(cols_lower) if any(x in c for x in ['class', 'type', 'group'])]
+            # 优先使用用户刚才选的 Group 列作为 type 列候选，如果包含 QC
             final_type_idx = type_cands[0] if type_cands else 0
+            for idx in type_cands:
+                if info_df[cols[idx]].astype(str).str.contains('qc', case=False).any(): final_type_idx = idx; break
             
-            # 优先检查 Group 列内容是否含 QC
-            if user_group_col and info_df[user_group_col].astype(str).str.contains('QC', case=False).any():
-                final_type_idx = cols.index(user_group_col)
-            else:
-                # 否则遍历查找
-                for idx in type_cands:
-                    if info_df[cols[idx]].astype(str).str.contains('qc', case=False).any(): final_type_idx = idx; break
-            
-            # 找 QC 标签
             default_qc_label = "QC"
             try:
                 vals = info_df.iloc[:, final_type_idx].unique().astype(str)
@@ -206,138 +186,178 @@ with st.sidebar:
             except: pass
 
             c1, c2, c3 = st.columns(3)
-            run_order_col = c1.selectbox("Order", cols, index=idx_order)
-            sample_type_col = c2.selectbox("Type", cols, index=final_type_idx)
-            qc_label = c3.text_input("QC名", value=default_qc_label)
+            run_order_col = c1.selectbox("Order列", cols, index=idx_order)
+            sample_type_col = c2.selectbox("Type列", cols, index=final_type_idx)
+            qc_label = c3.text_input("QC标签", value=default_qc_label)
             serrf_ready = True
         else:
-            st.warning("⚠️ 需上传 Info 表")
+            st.warning("⚠️ SERRF 必须上传 Info 表")
 
-    # --- 5. 数据上传 ---
+    # 5. Upload
     st.markdown("#### 5. 上传 MetDNA 数据")
-    uploaded_files = st.file_uploader("结果文件 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
+    uploaded_files = st.file_uploader("MetDNA文件 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
     st.markdown("---")
     
-    # --- 6. 运行 ---
+    # 6. Button
     process_container = st.container()
     process_container.markdown('<div class="process-btn">', unsafe_allow_html=True)
-    start_process = process_container.button("📥 开始")
+    start_process = process_container.button("📥 开始处理数据 (Load & Process)")
     process_container.markdown('</div>', unsafe_allow_html=True)
 
-# ====================
-# 主处理逻辑
-# ====================
-if start_process:
-    st.session_state.qc_report = {}
-    if not uploaded_files:
-        st.error("请先上传数据文件！")
-    else:
-        progress_bar = st.progress(0); status_text = st.empty()
-        with st.spinner("正在处理..."):
-            parsed_results = []
-            current_run_samples = set()
+    # 7. Logic
+    if start_process:
+        st.session_state.qc_report = {}
+        if not uploaded_files:
+            st.error("请先上传数据文件！")
+        else:
+            progress_bar = st.progress(0)
+            status_text = st.empty()
             
-            for i, file in enumerate(uploaded_files):
-                status_text.text(f"处理中: {file.name} ...")
-                try:
-                    file.seek(0)
-                    file_type = 'csv' if file.name.endswith('.csv') else 'excel'
-                    unique_name = f"{os.path.splitext(file.name)[0]}_{i+1}{os.path.splitext(file.name)[1]}"
-                    
-                    df_t, meta, err = parse_metdna_file(file, unique_name, file_type=file_type)
-                    if err: st.warning(f"{file.name}: {err}"); continue
-                    
-                    # === 强力剔除 (Fingerprint Match) ===
-                    if excluded_samples:
-                        n_before = len(df_t)
-                        def get_fingerprint(s): return re.sub(r'[^a-z0-9]', '', str(s).strip().lower())
-                        ex_fingerprints = set([get_fingerprint(s) for s in excluded_samples])
-                        
-                        # 计算数据指纹
-                        data_fingerprints = df_t['SampleID'].astype(str).apply(get_fingerprint)
-                        mask_remove = data_fingerprints.isin(ex_fingerprints)
-                        df_t = df_t[~mask_remove]
-                        
-                        n_after = len(df_t)
-                        if n_before > n_after:
-                            st.success(f"✅ {unique_name}: 已剔除 {n_before - n_after} 个样本")
-                    
-                    current_run_samples.update(df_t['SampleID'].astype(str).tolist())
-
-                    # Filter Scope
-                    if feature_scope.startswith("仅已注释"):
-                        annotated_ids = meta[meta['Is_Annotated'] == True].index
-                        cols_to_keep = ['SampleID', 'Group', 'Source_Files'] + [c for c in df_t.columns if c in annotated_ids]
-                        cols_to_keep = [c for c in cols_to_keep if c in df_t.columns] 
-                        df_t = df_t[cols_to_keep]
-                        meta = meta.loc[meta.index.isin(df_t.columns)]
-                        
-                    # === 分组信息匹配 (核心修复) ===
-                    info_aligned = None
-                    if info_df is not None:
-                        # 1. 优先使用侧边栏选定的 Sample 列
-                        target_col = user_sample_col if user_sample_col else None
-                        info_aligned = align_sample_info(df_t, info_df, sample_col_name=target_col)
-                        
-                        # 2. 优先使用侧边栏选定的 Group 列覆盖
-                        if user_group_col and user_group_col in info_aligned.columns:
-                            df_t['Group'] = info_aligned[user_group_col].fillna(df_t['Group']).values
-                        elif info_aligned is not None:
-                            # 自动回退
-                            g_col = next((c for c in info_aligned.columns if c.lower() in ['group', 'class']), None)
-                            if g_col: df_t['Group'] = info_aligned[g_col].fillna(df_t['Group']).values
-                    
-                    # SERRF
-                    if use_serrf and serrf_ready and info_aligned is not None:
-                        n_matched = info_aligned[run_order_col].notna().sum()
-                        if n_matched == 0:
-                            st.error(f"❌ {file.name}: SERRF 匹配失败 (Order列)"); st.session_state.qc_report[unique_name] = {"Status": "Failed (No Match)"}
-                        else:
-                            if run_order_col in info_aligned.columns and sample_type_col in info_aligned.columns:
-                                num_cols = df_t.select_dtypes(include=[np.number]).columns.tolist()
-                                df_numeric = df_t[num_cols]
-                                corrected_data, serrf_stats = serrf_normalization(df_numeric, info_aligned, run_order_col, sample_type_col, qc_label)
-                                if corrected_data is not None:
-                                    if serrf_stats['RSD_After'] > serrf_stats['RSD_Before']:
-                                        st.session_state.qc_report[unique_name] = {"Status": "Skipped (Worse)", "RSD_Before": serrf_stats['RSD_Before'], "RSD_After": serrf_stats['RSD_After']}
-                                    else:
-                                        for c in corrected_data.columns: df_t[c] = corrected_data[c].values
-                                        st.session_state.qc_report[unique_name] = {"Status": "Success", "RSD_Before": serrf_stats['RSD_Before'], "RSD_After": serrf_stats['RSD_After']}
-                                else: st.error(f"❌ {file.name}: SERRF失败")
-                            else: st.warning(f"{file.name}: 缺少列")
-
-                    parsed_results.append((df_t, meta, unique_name))
-                    del df_t, meta, info_aligned; gc.collect()
-
-                except Exception as e:
-                    st.error(f"处理 {file.name} 失败: {str(e)}")
-                    st.text(traceback.format_exc())
-                progress_bar.progress((i + 1) / len(uploaded_files))
-
-            if parsed_results:
-                if current_run_samples:
-                    combined = set(st.session_state.all_sample_ids) | current_run_samples
-                    st.session_state.all_sample_ids = sorted(list(combined))
-
-                if len(parsed_results) == 1:
-                    st.session_state.raw_df = parsed_results[0][0]
-                    st.session_state.feature_meta = parsed_results[0][1]
-                else:
-                    m_df, m_meta, m_err = merge_multiple_dfs(parsed_results)
-                    if m_err: st.error(m_err)
-                    else: st.session_state.raw_df = m_df; st.session_state.feature_meta = m_meta
+            with st.spinner("正在启动高性能处理引擎..."):
+                parsed_results = []
+                current_run_samples = set()
                 
-                st.session_state.data_loaded = True
-                st.success("✅ 处理完成！")
-                st.rerun() 
-            else: st.error("加载失败")
+                for i, file in enumerate(uploaded_files):
+                    status_text.text(f"正在处理 ({i+1}/{len(uploaded_files)}): {file.name} ...")
+                    try:
+                        file.seek(0)
+                        file_type = 'csv' if file.name.endswith('.csv') else 'excel'
+                        unique_name = f"{os.path.splitext(file.name)[0]}_{i+1}{os.path.splitext(file.name)[1]}"
+                        
+                        df_t, meta, err = parse_metdna_file(file, unique_name, file_type=file_type)
+                        if err: st.warning(f"{file.name}: {err}"); continue
+                        
+                        # === 剔除逻辑 ===
+                        if excluded_samples:
+                            n_before = len(df_t)
+                            def normalize_str(s): return re.sub(r'[^a-zA-Z0-9]', '', str(s)).lower()
+                            ex_norm = set([normalize_str(s) for s in excluded_samples])
+                            mask_remove = df_t['SampleID'].apply(normalize_str).isin(ex_norm)
+                            df_t = df_t[~mask_remove]
+                            n_after = len(df_t)
+                            if n_before > n_after: st.success(f"✅ {unique_name}: 已剔除 {n_before - n_after} 个样本")
+                        
+                        current_run_samples.update(df_t['SampleID'].astype(str).tolist())
 
-# Main
+                        # Filter Scope
+                        if feature_scope.startswith("仅已注释"):
+                            annotated_ids = meta[meta['Is_Annotated'] == True].index
+                            cols_to_keep = ['SampleID', 'Group', 'Source_Files'] + [c for c in df_t.columns if c in annotated_ids]
+                            cols_to_keep = [c for c in cols_to_keep if c in df_t.columns] 
+                            df_t = df_t[cols_to_keep]
+                            meta = meta.loc[meta.index.isin(df_t.columns)]
+                            
+                        # === 关键修正：显式使用用户选择的列名进行对齐 ===
+                        info_aligned = None
+                        if info_df is not None and user_sample_col:
+                            # 传入用户指定的 SampleID 列
+                            info_aligned = align_sample_info(df_t, info_df, sample_col_name=user_sample_col)
+                            
+                            # 强制使用用户指定的 Group 列
+                            if user_group_col and user_group_col in info_aligned.columns:
+                                df_t['Group'] = info_aligned[user_group_col].fillna(df_t['Group']).values
+                        
+                        # SERRF
+                        if use_serrf and serrf_ready and info_aligned is not None:
+                            n_matched = info_aligned[run_order_col].notna().sum()
+                            if n_matched == 0:
+                                st.error(f"❌ {file.name}: 匹配失败 (Order列为空)"); st.session_state.qc_report[unique_name] = {"Status": "Failed (No Match)"}
+                            else:
+                                if run_order_col in info_aligned.columns and sample_type_col in info_aligned.columns:
+                                    num_cols = df_t.select_dtypes(include=[np.number]).columns.tolist()
+                                    df_numeric = df_t[num_cols]
+                                    corrected_data, serrf_stats = serrf_normalization(df_numeric, info_aligned, run_order_col, sample_type_col, qc_label)
+                                    if corrected_data is not None:
+                                        if serrf_stats['RSD_After'] > serrf_stats['RSD_Before']:
+                                            st.session_state.qc_report[unique_name] = {"Status": "Skipped (Worse)", "RSD_Before": serrf_stats['RSD_Before'], "RSD_After": serrf_stats['RSD_After']}
+                                        else:
+                                            for c in corrected_data.columns: df_t[c] = corrected_data[c].values
+                                            st.session_state.qc_report[unique_name] = {"Status": "Success", "RSD_Before": serrf_stats['RSD_Before'], "RSD_After": serrf_stats['RSD_After']}
+                                    else: st.error(f"❌ {file.name}: SERRF失败")
+                                else: st.warning(f"{file.name}: 缺少列")
+
+                        parsed_results.append((df_t, meta, unique_name))
+                        del df_t, meta, info_aligned
+                        gc.collect()
+
+                    except Exception as e:
+                        st.error(f"处理 {file.name} 失败: {e}")
+                    
+                    progress_bar.progress((i + 1) / len(uploaded_files))
+
+                if parsed_results:
+                    if current_run_samples:
+                        combined = set(st.session_state.all_sample_ids) | current_run_samples
+                        st.session_state.all_sample_ids = sorted(list(combined))
+
+                    if len(parsed_results) == 1:
+                        st.session_state.raw_df = parsed_results[0][0]
+                        st.session_state.feature_meta = parsed_results[0][1]
+                    else:
+                        m_df, m_meta, m_err = merge_multiple_dfs(parsed_results)
+                        if m_err: st.error(m_err)
+                        else:
+                            st.session_state.raw_df = m_df
+                            st.session_state.feature_meta = m_meta
+                    
+                    st.session_state.data_loaded = True
+                    st.success("✅ 处理完成！")
+                    st.rerun() 
+                else:
+                    st.error("加载失败")
+
+    # Export
+    if st.session_state.data_loaded and st.session_state.raw_df is not None:
+        raw_df = st.session_state.raw_df
+        st.info(f"数据概览: {len(raw_df)} 样本 x {len(raw_df.columns)-2} 特征")
+        
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+        csv_data = raw_df.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 导出合并数据", csv_data, f"Metabo_Processed_{ts}.csv", "text/csv")
+        st.divider()
+
+        with st.form(key='analysis_form'):
+            st.markdown("### ⚙️ 统计分析参数")
+            non_num = raw_df.select_dtypes(exclude=[np.number]).columns.tolist()
+            default_grp_idx = non_num.index('Group') if 'Group' in non_num else 0
+            group_col = st.selectbox("分组列", non_num, index=default_grp_idx)
+            
+            filter_option = st.radio("统计分析范围:", ["全部特征", "仅已注释特征"], index=0)
+            
+            with st.expander("数据清洗与归一化 (高级)", expanded=False):
+                miss_th = st.slider("剔除缺失率 > X", 0.0, 1.0, 0.5, 0.1)
+                
+                impute_m_display = st.selectbox("填充方法", ["min (推荐)", "KNN (高精度但慢)", "mean", "zero"], index=0)
+                if "min" in impute_m_display: impute_m = "min"
+                elif "KNN" in impute_m_display: impute_m = "KNN"
+                elif "mean" in impute_m_display: impute_m = "mean"
+                else: impute_m = "zero"
+                
+                norm_m = st.selectbox("样本归一化", ["None", "PQN", "Sum", "Median"], index=1)
+                do_log = st.checkbox("Log2 转化", value=True)
+                scale_m = st.selectbox("特征缩放", ["None", "Auto", "Pareto"], index=2)
+
+            current_groups = sorted(raw_df[group_col].astype(str).unique())
+            st.markdown("### 组别对比")
+            selected_groups = st.multiselect("纳入组:", current_groups, default=current_groups[:2] if len(current_groups)>=2 else current_groups)
+            c1, c2 = st.columns(2)
+            valid_grps_list = list(selected_groups)
+            case_grp = c1.selectbox("Exp (Case)", valid_grps_list, index=0 if valid_grps_list else None)
+            ctrl_grp = c2.selectbox("Ctrl (Ref)", valid_grps_list, index=1 if len(valid_grps_list)>1 else 0)
+            c3, c4 = st.columns(2)
+            p_th = c3.number_input("P-value", 0.05, format="%.3f")
+            fc_th = c4.number_input("Log2 FC", 1.0)
+            use_equal_var = st.checkbox("Student's t-test (Equal Var)", value=True)
+            enable_jitter = st.checkbox("火山图抖动", value=True)
+            st.markdown("---")
+            submit_button = st.form_submit_button(label='🚀 运行统计分析 (Run Stats)')
+
+# ... (Main Panel logic remains the same) ...
 if not st.session_state.data_loaded:
     st.title("🧬 MetaboAnalyst Pro"); st.info("👈 请在左侧上传数据"); st.stop()
 
 if not submit_button:
-    st.title("✅ 就绪"); 
+    st.title("✅ 数据准备就绪")
     if st.session_state.qc_report:
         st.subheader("🔍 SERRF 报告")
         cols = st.columns(len(st.session_state.qc_report))
@@ -350,7 +370,7 @@ if not submit_button:
 
 if submit_button:
     if len(selected_groups)<2: st.error("请选2组"); st.stop()
-    with st.spinner("计算中..."):
+    with st.spinner("计算中 (WebGL)..."):
         raw_df = st.session_state.raw_df; meta = st.session_state.feature_meta
         df_proc, feats = data_cleaning_pipeline(raw_df, group_col, miss_th, impute_m, norm_m, do_log, scale_m)
         if filter_option == "仅已注释特征":
@@ -362,8 +382,8 @@ if submit_button:
         
         df_sub = df_proc[df_proc[group_col].isin(selected_groups)].copy()
         
-        if case != ctrl:
-            stats_df = run_pairwise_statistics(df_sub, group_col, case, ctrl, feats, equal_var)
+        if case_grp != ctrl_grp:
+            stats_df = run_pairwise_statistics(df_sub, group_col, case_grp, ctrl_grp, feats, use_equal_var)
             if meta is not None: stats_df = stats_df.merge(meta[['Confidence_Level', 'Clean_Name']], left_on='Metabolite', right_index=True, how='left')
             stats_df['Sig'] = 'NS'
             stats_df.loc[(stats_df['P_Value']<p_th)&(stats_df['Log2_FC']>fc_th), 'Sig']='Up'
@@ -371,8 +391,9 @@ if submit_button:
             sig_mets = stats_df[stats_df['Sig']!='NS']['Metabolite'].tolist()
         else: stats_df = pd.DataFrame(); sig_mets = []
 
-        st.title("📊 分析报告"); st.caption(f"{case} vs {ctrl} | N={len(feats)}")
+        st.title("📊 分析报告"); st.caption(f"{case_grp} vs {ctrl_grp} | N={len(feats)}")
         
+        # PCA
         tabs = st.tabs(["📊 PCA", "🎯 PLS-DA", "⭐ VIP", "🌋 Volcano", "🔥 Heatmap", "📑 Data"])
         with tabs[0]:
             c1, c2 = st.columns([1, 2])
@@ -389,6 +410,7 @@ if submit_button:
                     update_layout_square(fig_pca, "PCA", f"PC1 ({var[0]:.1%})", f"PC2 ({var[1]:.1%})")
                     st.plotly_chart(fig_pca, use_container_width=False)
         
+        # PLS-DA
         with tabs[1]:
             c1, c2 = st.columns([1, 2])
             with c2:
@@ -398,7 +420,7 @@ if submit_button:
                     pls = PLSRegression(n_components=2).fit(X_pls, y_lbl)
                     plot_df = pd.DataFrame({'C1': pls.x_scores_[:,0], 'C2': pls.x_scores_[:,1], 'Group': df_sub[group_col].values})
                     fig_pls = px.scatter(plot_df, x='C1', y='C2', color='Group', symbol='Group', color_discrete_sequence=GROUP_COLORS, width=600, height=600, render_mode='webgl')
-                    for i, g in enumerate(list(sel_grps)):
+                    for i, g in enumerate(selected_groups):
                         sub = plot_df[plot_df['Group']==g]
                         if len(sub)>=3:
                             el_x, el_y = get_ellipse_coordinates(sub['C1'], sub['C2'])
@@ -407,6 +429,7 @@ if submit_button:
                     update_layout_square(fig_pls, "PLS-DA", "C1", "C2")
                     st.plotly_chart(fig_pls, use_container_width=False)
         
+        # VIP
         with tabs[2]:
             if 'pls' in locals():
                 vips = calculate_vips(pls); vip_df = pd.DataFrame({'Metabolite': feats, 'VIP': vips})
@@ -417,12 +440,14 @@ if submit_button:
                 fig_vip.add_vline(x=1.0, line_dash="dash"); fig_vip.update_layout(template="simple_white", height=700, coloraxis_showscale=False)
                 st.plotly_chart(fig_vip, use_container_width=False)
 
+        # Volcano
         with tabs[3]:
             fig_vol = px.scatter(stats_df, x="Log2_FC", y="-Log10_P", color="Sig", color_discrete_map=COLOR_PALETTE, hover_data={"Metabolite":True}, width=600, height=600, render_mode='webgl')
             fig_vol.add_hline(y=-np.log10(p_th), line_dash="dash"); fig_vol.add_vline(x=fc_th, line_dash="dash"); fig_vol.add_vline(x=-fc_th, line_dash="dash")
             update_layout_square(fig_vol, "Volcano", "Log2 FC", "-Log10 P")
             st.plotly_chart(fig_vol, use_container_width=False)
 
+        # Heatmap
         with tabs[4]:
             if not sig_mets: st.info("无差异")
             else:
@@ -435,6 +460,7 @@ if submit_button:
                     st.pyplot(g.fig)
                 except: st.error("绘图错误")
 
+        # Boxplot
         with tabs[5]:
             c1, c2 = st.columns([1.5, 1])
             with c1:
@@ -450,4 +476,3 @@ if submit_button:
                     fb.update_traces(width=bw, marker=dict(size=6, opacity=0.7, line=dict(width=1, color='black')), jitter=0.5, pointpos=0)
                     update_layout_square(fb, tgt, "Group", "Log2 Int", 500, 500)
                     st.plotly_chart(fb, use_container_width=False)
-
