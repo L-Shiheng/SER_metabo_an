@@ -195,46 +195,53 @@ def merge_multiple_dfs(results_list):
     return full_df, merged_meta, None
 
 # ====================
-# 信息对齐
+# 信息对齐 (优化版)
 # ====================
 def align_sample_info(data_df, info_df):
+    """
+    将 Info 表对齐到 Data 表的顺序
+    """
+    # 1. 自动寻找 SampleID 列
     sample_col = None
-    cols_lower = [c.lower() for c in info_df.columns]
-    candidates = ['sample', 'sampleid', 'sample.name', 'name', 'id']
+    cols_lower = [str(c).lower().strip() for c in info_df.columns]
+    
+    # 优先级关键词
+    candidates = ['sampleid', 'sample_id', 'sample.id', 'sample name', 'sample_name', 'sample.name', 'name', 'sample', 'id']
+    
     for cand in candidates:
         if cand in cols_lower:
             sample_col = info_df.columns[cols_lower.index(cand)]
             break
-    if not sample_col: sample_col = info_df.columns[0]
+            
+    # 如果没找到，默认第一列
+    if not sample_col: 
+        sample_col = info_df.columns[0]
         
+    # 2. 构建映射字典
+    # 标准化函数：去除特殊字符，转小写
     def normalize(s): return re.sub(r'[^a-zA-Z0-9]', '', str(s)).lower()
     
     info_map = {}
     for idx, row in info_df.iterrows():
+        # Key 是 Info 表里的名字
         key = normalize(row[sample_col])
         info_map[key] = row
         
+    # 3. 对齐
     aligned_data = []
+    # 遍历 Data 表里的名字
     for sid in data_df['SampleID']:
         key = normalize(sid)
-        if key in info_map: aligned_data.append(info_map[key])
-        else: aligned_data.append(pd.Series([np.nan]*len(info_df.columns), index=info_df.columns))
+        if key in info_map: 
+            aligned_data.append(info_map[key])
+        else: 
+            # 没匹配上，填空值
+            aligned_data.append(pd.Series([np.nan]*len(info_df.columns), index=info_df.columns))
             
     aligned_df = pd.DataFrame(aligned_data)
+    # 重置索引，确保和 data_df 一一对应
     aligned_df.index = data_df.index 
     return aligned_df
-
-def apply_sample_info(df, info_file):
-    try:
-        if info_file.name.endswith('.csv'): info_df = pd.read_csv(info_file)
-        else: info_df = pd.read_excel(info_file)
-    except: return df, "读取失败"
-    aligned_info = align_sample_info(df, info_df)
-    grp_col = next((c for c in aligned_info.columns if c.lower() in ['group', 'class', 'type']), None)
-    if grp_col:
-        df['Group'] = aligned_info[grp_col].fillna(df['Group']).values
-        return df, "成功匹配"
-    return df, "无Group列"
 
 # ====================
 # 清洗与归一化 (包含KNN/PQN)
@@ -304,3 +311,4 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
     data_df = data_df.loc[:, var_mask]
     
     return pd.concat([meta_df, data_df], axis=1), data_df.columns.tolist()
+
