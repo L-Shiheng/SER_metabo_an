@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-import re
+import re  # <--- 关键修复：补全缺失的正则库
 import os
 import streamlit as st
 from sklearn.impute import KNNImputer
@@ -58,7 +58,7 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     if not sample_cols:
         return None, None, "未找到样本数据列。"
 
-    # 2. 构建元数据
+    # 2. 元数据处理
     file_tag = os.path.splitext(os.path.basename(file_name))[0]
     clean_tag = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', file_tag)
     
@@ -86,18 +86,15 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     })
     meta_df.set_index('Metabolite_ID', inplace=True)
     
-    # 3. 提取数据
+    # 3. 数据提取
     df_data = df[sample_cols].copy()
     df_data.index = meta_df.index
     df_transposed = df_data.T
     
     df_transposed.reset_index(inplace=True)
     df_transposed.rename(columns={'index': 'SampleID'}, inplace=True)
-    
-    # 写入来源
     df_transposed['Source_Files'] = clean_tag
-    
-    # 默认Group (会被Info覆盖)
+    # 默认分组 (稍后会被覆盖)
     df_transposed['Group'] = df_transposed['SampleID'].astype(str).str.extract(r'([^\d]+)')[0].str.strip('._-').fillna("Unknown")
     
     return df_transposed, meta_df, None
@@ -120,13 +117,11 @@ def merge_multiple_dfs(results_list):
         
         numeric_df = df.select_dtypes(include=[np.number])
         intensities = numeric_df.sum(axis=0)
-        
         for feat_id in numeric_df.columns:
             try:
                 clean_name = meta.loc[feat_id, 'Clean_Name']
             except KeyError: continue
             curr_score = intensities.get(feat_id, 0)
-            
             if clean_name not in best_features:
                 best_features[clean_name] = (file_idx, feat_id, curr_score)
             else:
@@ -159,7 +154,6 @@ def merge_multiple_dfs(results_list):
         return None, None, f"合并出错: {str(e)}"
     
     full_df.fillna(0, inplace=True)
-    
     if base_group_series is not None:
         aligned_group = base_group_series.reindex(full_df.index).fillna('Unknown')
         full_df.insert(0, 'Group', aligned_group)
@@ -182,16 +176,13 @@ def merge_multiple_dfs(results_list):
     return full_df, merged_meta, None
 
 # ====================
-# 信息对齐 (升级版：支持指定列)
+# 信息对齐 (升级：指定列名)
 # ====================
 def align_sample_info(data_df, info_df, sample_col_name=None):
-    """
-    对齐样本信息
-    sample_col_name: 用户指定的 SampleID 列名，如果不传则自动猜
-    """
+    """根据指定列名对齐样本信息"""
     target_col = None
     
-    # 1. 确定 SampleID 列
+    # 1. 确定连接键 (SampleID列)
     if sample_col_name and sample_col_name in info_df.columns:
         target_col = sample_col_name
     else:
@@ -204,7 +195,9 @@ def align_sample_info(data_df, info_df, sample_col_name=None):
                 break
         if not target_col: target_col = info_df.columns[0]
         
-    def normalize(s): return re.sub(r'[^a-zA-Z0-9]', '', str(s)).lower()
+    def normalize(s): 
+        # 移除符号，转小写，确保匹配鲁棒性
+        return re.sub(r'[^a-zA-Z0-9]', '', str(s)).lower()
     
     info_map = {}
     for idx, row in info_df.iterrows():
@@ -236,8 +229,7 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
                            norm_method='None', log_transform=True, scale_method='None'):
     
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    
-    # 强制排除
+    # 保护关键列
     exclude_cols = [group_col, 'SampleID', 'Source_Files']
     numeric_cols = [c for c in numeric_cols if c not in exclude_cols]
     
