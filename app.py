@@ -215,27 +215,37 @@ if st.session_state.data_loaded and st.session_state.raw_df is not None:
     st.divider()
 
     with st.form(key='analysis_form'):
-        st.markdown("### ⚙️ 统计与富集分析设置")
+        st.markdown("### ⚙️ 统计与富集分析设置 (已设定为行业金标准)")
         non_num = raw_df.select_dtypes(exclude=[np.number]).columns.tolist()
         group_col = st.selectbox("分组列", non_num, index=non_num.index('Group') if 'Group' in non_num else 0)
         
-        with st.expander("数据预处理配置 (SIMCA 推荐 Pareto Scaling)", expanded=False):
-            filter_option = st.radio("分析范围:", ["全部特征", "仅已注释特征"], index=0)
-            miss_th = st.slider("剔除缺失率 > X", 0.0, 1.0, 0.5)
-            impute_m = st.selectbox("缺失值填充", ["min (推荐)", "KNN", "mean", "zero"], index=0).split()[0]
-            norm_m = st.selectbox("样本归一化", ["None", "PQN", "Sum", "Median"], index=1)
-            do_log = st.checkbox("Log2 对数转化", value=True)
-            scale_m = st.selectbox("特征缩放 (Scaling)", ["Pareto (SIMCA 默认)", "Auto (Z-score)", "None"], index=0).split()[0]
+        with st.expander("数据预处理配置 (SIMCA 标准工作流)", expanded=False):
+            filter_option = st.radio("分析范围:", ["全部特征", "仅已注释特征"], index=0, help="非靶向代谢组学推荐先用「全部特征」进行全局 OPLS-DA 统计，找寻差异后再关注注释结果。")
+            
+            c_p1, c_p2 = st.columns(2)
+            miss_th = c_p1.slider("剔除缺失率 > X", 0.0, 1.0, 0.20, help="【行业标准 80% 规则】：剔除在总体样本中缺失率超过 20% (0.20) 的低质量特征。")
+            impute_m = c_p2.selectbox("缺失值填充", ["KNN (推荐)", "min", "mean", "zero"], index=0, help="KNN 算法在代谢组学中能最大程度保持原始数据的分布方差。").split()[0]
+            
+            c_p3, c_p4 = st.columns(2)
+            norm_m = c_p3.selectbox("样本归一化", ["PQN (推荐)", "Median", "Sum", "None"], index=0, help="PQN (概率商归一化) 是质谱分析中最权威的消除进样量和仪器漂移的方法。").split()[0]
+            scale_m = c_p4.selectbox("特征缩放 (Scaling)", ["Pareto (SIMCA 默认)", "Auto (Z-score)", "None"], index=0, help="Pareto 保留了原始数据的部分结构，是 SIMCA 软件最经典的缩放方式。").split()[0]
+            
+            do_log = st.checkbox("Log2 对数转化 (强烈推荐)", value=True, help="使数据更符合正态分布，缩小高低丰度代谢物的绝对差异，满足 OPLS-DA 和 T 检验的前提假设。")
 
         cur_grps = sorted(raw_df[group_col].astype(str).unique())
         sel_grps = st.multiselect("纳入对比组 (OPLS-DA 需要严格的 2 组对比)", cur_grps, default=cur_grps[:2] if len(cur_grps)>=2 else cur_grps)
+        
         c1, c2, c3, c4 = st.columns(4)
         valid = list(sel_grps)
         case = c1.selectbox("Case 组 (实验组)", valid, index=0 if valid else None)
         ctrl = c2.selectbox("Control 组 (对照组)", valid, index=1 if len(valid)>1 else 0)
-        p_th = c3.number_input("P-value 阈值", 0.05)
-        fc_th = c4.number_input("Log2 FC 阈值", 1.0)
-        submit_button = st.form_submit_button(label='🚀 运行全自动分析 (包含图表生成与报告汇总)')
+        p_th = c3.number_input("P-value 阈值", value=0.05, step=0.01, format="%.2f", help="通常认定 P < 0.05 具有统计学显著性差异。")
+        
+        # 将默认 FC 修改为 0.58 (即 1.5 倍差异)，更符合代谢组学特性
+        fc_th = c4.number_input("Log2 FC 阈值", value=0.58, step=0.10, help="0.58 对应 1.5 倍差异；1.0 对应 2.0 倍差异。代谢物变化幅度较小，通常设定为 0.58 或 0.26 (1.2倍)。")
+        
+        submit_button = st.form_submit_button(label='🚀 运行全自动分析 (生成交互图表与离线报告)')
+
 
 if not st.session_state.data_loaded:
     st.title("🧬 MetaboAnalyst Pro (SIMCA Edition)"); st.info("👈 请在左侧面板上传并处理数据"); st.stop()
