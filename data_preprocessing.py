@@ -9,15 +9,15 @@ from sklearn.model_selection import cross_val_predict, KFold
 from sklearn.metrics import r2_score
 
 # ====================
-# SIMCA: OPLS-DA 算法
+# SIMCA: OPLS-DA 算法与置换检验
 # ====================
 class OPLS_DA:
     def __init__(self):
-        self.t = None        # 预测得分 (X轴)
-        self.t_ortho = None  # 正交得分 (Y轴)
-        self.p = None        # 预测载荷 (S-Plot X轴)
-        self.p_corr = None   # 相关性 (S-Plot Y轴)
-        self.vip = None      # 变量重要性投影
+        self.t = None        
+        self.t_ortho = None  
+        self.p = None        
+        self.p_corr = None   
+        self.vip = None      
         self.R2Y = 0
         self.Q2 = 0
 
@@ -39,6 +39,7 @@ class OPLS_DA:
         self.t_ortho = t_ortho.flatten()
         self.p = p.flatten()
         
+        # p(corr) 和 VIP
         self.p_corr = np.array([np.corrcoef(X[:, i], self.t)[0, 1] for i in range(X.shape[1])])
         w_norm = (w / np.linalg.norm(w)).flatten()
         self.vip = np.sqrt(len(w_norm) * (w_norm ** 2))
@@ -58,6 +59,27 @@ class OPLS_DA:
         y_cv = cross_val_predict(pls, X, y, cv=kf)
         self.Q2 = r2_score(y, y_cv)
         return self.R2Y, self.Q2
+
+    def permutation_test(self, X, y, n_permutations=100):
+        """SIMCA 核心：置换检验 (Permutation Test)"""
+        orig_R2Y, orig_Q2 = self.evaluate(X, y)
+        r2_perm, q2_perm, correlations = [], [], []
+        
+        pls = PLSRegression(n_components=1)
+        cv_splits = min(7, len(y))
+        kf = KFold(n_splits=cv_splits, shuffle=True)
+        
+        for i in range(n_permutations):
+            y_shuffled = np.random.permutation(y)
+            # 计算打乱后的 Y 与原 Y 的相关性
+            corr = np.abs(np.corrcoef(y, y_shuffled)[0, 1])
+            correlations.append(corr)
+            
+            pls.fit(X, y_shuffled)
+            r2_perm.append(r2_score(y_shuffled, pls.predict(X)))
+            q2_perm.append(r2_score(y_shuffled, cross_val_predict(pls, X, y_shuffled, cv=kf)))
+            
+        return np.array(correlations), np.array(r2_perm), np.array(q2_perm), orig_R2Y, orig_Q2
 
 # ====================
 # 数据解析与合并
@@ -173,27 +195,22 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
     data_df = df[numeric_cols].copy()
     meta_df = df[meta_cols].copy()
     
-    # Filter
     data_df = data_df[data_df.isnull().mean()[data_df.isnull().mean() <= missing_thresh].index]
     
-    # Impute
     if data_df.isnull().sum().sum() > 0:
         if impute_method == 'min': data_df = data_df.fillna(data_df.min() * 0.5)
         elif impute_method == 'mean': data_df = data_df.fillna(data_df.mean())
         elif impute_method == 'KNN': data_df = pd.DataFrame(KNNImputer(n_neighbors=5).fit_transform(data_df), columns=data_df.columns, index=data_df.index)
         else: data_df = data_df.fillna(0)
 
-    # Norm
     if norm_method == 'Sum': data_df = data_df.div(data_df.sum(axis=1), axis=0) * data_df.sum(axis=1).mean()
     elif norm_method == 'Median': data_df = data_df.div(data_df.median(axis=1), axis=0) * data_df.median(axis=1).mean()
     elif norm_method == 'PQN':
         ref = data_df.median(axis=0); ref[ref <= 0] = 1e-6
         data_df = data_df.div(data_df.div(ref, axis=1).median(axis=1), axis=0)
 
-    # Log
     if log_transform: data_df = np.log2(data_df + 1) if (data_df <= 0).any().any() else np.log2(data_df)
 
-    # Scale (SIMCA Defaults to Pareto)
     if scale_method != 'None':
         mean = data_df.mean(); std = data_df.std()
         if scale_method == 'Auto': data_df = (data_df - mean) / std
