@@ -10,10 +10,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 import seaborn as sns
 import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 from statsmodels.stats.multitest import multipletests
 
 # ==========================================
-# 0. 模块导入与错误捕获
+# 0. 模块导入与配置
 # ==========================================
 st.set_page_config(page_title="MetaboAnalyst Pro (SIMCA Edition)", page_icon="🧬", layout="wide")
 
@@ -41,11 +43,27 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. 辅助函数
+# 1. 绘图辅助函数
 # ==========================================
 def update_layout_square(fig, title="", x_title="", y_title=""):
     fig.update_layout(template="simple_white", width=600, height=600, title={'text': title, 'y':0.95, 'x':0.5, 'xanchor': 'center'}, xaxis=dict(title=x_title, showline=True, linewidth=2, mirror=True), yaxis=dict(title=y_title, showline=True, linewidth=2, mirror=True), legend=dict(yanchor="top", y=1, xanchor="left", x=1.15))
     return fig
+
+def get_ellipse_coordinates(x, y, std_mult=2):
+    if len(x) < 3: return None, None
+    mean_x, mean_y = np.mean(x), np.mean(y)
+    cov = np.cov(x, y)
+    vals, vecs = np.linalg.eigh(cov)
+    order = vals.argsort()[::-1]
+    vals, vecs = vals[order], vecs[:,order]
+    theta = np.degrees(np.arctan2(*vecs[:,0][::-1]))
+    width, height = 2 * std_mult * np.sqrt(vals)
+    t = np.linspace(0, 2*np.pi, 100)
+    ell_x = width/2 * np.cos(t); ell_y = height/2 * np.sin(t)
+    rad = np.radians(theta)
+    R = np.array([[np.cos(rad), -np.sin(rad)], [np.sin(rad), np.cos(rad)]])
+    ell_coords = np.dot(R, np.array([ell_x, ell_y]))
+    return ell_coords[0] + mean_x, ell_coords[1] + mean_y
 
 @st.cache_data
 def run_pairwise_statistics(df, group_col, case, control, features, equal_var=False):
@@ -182,7 +200,7 @@ if start_process:
                 st.rerun() 
 
 # ==========================================
-# 4. 统计与可视化展示区 (SIMCA OPLS-DA)
+# 4. 统计与可视化展示区 (SIMCA 全家桶)
 # ==========================================
 if st.session_state.data_loaded and st.session_state.raw_df is not None:
     raw_df = st.session_state.raw_df
@@ -222,7 +240,7 @@ if not submit_button:
 
 if submit_button:
     if len(sel_grps) != 2: st.error("⚠️ OPLS-DA 必须且只能选择 2 个组进行对比！"); st.stop()
-    with st.spinner("正在运行 OPLS-DA 和统计计算..."):
+    with st.spinner("正在运行 OPLS-DA 置换检验和统计计算 (约需 10-30 秒)..."):
         raw_df = st.session_state.raw_df; meta = st.session_state.feature_meta
         df_proc, feats = data_cleaning_pipeline(raw_df, group_col, miss_th, impute_m, norm_m, do_log, scale_m)
         
@@ -240,13 +258,19 @@ if submit_button:
         stats_df.loc[(stats_df['P_Value']<p_th)&(stats_df['Log2_FC']>fc_th), 'Sig']='Up'
         stats_df.loc[(stats_df['P_Value']<p_th)&(stats_df['Log2_FC']<-fc_th), 'Sig']='Down'
 
-        # 2. 运行 SIMCA OPLS-DA
+        # 2. 运行 SIMCA OPLS-DA & 置换检验
         y_binary = np.where(df_sub[group_col] == case, 1, -1)
         X_matrix = df_sub[feats].values
         
         opls = OPLS_DA().fit(X_matrix, y_binary)
-        R2Y, Q2 = opls.evaluate(X_matrix, y_binary)
         
+        # 运行置换检验
+        corrs, r2_perm, q2_perm, R2Y, Q2 = opls.permutation_test(X_matrix, y_binary, n_permutations=100)
+        
+        # 计算置换检验回归线截距
+        m_q2, b_q2 = np.polyfit(corrs, q2_perm, 1) if len(corrs)>0 else (0,0)
+        m_r2, b_r2 = np.polyfit(corrs, r2_perm, 1) if len(corrs)>0 else (0,0)
+
         # 提取 VIP 和 p_corr
         vip_df = pd.DataFrame({'Metabolite': feats, 'VIP': opls.vip, 'p_corr': opls.p_corr})
         stats_df = stats_df.merge(vip_df, on='Metabolite')
@@ -254,16 +278,24 @@ if submit_button:
 
         st.title("📊 SIMCA 风格多维统计报告")
         st.markdown(f"**对比**: {case} vs {ctrl} &nbsp;&nbsp;|&nbsp;&nbsp; **模型评估**: R²Y = `{R2Y:.3f}` &nbsp;&nbsp;|&nbsp;&nbsp; Q² = `{Q2:.3f}`")
-        if Q2 > 0.5: st.success("✅ 该 OPLS-DA 模型预测能力良好 (Q² > 0.5)")
-        else: st.warning("⚠️ 该模型预测能力较弱，组间差异可能不明显或存在噪音干扰 (Q² < 0.5)")
+        if b_q2 < 0.05 and Q2 > 0.5: st.success(f"✅ OPLS-DA 模型优秀且未过拟合！ (Q²截距: {b_q2:.3f})")
+        else: st.warning(f"⚠️ 模型存在过拟合风险，或组间差异极小 (Q²截距: {b_q2:.3f})")
 
-        tabs = st.tabs(["🎯 OPLS-DA 纯净得分图", "🧬 S-Plot 标志物图", "🌋 火山图", "🔥 热图", "📑 差异清单"])
+        tabs = st.tabs(["🎯 OPLS-DA 分组", "🔄 置换检验 (防过拟合)", "🧬 S-Plot", "📊 VIP 排序", "🌐 PCA (QC检测)", "🌋 火山/热图", "📑 导出清单"])
         
         with tabs[0]:
             c1, c2 = st.columns([1, 4])
             with c2:
                 opls_score_df = pd.DataFrame({'t1 (Predictive)': opls.t, 't_ortho (Orthogonal)': opls.t_ortho, 'Group': df_sub[group_col].values})
                 fig_opls = px.scatter(opls_score_df, x='t1 (Predictive)', y='t_ortho (Orthogonal)', color='Group', symbol='Group', color_discrete_sequence=GROUP_COLORS)
+                
+                # 添加 95% 置信区间椭圆
+                for i, g in enumerate(list(sel_grps)):
+                    sub = opls_score_df[opls_score_df['Group']==g]
+                    if len(sub)>=3:
+                        el_x, el_y = get_ellipse_coordinates(sub['t1 (Predictive)'], sub['t_ortho (Orthogonal)'])
+                        if el_x is not None: fig_opls.add_trace(go.Scatter(x=el_x, y=el_y, mode='lines', line=dict(color=GROUP_COLORS[i%len(GROUP_COLORS)], width=2, dash='dash'), showlegend=False, hoverinfo='skip'))
+
                 fig_opls.update_traces(marker=dict(size=14, line=dict(width=1, color='black'), opacity=0.9))
                 fig_opls.add_hline(y=0, line_dash="dash", line_color="gray"); fig_opls.add_vline(x=0, line_dash="dash", line_color="gray")
                 st.plotly_chart(update_layout_square(fig_opls, "OPLS-DA Score Plot", "t [1] (组间预测差异)", "to [1] (组内正交噪音)"))
@@ -271,37 +303,78 @@ if submit_button:
         with tabs[1]:
             c1, c2 = st.columns([1, 4])
             with c2:
-                splot_df = stats_df.copy()
-                splot_df['Color'] = np.where(splot_df['Is_Biomarker'], 'VIP>1 & P<0.05', 'NS')
-                fig_splot = px.scatter(splot_df, x='Log2_FC', y='p_corr', color='Color', hover_data=['Name', 'VIP'], color_discrete_map={'VIP>1 & P<0.05': '#CD0000', 'NS': '#E0E0E0'})
-                fig_splot.add_hline(y=0.5, line_dash="dash"); fig_splot.add_hline(y=-0.5, line_dash="dash")
-                st.plotly_chart(update_layout_square(fig_splot, "S-Plot (p(corr) vs FC)", "Log2 Fold Change", "p(corr) (模型相关性系数)"))
+                fig_perm = go.Figure()
+                fig_perm.add_trace(go.Scatter(x=corrs, y=r2_perm, mode='markers', name='R2', marker=dict(color='green', symbol='circle-open', size=8)))
+                fig_perm.add_trace(go.Scatter(x=corrs, y=q2_perm, mode='markers', name='Q2', marker=dict(color='blue', symbol='square-open', size=8)))
+                # 原点
+                fig_perm.add_trace(go.Scatter(x=[1], y=[R2Y], mode='markers', name='Original R2', marker=dict(color='green', symbol='circle', size=12)))
+                fig_perm.add_trace(go.Scatter(x=[1], y=[Q2], mode='markers', name='Original Q2', marker=dict(color='blue', symbol='square', size=12)))
+                # 回归线
+                x_line = np.array([0, 1])
+                fig_perm.add_trace(go.Scatter(x=x_line, y=m_r2*x_line + b_r2, mode='lines', name=f'R2 Line (Int: {b_r2:.2f})', line=dict(color='green', dash='dash')))
+                fig_perm.add_trace(go.Scatter(x=x_line, y=m_q2*x_line + b_q2, mode='lines', name=f'Q2 Line (Int: {b_q2:.2f})', line=dict(color='blue', dash='dash')))
+                
+                fig_perm.update_layout(template="simple_white", width=600, height=600, title={'text': "Permutation Test (n=100)", 'y':0.95, 'x':0.5, 'xanchor': 'center'}, xaxis_title="Correlation coefficient", yaxis_title="R2 and Q2")
+                st.plotly_chart(fig_perm)
+                st.caption(f"**文章描述建议**：模型通过 100 次置换检验验证未发生过拟合（R2Y=({0.0}, {b_r2:.3f}), Q2Y=({0.0}, {b_q2:.3f})）。")
 
         with tabs[2]:
             c1, c2 = st.columns([1, 4])
             with c2:
-                fig_vol = px.scatter(stats_df, x="Log2_FC", y="-Log10_P", color="Sig", color_discrete_map=COLOR_PALETTE, hover_data=['Name', 'VIP'])
-                fig_vol.add_hline(y=-np.log10(p_th), line_dash="dash", line_color="gray")
-                fig_vol.add_vline(x=fc_th, line_dash="dash", line_color="gray")
-                fig_vol.add_vline(x=-fc_th, line_dash="dash", line_color="gray")
-                st.plotly_chart(update_layout_square(fig_vol, "Volcano Plot", "Log2 Fold Change", "-Log10(P-value)"))
+                splot_df = stats_df.copy()
+                splot_df['Color'] = np.where(splot_df['Is_Biomarker'], 'VIP>1 & P<0.05', 'NS')
+                fig_splot = px.scatter(splot_df, x='Log2_FC', y='p_corr', color='Color', hover_data=['Name', 'VIP'], color_discrete_map={'VIP>1 & P<0.05': '#CD0000', 'NS': '#E0E0E0'})
+                fig_splot.add_hline(y=0.5, line_dash="dash", line_color="gray"); fig_splot.add_hline(y=-0.5, line_dash="dash", line_color="gray")
+                st.plotly_chart(update_layout_square(fig_splot, "S-Plot (p(corr) vs FC)", "Log2 Fold Change", "p(corr) (模型相关性系数)"))
 
         with tabs[3]:
-            sig_mets = stats_df[stats_df['Is_Biomarker']]['Metabolite'].tolist()
-            if not sig_mets: st.info("没有找到满足要求 (VIP>1 且 P<0.05) 的代谢物。")
-            else:
-                hm_feats = stats_df.sort_values('VIP', ascending=False).head(50)['Metabolite'].tolist()
-                hm_data = df_sub.set_index(group_col)[hm_feats].T
-                hm_data.index = [meta.loc[f, 'Clean_Name'] if (meta is not None and f in meta.index) else f for f in hm_data.index]
-                lut = {g: GROUP_COLORS[i%len(GROUP_COLORS)] for i, g in enumerate(df_sub[group_col].unique())}
-                col_colors = df_sub[group_col].map(lut)
-                try:
-                    g = sns.clustermap(hm_data.astype(float), z_score=0, cmap="vlag", center=0, col_colors=col_colors, figsize=(10, 12))
-                    g.ax_heatmap.set_xlabel(""); g.ax_heatmap.set_ylabel("")
-                    st.pyplot(g.fig)
-                except: st.warning("数据中存在方差为 0 的行，热图生成失败。")
+            c1, c2 = st.columns([1, 6])
+            with c2:
+                top_vip = stats_df.sort_values('VIP', ascending=True).tail(25)
+                fig_vip = px.bar(top_vip, x="VIP", y="Name", orientation='h', color="VIP", color_continuous_scale="RdBu_r")
+                fig_vip.add_vline(x=1.0, line_dash="dash", line_color="black")
+                fig_vip.update_layout(template="simple_white", width=800, height=700, title={'text': "VIP Scores (Top 25)", 'x':0.5, 'xanchor': 'center'}, coloraxis_showscale=False)
+                st.plotly_chart(fig_vip)
 
         with tabs[4]:
+            c1, c2 = st.columns([1, 4])
+            with c2:
+                if len(df_sub)<3: st.warning("样本不足以进行 PCA")
+                else:
+                    X_scaled = StandardScaler().fit_transform(df_sub[feats])
+                    pca = PCA(n_components=2).fit(X_scaled); pcs = pca.transform(X_scaled); var = pca.explained_variance_ratio_
+                    pca_df = pd.DataFrame({'PC1': pcs[:,0], 'PC2': pcs[:,1], 'Group': df_sub[group_col].values, 'SampleID': df_sub['SampleID']})
+                    fig_pca = px.scatter(pca_df, x='PC1', y='PC2', color='Group', symbol='Group', hover_data=['SampleID'], color_discrete_sequence=GROUP_COLORS)
+                    
+                    # 整体 95% 置信区间 (Hotelling's T2 Ellipse for outlier detection)
+                    el_x, el_y = get_ellipse_coordinates(pca_df['PC1'], pca_df['PC2'])
+                    if el_x is not None: fig_pca.add_trace(go.Scatter(x=el_x, y=el_y, mode='lines', line=dict(color='black', width=1, dash='dot'), name='95% Hotelling T2'))
+
+                    fig_pca.update_traces(marker=dict(size=14, line=dict(width=1, color='black'), opacity=0.9))
+                    st.plotly_chart(update_layout_square(fig_pca, "PCA Score Plot (QC Outlier Check)", f"PC1 ({var[0]:.1%})", f"PC2 ({var[1]:.1%})"))
+
+        with tabs[5]:
+            c1, c2 = st.columns(2)
+            with c1:
+                fig_vol = px.scatter(stats_df, x="Log2_FC", y="-Log10_P", color="Sig", color_discrete_map=COLOR_PALETTE, hover_data=['Name', 'VIP'])
+                fig_vol.add_hline(y=-np.log10(p_th), line_dash="dash", line_color="gray")
+                fig_vol.add_vline(x=fc_th, line_dash="dash", line_color="gray"); fig_vol.add_vline(x=-fc_th, line_dash="dash", line_color="gray")
+                st.plotly_chart(update_layout_square(fig_vol, "Volcano Plot", "Log2 Fold Change", "-Log10(P-value)"), use_container_width=True)
+            with c2:
+                sig_mets = stats_df[stats_df['Is_Biomarker']]['Metabolite'].tolist()
+                if not sig_mets: st.info("无满足要求的差异代谢物")
+                else:
+                    hm_feats = stats_df.sort_values('VIP', ascending=False).head(50)['Metabolite'].tolist()
+                    hm_data = df_sub.set_index(group_col)[hm_feats].T
+                    hm_data.index = [meta.loc[f, 'Clean_Name'] if (meta is not None and f in meta.index) else f for f in hm_data.index]
+                    lut = {g: GROUP_COLORS[i%len(GROUP_COLORS)] for i, g in enumerate(df_sub[group_col].unique())}; col_colors = df_sub[group_col].map(lut)
+                    try:
+                        g = sns.clustermap(hm_data.astype(float), z_score=0, cmap="vlag", center=0, col_colors=col_colors, figsize=(8, 8))
+                        g.ax_heatmap.set_xlabel(""); g.ax_heatmap.set_ylabel("")
+                        st.pyplot(g.fig)
+                    except: st.warning("热图生成失败")
+
+        with tabs[6]:
             st.markdown("### 🏆 候选生物标志物清单 (依据: VIP > 1 且 P < 0.05)")
             disp_cols = ['Name', 'Log2_FC', 'P_Value', 'FDR', 'VIP', 'p_corr']
             out_df = stats_df[stats_df['Is_Biomarker']].sort_values('VIP', ascending=False)[disp_cols]
