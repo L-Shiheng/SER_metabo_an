@@ -378,7 +378,8 @@ if submit_button:
                         g = sns.clustermap(hm_data.astype(float), z_score=0, cmap="vlag", center=0, col_colors=col_colors, figsize=(8, 8))
                         g.ax_heatmap.set_xlabel(""); g.ax_heatmap.set_ylabel("")
                         st.pyplot(g.fig)
-                        # 捕捉热图转为 base64 供离线 HTML 报告使用
+                        
+                        # 捕捉热图供离线 HTML 报告使用
                         buf = io.BytesIO()
                         g.savefig(buf, format='png', bbox_inches='tight')
                         buf.seek(0)
@@ -430,24 +431,29 @@ if submit_button:
             
             c_rep1, c_rep2 = st.columns(2)
             
-            # --- 1. 人类阅读版：完整 HTML 报告 ---
+            # --- 1. 人类阅读版：完整 HTML 报告 (真·离线版) ---
             with c_rep1:
                 st.markdown("#### 👨‍🔬 1. 完整可视化报告下载 (HTML)")
-                st.write("打包了本次分析的所有参数、数据表格和交互式图表。下载后使用任意浏览器（如 Chrome/Edge）直接打开，无需网络即可查看并截取出版级图片。")
+                st.write("打包了本次分析的所有参数、数据表格和交互式图表。本文件为 100% 离线版，无需网络即可使用任意浏览器秒开，支持缩放与截取出版级图片。")
+                
+                # 使用列表控制引擎只嵌入一次，实现完美离线且不臃肿
+                js_added = [False] 
                 
                 def get_html_plot(fig):
                     if fig is not None:
-                        return fig.to_html(full_html=False, include_plotlyjs=False)
+                        if not js_added[0]:
+                            js_added[0] = True
+                            return fig.to_html(full_html=False, include_plotlyjs=True)
+                        else:
+                            return fig.to_html(full_html=False, include_plotlyjs=False)
                     return "<p style='color:red;'>未生成该图表</p>"
                 
-                # 拼接完整的 HTML 文档
                 html_report = f"""
                 <!DOCTYPE html>
                 <html>
                 <head>
                     <meta charset="utf-8">
                     <title>代谢组学综合分析报告 | {case} vs {ctrl}</title>
-                    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
                     <style>
                         body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 40px auto; max-width: 1100px; color: #333; line-height: 1.6; background-color: #f4f7f6; }}
                         .container {{ background-color: #fff; padding: 40px; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }}
@@ -491,7 +497,7 @@ if submit_button:
                     {pathway_df[['Pathway', 'Total_in_Pathway', 'Hits', 'Enrichment_Factor', 'P_Value']].head(15).to_html(index=False, float_format="%.4f") if not pathway_df.empty else "<p>未进行通路富集分析或无显著命中。</p>"}
                     
                     <h2>5. 统计与多维可视化图表</h2>
-                    <p><i>注：下方图表支持鼠标悬停、缩放及右侧工具栏下载为 PNG/SVG 图片。</i></p>
+                    <p><i>注：本报告为纯离线交互版。图表支持鼠标悬停、框选缩放，点击图表右上角相机图标 📷 即可下载透明底色高清图片。</i></p>
                     
                     <div class="plot-box"><h3>(1) OPLS-DA 得分图</h3>{get_html_plot(fig_opls)}</div>
                     <div class="plot-box"><h3>(2) 置换检验 (Permutation Test)</h3>{get_html_plot(fig_perm)}</div>
@@ -501,7 +507,7 @@ if submit_button:
                 """
                 if hm_base64:
                     html_report += f'<div class="plot-box"><h3>(6) Top 50 差异代谢物聚类热图</h3><img src="data:image/png;base64,{hm_base64}" style="max-width:100%; border:1px solid #ccc;"/></div>'
-                if fig_pathway:
+                if 'fig_pathway' in locals() and fig_pathway is not None:
                     html_report += f'<div class="plot-box"><h3>(7) KEGG 通路富集气泡图</h3>{get_html_plot(fig_pathway)}</div>'
 
                 html_report += """
@@ -519,7 +525,7 @@ if submit_button:
                 
                 num_up = len(out_df[out_df['Log2_FC'] > 0]); num_down = len(out_df[out_df['Log2_FC'] < 0])
                 top_mets_str = out_df[['Name', 'Log2_FC', 'P_Value', 'VIP']].head(15).to_markdown(index=False) if not out_df.empty else "无显著差异物"
-                pw_str = "无"
+                pw_str = "无显著富集通路"
                 if not pathway_df.empty:
                     sig_pws = pathway_df[pathway_df['P_Value'] < 0.05].head(10)
                     if not sig_pws.empty: pw_str = sig_pws[['Pathway', 'Hits', 'P_Value']].to_markdown(index=False)
