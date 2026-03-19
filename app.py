@@ -255,15 +255,15 @@ if submit_button:
         
         stats_df = run_pairwise_statistics(df_sub, group_col, case, ctrl, feats)
         
-        # === 核心修改点 ===
-        if meta is not None: 
-            # 同时把包含分号的原名(Original_Name)和整洁名(Clean_Name)抓取过来
+        # === 核心：抓取全部同义词 (Original_Name) ===
+        if meta is not None and 'Clean_Name' in meta.columns and 'Original_Name' in meta.columns: 
             stats_df = stats_df.merge(meta[['Clean_Name', 'Original_Name']], left_on='Metabolite', right_index=True, how='left')
-        
-        stats_df['Name'] = stats_df['Clean_Name'] if ('Clean_Name' in stats_df.columns) else stats_df['Metabolite']
-        # 保留含有分号的完整字段用于搜索
-        stats_df['Search_Name'] = stats_df['Original_Name'] if ('Original_Name' in stats_df.columns) else stats_df['Metabolite']
-        
+            stats_df['Name'] = stats_df['Clean_Name'].fillna(stats_df['Metabolite'])
+            stats_df['Search_Name'] = stats_df['Original_Name'].fillna(stats_df['Metabolite'])
+        else:
+            stats_df['Name'] = stats_df['Metabolite']
+            stats_df['Search_Name'] = stats_df['Metabolite']
+            
         stats_df['Sig'] = 'NS'
         stats_df.loc[(stats_df['P_Value']<p_th)&(stats_df['Log2_FC']>fc_th), 'Sig']='Up'
         stats_df.loc[(stats_df['P_Value']<p_th)&(stats_df['Log2_FC']<-fc_th), 'Sig']='Down'
@@ -376,32 +376,29 @@ if submit_button:
             st.dataframe(out_df.style.format({"Log2_FC":"{:.2f}", "P_Value":"{:.3e}", "FDR":"{:.3e}", "VIP":"{:.2f}", "p_corr":"{:.2f}"}).background_gradient(subset=['VIP'], cmap="Reds"), use_container_width=True)
             st.download_button("📥 导出差异清单 (CSV)", out_df.to_csv(index=False).encode('utf-8'), "Biomarkers.csv", "text/csv")
 
-               # === 核心：调用真实富集引擎 ===
+        # === 核心：调用真实富集引擎 (基于带分号的完整名称) ===
         with tabs[7]:
-            st.markdown("### 🕸️ 外部 KEGG 代谢通路富集气泡图")
-            st.caption("优先读取您上传的，或 GitHub 中的 `kegg_pathways.csv`（长表两列）。右上角气泡越大越红说明富集越显著。")
+            st.markdown("### 🕸️ KEGG 代谢通路富集气泡图")
+            st.caption("基于完整 `kegg_pathways.csv`，支持识别包含分号的全部别名映射。")
             
             c1, c2 = st.columns([1, 6])
             with c2:
-                # 核心修改：传入包含所有别名的 Search_Name 进行数据库匹配
+                # 核心传递 Search_Name，包含 "Citric acid; Citrate"
                 sig_mets_fullnames = stats_df[stats_df['Is_Biomarker']]['Search_Name'].tolist()
                 all_mets_fullnames = stats_df['Search_Name'].tolist()
                 
                 if not sig_mets_fullnames:
                     st.info("⚠️ 无显著差异标志物，无法进行通路富集。")
                 else:
-                    with st.spinner("正在基于庞大的本地 KEGG 数据库进行匹配..."):
-                        
+                    with st.spinner("正在基于庞大的本地 KEGG 数据库进行精确映射..."):
                         db_source = custom_pathway_file if custom_pathway_file else "kegg_pathways.csv"
-                        
-                        # 调用增强版匹配引擎
                         pathway_df = run_pathway_enrichment(sig_mets_fullnames, all_mets_fullnames, custom_db_source=db_source)
                         
                         if pathway_df.empty:
-                            st.warning("未能匹配到通路。如果使用了外部 CSV 库，请确保包含 `Pathway` 和 `Metabolite` 两列。")
+                            st.warning("未能匹配到通路。如果是首次部署，请确保 Github 根目录存在 `kegg_pathways.csv`。")
                         else:
                             plot_pw_df = pathway_df[pathway_df['Hits'] > 0].head(15)
-                            # ...(后面的绘图逻辑完全不需要变动)...
+                            
                             fig_pathway = px.scatter(
                                 plot_pw_df, x='Enrichment_Factor', y='-Log10_P', size='Hits', color='P_Value',
                                 hover_name='Pathway', hover_data={'Hit_Metabolites': True, 'P_Value': ':.4f', 'Enrichment_Factor': ':.2f'},
