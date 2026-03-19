@@ -4,10 +4,14 @@ import pandas as pd
 def fetch_kegg_database():
     print("⏳ 正在连接 KEGG 官方服务器...")
     
-    # 1. 获取所有代谢通路 (Map) 的 ID 和 名称
+    # 构造请求头，伪装成正常的浏览器访问，防止被 KEGG 拦截
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    
+    # 1. 获取所有代谢通路 (Pathway) 的 ID 和 名称
     print("📥 1/3 正在下载通路列表...")
     pw_names = {}
-    with urllib.request.urlopen("http://rest.kegg.jp/list/pathway/map") as response:
+    req1 = urllib.request.Request("http://rest.kegg.jp/list/pathway", headers=headers)
+    with urllib.request.urlopen(req1) as response:
         for line in response:
             parts = line.decode('utf-8').strip().split('\t')
             if len(parts) == 2:
@@ -17,7 +21,8 @@ def fetch_kegg_database():
     # 2. 获取所有化合物 (Compound) 的 ID 和 通用名
     print("📥 2/3 正在下载代谢物字典 (这可能需要十几秒)...")
     cpd_names = {}
-    with urllib.request.urlopen("http://rest.kegg.jp/list/cpd") as response:
+    req2 = urllib.request.Request("http://rest.kegg.jp/list/cpd", headers=headers)
+    with urllib.request.urlopen(req2) as response:
         for line in response:
             parts = line.decode('utf-8').strip().split('\t')
             if len(parts) == 2:
@@ -25,10 +30,12 @@ def fetch_kegg_database():
                 first_name = parts[1].split(';')[0].strip()
                 cpd_names[parts[0]] = first_name
 
-    # 3. 获取 通路 和 化合物 的映射关系
+    # 3. 获取 通路 和 化合物 的映射关系 (修复了 400 Bad Request 错误)
     print("📥 3/3 正在下载通路-代谢物映射关系...")
     links = []
-    with urllib.request.urlopen("http://rest.kegg.jp/link/cpd/map") as response:
+    # 接口已更新为标准的 /link/cpd/pathway
+    req3 = urllib.request.Request("http://rest.kegg.jp/link/cpd/pathway", headers=headers)
+    with urllib.request.urlopen(req3) as response:
         for line in response:
             parts = line.decode('utf-8').strip().split('\t')
             if len(parts) == 2:
