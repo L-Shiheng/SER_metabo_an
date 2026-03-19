@@ -217,7 +217,7 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
     return pd.concat([meta_df, data_df], axis=1), data_df.columns.tolist()
 
 # ====================
-# 通路富集分析核心引擎 (已修复：切换为全局背景集，重现 MetaboAnalyst <0.05 效果)
+# 通路富集分析核心引擎 (极致对标 MetaboAnalyst 的严谨模式)
 # ====================
 def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_source=None):
     raw_pathways = {}
@@ -261,14 +261,15 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
             print(f"外部数据库加载异常: {e}")
 
     if not raw_pathways:
-        raw_pathways = {
-            "Please upload custom database (请上传或配置完整通路库)": ["glucose", "citrate", "pyruvate"]
-        }
+        return pd.DataFrame() # 库为空直接返回
 
     # 2. 清洗通路数据库
     processed_pathways = {}
+    all_db_mets = set() # 记录数据库中的全宇宙代谢物 (Global Background)
     for pw, mets in raw_pathways.items():
-        processed_pathways[pw] = set([clean_met_name(m) for m in mets])
+        cleaned_mets = [clean_met_name(m) for m in mets]
+        processed_pathways[pw] = set(cleaned_mets)
+        all_db_mets.update(cleaned_mets)
 
     # 3. 处理同义词和特征映射
     def build_synonym_to_feature_map(met_list_with_semicolons):
@@ -283,26 +284,30 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
         return syn2feat
 
     sig_syn2feat = build_synonym_to_feature_map(sig_metabolites)
-    sig_features = set(sig_syn2feat.values())
     
-    # 【核心修复点】: 计算全局背景 (Global Universe) 
-    # 获取整个通路数据库中去重后的所有代谢物种类，这是实现 P < 0.05 的关键！
-    all_db_mets = set()
-    for pw, mets in processed_pathways.items():
-        all_db_mets.update(mets)
-    
-    # N 变为全宇宙总数 (通常在 3000 ~ 6000 左右)
-    N = max(len(all_db_mets), 1000) 
-    n = len(sig_features)
+    # 【核心修复点】: 剔除未匹配物质，消除 P-value 惩罚！
+    # n 不再是“用户上传的总数”，而是“用户上传并且在 KEGG 库里存在的总数”
+    mapped_sig_features = set()
+    for raw_name, feat_name in sig_syn2feat.items():
+        if raw_name in all_db_mets:
+            mapped_sig_features.add(feat_name)
+            
+    # 如果用户的差异代谢物全都是未知质谱峰，一个都没在库里，直接返回空
+    n = len(mapped_sig_features)
+    if n == 0: 
+        return pd.DataFrame()
+
+    # N: KEGG 数据库全局宇宙总数
+    N = len(all_db_mets)
     
     results = []
     
     for pathway_name, pw_set in processed_pathways.items():
-        # K 变为整条通路本身的标准长度 (MetaboAnalyst 逻辑)
+        # K: 该通路中标准包含的总物质数
         K = len(pw_set)
         if K == 0: continue
             
-        # k 依然是：该通路中有多少个物质，命中了用户的显著差异标志物
+        # k: 该通路命中的用户显著标志物数
         k_features = set([sig_syn2feat[m] for m in pw_set if m in sig_syn2feat])
         k = len(k_features)
         
