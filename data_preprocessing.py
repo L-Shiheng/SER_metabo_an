@@ -7,6 +7,7 @@ from sklearn.impute import KNNImputer
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.model_selection import cross_val_predict, KFold
 from sklearn.metrics import r2_score
+from scipy.stats import hypergeom
 
 # ====================
 # SIMCA: OPLS-DA 算法与置换检验
@@ -25,7 +26,6 @@ class OPLS_DA:
         X = np.array(X)
         y = np.array(y).flatten()
         
-        # NIPALS 提取 1个预测 + 1个正交分量
         w = np.dot(X.T, y) / np.dot(y.T, y)
         w /= np.linalg.norm(w)
         t = np.dot(X, w) / np.dot(w.T, w)
@@ -39,7 +39,6 @@ class OPLS_DA:
         self.t_ortho = t_ortho.flatten()
         self.p = p.flatten()
         
-        # p(corr) 和 VIP
         self.p_corr = np.array([np.corrcoef(X[:, i], self.t)[0, 1] for i in range(X.shape[1])])
         w_norm = (w / np.linalg.norm(w)).flatten()
         self.vip = np.sqrt(len(w_norm) * (w_norm ** 2))
@@ -61,7 +60,6 @@ class OPLS_DA:
         return self.R2Y, self.Q2
 
     def permutation_test(self, X, y, n_permutations=100):
-        """SIMCA 核心：置换检验 (Permutation Test)"""
         orig_R2Y, orig_Q2 = self.evaluate(X, y)
         r2_perm, q2_perm, correlations = [], [], []
         
@@ -71,7 +69,6 @@ class OPLS_DA:
         
         for i in range(n_permutations):
             y_shuffled = np.random.permutation(y)
-            # 计算打乱后的 Y 与原 Y 的相关性
             corr = np.abs(np.corrcoef(y, y_shuffled)[0, 1])
             correlations.append(corr)
             
@@ -218,3 +215,109 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
 
     data_df = data_df.loc[:, data_df.var() > 1e-9]
     return pd.concat([meta_df, data_df], axis=1), data_df.columns.tolist()
+
+# ====================
+# 通路富集分析核心引擎 (支持动态加载外部完整数据库)
+# ====================
+def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_source=None):
+    """
+    优先读取外部数据库 (csv/gmt)，如果没找到则使用极小回退库防止崩溃。
+    """
+    raw_pathways = {}
+    
+    # 辅助清理函数
+    def clean_met_name(name):
+        return re.sub(r'[^a-z0-9]', '', str(name).lower())
+
+    # 1. 尝试从本地或上传文件加载完整库
+    if custom_db_source is not None:
+        try:
+            # 如果是 Streamlit 侧边栏上传的文件对象
+            if hasattr(custom_db_source, 'name'):
+                fname = custom_db_source.name
+                if fname.endswith('.gmt'):
+                    content = custom_db_source.getvalue().decode("utf-8")
+                    for line in content.strip().split('\n'):
+                        parts = line.split('\t')
+                        if len(parts) >= 3: raw_pathways[parts[0]] = parts[2:]
+                elif fname.endswith('.csv'):
+                    df_db = pd.read_csv(custom_db_source)
+                    if 'Pathway' in df_db.columns and 'Metabolite' in df_db.columns:
+                        raw_pathways = df_db.groupby('Pathway')['Metabolite'].apply(lambda x: list(x.dropna().astype(str))).to_dict()
+                    else:
+                        for _, row in df_db.iterrows():
+                            vals = row.dropna().astype(str).tolist()
+                            if len(vals) > 1: raw_pathways[vals[0]] = vals[1:]
+            
+            # 如果是一个字符串路径 (例如仓库根目录下的 "kegg_pathways.csv")
+            elif isinstance(custom_db_source, str) and os.path.exists(custom_db_source):
+                if custom_db_source.endswith('.gmt'):
+                    with open(custom_db_source, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            parts = line.strip().split('\t')
+                            if len(parts) >= 3: raw_pathways[parts[0]] = parts[2:]
+                elif custom_db_source.endswith('.csv'):
+                    df_db = pd.read_csv(custom_db_source)
+                    if 'Pathway' in df_db.columns and 'Metabolite' in df_db.columns:
+                        raw_pathways = df_db.groupby('Pathway')['Metabolite'].apply(lambda x: list(x.dropna().astype(str))).to_dict()
+                    else:
+                        for _, row in df_db.iterrows():
+                            vals = row.dropna().astype(str).tolist()
+                            if len(vals) > 1: raw_pathways[vals[0]] = vals[1:]
+        except Exception as e:
+            print(f"外部数据库加载异常: {e}")
+
+    # 2. 如果库是空的（比如文件还没准备好），防止程序崩溃，提供极简备用库
+    if not raw_pathways:
+        raw_pathways = {
+            "Please upload custom database (请上传或配置完整通路库)": ["glucose", "citrate", "pyruvate"]
+        }
+
+    # 构建处理后的库字典
+    processed_pathways = {}
+    for pw, mets in raw_pathways.items():
+        processed_pathways[pw] = set([clean_met_name(m) for m in mets])
+
+    # 用户数据处理
+    sig_set = set([clean_met_name(m) for m in sig_metabolites])
+    bg_set = set([clean_met_name(m) for m in background_metabolites])
+    
+    N = len(bg_set) if len(bg_set) > 0 else 1000 
+    n = len(sig_set)
+    results = []
+    
+    for pathway_name, pw_set in processed_pathways.items():
+        K_set = pw_set.intersection(bg_set)
+        K = len(K_set)
+        if K == 0: K = len(pw_set) # 如果在背景完全未检出，以全库数量兜底防止除零
+            
+        hits_set = pw_set.intersection(sig_set)
+        k = len(hits_set)
+        
+        if k > 0:
+            hit_originals = [orig for orig in sig_metabolites if clean_met_name(orig) in hits_set]
+            expected = (K / N) * n
+            enrichment_factor = k / expected if expected > 0 else 0
+            
+            p_val = hypergeom.sf(k - 1, N, K, n)
+            
+            results.append({
+                "Pathway": pathway_name,
+                "Total_in_Pathway": K,
+                "Hits": k,
+                "Hit_Metabolites": ", ".join(hit_originals),
+                "Enrichment_Factor": enrichment_factor,
+                "P_Value": p_val
+            })
+            
+    res_df = pd.DataFrame(results)
+    if not res_df.empty:
+        from statsmodels.stats.multitest import multipletests
+        try:
+            _, fdr, _, _ = multipletests(res_df['P_Value'], method='fdr_bh')
+            res_df['FDR'] = fdr
+        except: res_df['FDR'] = res_df['P_Value']
+        res_df['-Log10_P'] = -np.log10(res_df['P_Value'].astype(float) + 1e-300)
+        res_df = res_df.sort_values("P_Value")
+        
+    return res_df
