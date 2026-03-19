@@ -5,6 +5,8 @@ import os
 import gc
 import datetime
 import re
+import io
+import base64
 from scipy import stats
 import plotly.express as px
 import plotly.graph_objects as go
@@ -134,7 +136,7 @@ with st.sidebar:
         else: st.warning("⚠️ 需上传 Info 表")
 
     st.markdown("#### 5. 外部通路库 (可选)")
-    custom_pathway_file = st.file_uploader("上传 .csv 或 .gmt 格式。如果不传，自动读取仓库内 kegg_pathways.csv", type=["csv", "gmt"], key="pathway_db")
+    custom_pathway_file = st.file_uploader("不传则自动读取仓库 kegg_pathways.csv", type=["csv", "gmt"], key="pathway_db")
 
     st.markdown("#### 6. 上传 MetDNA 数据")
     uploaded_files = st.file_uploader("结果文件 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
@@ -233,7 +235,7 @@ if st.session_state.data_loaded and st.session_state.raw_df is not None:
         ctrl = c2.selectbox("Control 组 (对照组)", valid, index=1 if len(valid)>1 else 0)
         p_th = c3.number_input("P-value 阈值", 0.05)
         fc_th = c4.number_input("Log2 FC 阈值", 1.0)
-        submit_button = st.form_submit_button(label='🚀 运行分析 (含通路富集)')
+        submit_button = st.form_submit_button(label='🚀 运行全自动分析 (包含图表生成与报告汇总)')
 
 if not st.session_state.data_loaded:
     st.title("🧬 MetaboAnalyst Pro (SIMCA Edition)"); st.info("👈 请在左侧面板上传并处理数据"); st.stop()
@@ -243,6 +245,12 @@ if not submit_button:
 
 if submit_button:
     if len(sel_grps) != 2: st.error("⚠️ OPLS-DA 必须且只能选择 2 个组进行对比！"); st.stop()
+    
+    # 初始化变量，用于报告生成
+    pathway_df = pd.DataFrame() 
+    hm_base64 = ""
+    fig_opls = fig_perm = fig_splot = fig_vip = fig_pca = fig_vol = fig_pathway = None
+
     with st.spinner("正在运行 OPLS-DA 置换检验和通路富集..."):
         raw_df = st.session_state.raw_df; meta = st.session_state.feature_meta
         df_proc, feats = data_cleaning_pipeline(raw_df, group_col, miss_th, impute_m, norm_m, do_log, scale_m)
@@ -254,8 +262,6 @@ if submit_button:
         df_sub = df_proc[df_proc[group_col].isin(sel_grps)].copy()
         
         stats_df = run_pairwise_statistics(df_sub, group_col, case, ctrl, feats)
-        
-        # === 核心：抓取全部同义词 (Original_Name) ===
         if meta is not None and 'Clean_Name' in meta.columns and 'Original_Name' in meta.columns: 
             stats_df = stats_df.merge(meta[['Clean_Name', 'Original_Name']], left_on='Metabolite', right_index=True, how='left')
             stats_df['Name'] = stats_df['Clean_Name'].fillna(stats_df['Metabolite'])
@@ -280,13 +286,14 @@ if submit_button:
         vip_df = pd.DataFrame({'Metabolite': feats, 'VIP': opls.vip, 'p_corr': opls.p_corr})
         stats_df = stats_df.merge(vip_df, on='Metabolite')
         stats_df['Is_Biomarker'] = (stats_df['VIP'] > 1.0) & (stats_df['P_Value'] < p_th)
+        out_df = stats_df[stats_df['Is_Biomarker']].sort_values('VIP', ascending=False)
 
         st.title("📊 综合代谢组学分析报告")
         st.markdown(f"**对比**: {case} vs {ctrl} &nbsp;&nbsp;|&nbsp;&nbsp; **模型**: R²Y = `{R2Y:.3f}` &nbsp;&nbsp;|&nbsp;&nbsp; Q² = `{Q2:.3f}`")
         if b_q2 < 0.05 and Q2 > 0.5: st.success(f"✅ OPLS-DA 模型优秀且未过拟合！ (Q²截距: {b_q2:.3f})")
         else: st.warning(f"⚠️ 模型可能过拟合，或组间差异不大 (Q²截距: {b_q2:.3f})")
 
-        tabs = st.tabs(["🎯 OPLS-DA", "🔄 置换检验", "🧬 S-Plot", "📊 VIP", "🌐 PCA", "🌋 火山/热图", "📑 清单", "🕸️ 通路富集"])
+        tabs = st.tabs(["🎯 OPLS-DA", "🔄 置换检验", "🧬 S-Plot", "📊 VIP", "🌐 PCA", "🌋 火山/热图", "📑 清单", "🕸️ 通路富集", "📄 导出报告与AI助手"])
         
         with tabs[0]:
             c1, c2 = st.columns([1, 4])
@@ -300,7 +307,8 @@ if submit_button:
                         if el_x is not None: fig_opls.add_trace(go.Scatter(x=el_x, y=el_y, mode='lines', line=dict(color=GROUP_COLORS[i%len(GROUP_COLORS)], width=2, dash='dash'), showlegend=False, hoverinfo='skip'))
                 fig_opls.update_traces(marker=dict(size=14, line=dict(width=1, color='black'), opacity=0.9))
                 fig_opls.add_hline(y=0, line_dash="dash", line_color="gray"); fig_opls.add_vline(x=0, line_dash="dash", line_color="gray")
-                st.plotly_chart(update_layout_square(fig_opls, "OPLS-DA Score Plot", "t [1]", "to [1]"))
+                fig_opls = update_layout_square(fig_opls, "OPLS-DA Score Plot", "t [1]", "to [1]")
+                st.plotly_chart(fig_opls)
 
         with tabs[1]:
             c1, c2 = st.columns([1, 4])
@@ -323,13 +331,14 @@ if submit_button:
                 splot_df['Color'] = np.where(splot_df['Is_Biomarker'], 'VIP>1 & P<0.05', 'NS')
                 fig_splot = px.scatter(splot_df, x='Log2_FC', y='p_corr', color='Color', hover_data=['Name', 'VIP'], color_discrete_map={'VIP>1 & P<0.05': '#CD0000', 'NS': '#E0E0E0'})
                 fig_splot.add_hline(y=0.5, line_dash="dash", line_color="gray"); fig_splot.add_hline(y=-0.5, line_dash="dash", line_color="gray")
-                st.plotly_chart(update_layout_square(fig_splot, "S-Plot", "Log2 Fold Change", "p(corr)"))
+                fig_splot = update_layout_square(fig_splot, "S-Plot", "Log2 Fold Change", "p(corr)")
+                st.plotly_chart(fig_splot)
 
         with tabs[3]:
             c1, c2 = st.columns([1, 6])
             with c2:
-                top_vip = stats_df.sort_values('VIP', ascending=True).tail(25)
-                fig_vip = px.bar(top_vip, x="VIP", y="Name", orientation='h', color="VIP", color_continuous_scale="RdBu_r")
+                top_vip_df = stats_df.sort_values('VIP', ascending=True).tail(25)
+                fig_vip = px.bar(top_vip_df, x="VIP", y="Name", orientation='h', color="VIP", color_continuous_scale="RdBu_r")
                 fig_vip.add_vline(x=1.0, line_dash="dash", line_color="black")
                 fig_vip.update_layout(template="simple_white", width=800, height=700, title={'text': "Top 25 VIP Scores", 'x':0.5, 'xanchor': 'center'}, coloraxis_showscale=False)
                 st.plotly_chart(fig_vip)
@@ -346,7 +355,8 @@ if submit_button:
                     el_x, el_y = get_ellipse_coordinates(pca_df['PC1'], pca_df['PC2'])
                     if el_x is not None: fig_pca.add_trace(go.Scatter(x=el_x, y=el_y, mode='lines', line=dict(color='black', width=1, dash='dot'), name='95% Hotelling T2'))
                     fig_pca.update_traces(marker=dict(size=14, line=dict(width=1, color='black'), opacity=0.9))
-                    st.plotly_chart(update_layout_square(fig_pca, "PCA (QC Check)", f"PC1 ({var[0]:.1%})", f"PC2 ({var[1]:.1%})"))
+                    fig_pca = update_layout_square(fig_pca, "PCA (QC Check)", f"PC1 ({var[0]:.1%})", f"PC2 ({var[1]:.1%})")
+                    st.plotly_chart(fig_pca)
 
         with tabs[5]:
             c1, c2 = st.columns(2)
@@ -354,12 +364,13 @@ if submit_button:
                 fig_vol = px.scatter(stats_df, x="Log2_FC", y="-Log10_P", color="Sig", color_discrete_map=COLOR_PALETTE, hover_data=['Name', 'VIP'])
                 fig_vol.add_hline(y=-np.log10(p_th), line_dash="dash", line_color="gray")
                 fig_vol.add_vline(x=fc_th, line_dash="dash", line_color="gray"); fig_vol.add_vline(x=-fc_th, line_dash="dash", line_color="gray")
-                st.plotly_chart(update_layout_square(fig_vol, "Volcano Plot", "Log2 Fold Change", "-Log10(P-value)"), use_container_width=True)
+                fig_vol = update_layout_square(fig_vol, "Volcano Plot", "Log2 Fold Change", "-Log10(P-value)")
+                st.plotly_chart(fig_vol, use_container_width=True)
             with c2:
-                sig_mets = stats_df[stats_df['Is_Biomarker']]['Metabolite'].tolist()
+                sig_mets = out_df['Metabolite'].tolist()
                 if not sig_mets: st.info("无满足要求的差异代谢物")
                 else:
-                    hm_feats = stats_df.sort_values('VIP', ascending=False).head(50)['Metabolite'].tolist()
+                    hm_feats = out_df.head(50)['Metabolite'].tolist()
                     hm_data = df_sub.set_index(group_col)[hm_feats].T
                     hm_data.index = [meta.loc[f, 'Clean_Name'] if (meta is not None and f in meta.index) else f for f in hm_data.index]
                     lut = {g: GROUP_COLORS[i%len(GROUP_COLORS)] for i, g in enumerate(df_sub[group_col].unique())}; col_colors = df_sub[group_col].map(lut)
@@ -367,38 +378,34 @@ if submit_button:
                         g = sns.clustermap(hm_data.astype(float), z_score=0, cmap="vlag", center=0, col_colors=col_colors, figsize=(8, 8))
                         g.ax_heatmap.set_xlabel(""); g.ax_heatmap.set_ylabel("")
                         st.pyplot(g.fig)
-                    except: st.warning("热图生成失败")
+                        # 捕捉热图转为 base64 供离线 HTML 报告使用
+                        buf = io.BytesIO()
+                        g.savefig(buf, format='png', bbox_inches='tight')
+                        buf.seek(0)
+                        hm_base64 = base64.b64encode(buf.read()).decode('utf-8')
+                    except Exception as e: st.warning(f"热图生成失败: {e}")
 
         with tabs[6]:
-            st.markdown("### 🏆 生物标志物清单 (VIP > 1 且 P < 0.05)")
+            st.markdown("### 🏆 生物标志物清单")
             disp_cols = ['Name', 'Log2_FC', 'P_Value', 'FDR', 'VIP', 'p_corr']
-            out_df = stats_df[stats_df['Is_Biomarker']].sort_values('VIP', ascending=False)[disp_cols]
-            st.dataframe(out_df.style.format({"Log2_FC":"{:.2f}", "P_Value":"{:.3e}", "FDR":"{:.3e}", "VIP":"{:.2f}", "p_corr":"{:.2f}"}).background_gradient(subset=['VIP'], cmap="Reds"), use_container_width=True)
-            st.download_button("📥 导出差异清单 (CSV)", out_df.to_csv(index=False).encode('utf-8'), "Biomarkers.csv", "text/csv")
+            st.dataframe(out_df[disp_cols].style.format({"Log2_FC":"{:.2f}", "P_Value":"{:.3e}", "FDR":"{:.3e}", "VIP":"{:.2f}", "p_corr":"{:.2f}"}).background_gradient(subset=['VIP'], cmap="Reds"), use_container_width=True)
 
-        # === 核心：调用真实富集引擎 (基于带分号的完整名称) ===
         with tabs[7]:
-            st.markdown("### 🕸️ KEGG 代谢通路富集气泡图")
-            st.caption("基于完整 `kegg_pathways.csv`，支持识别包含分号的全部别名映射。")
-            
+            st.markdown("### 🕸️ KEGG 代谢通路富集")
             c1, c2 = st.columns([1, 6])
             with c2:
-                # 核心传递 Search_Name，包含 "Citric acid; Citrate"
                 sig_mets_fullnames = stats_df[stats_df['Is_Biomarker']]['Search_Name'].tolist()
                 all_mets_fullnames = stats_df['Search_Name'].tolist()
                 
-                if not sig_mets_fullnames:
-                    st.info("⚠️ 无显著差异标志物，无法进行通路富集。")
+                if not sig_mets_fullnames: st.info("⚠️ 无显著差异标志物，无法进行通路富集。")
                 else:
-                    with st.spinner("正在基于庞大的本地 KEGG 数据库进行精确映射..."):
+                    with st.spinner("正在映射数据库..."):
                         db_source = custom_pathway_file if custom_pathway_file else "kegg_pathways.csv"
                         pathway_df = run_pathway_enrichment(sig_mets_fullnames, all_mets_fullnames, custom_db_source=db_source)
                         
-                        if pathway_df.empty:
-                            st.warning("未能匹配到通路。如果是首次部署，请确保 Github 根目录存在 `kegg_pathways.csv`。")
+                        if pathway_df.empty: st.warning("未能匹配到通路。")
                         else:
                             plot_pw_df = pathway_df[pathway_df['Hits'] > 0].head(15)
-                            
                             fig_pathway = px.scatter(
                                 plot_pw_df, x='Enrichment_Factor', y='-Log10_P', size='Hits', color='P_Value',
                                 hover_name='Pathway', hover_data={'Hit_Metabolites': True, 'P_Value': ':.4f', 'Enrichment_Factor': ':.2f'},
@@ -407,15 +414,136 @@ if submit_button:
                             fig_pathway.update_layout(
                                 template="simple_white", width=800, height=600,
                                 title={'text': "Pathway Enrichment Bubble Plot", 'y':0.95, 'x':0.5, 'xanchor': 'center'},
-                                xaxis_title="Enrichment Factor (富集倍数)", yaxis_title="-Log10(P-value)",
+                                xaxis_title="Enrichment Factor", yaxis_title="-Log10(P-value)",
                                 coloraxis_colorbar=dict(title="P-value")
                             )
-                            fig_pathway.add_hline(y=-np.log10(0.05), line_dash="dash", line_color="gray", annotation_text="P=0.05")
-                            
+                            fig_pathway.add_hline(y=-np.log10(0.05), line_dash="dash", line_color="gray")
                             st.plotly_chart(fig_pathway)
-                            
-                            st.markdown("#### 📖 详细命中统计")
-                            st.dataframe(
-                                pathway_df.style.format({"P_Value":"{:.3e}", "FDR":"{:.3e}", "Enrichment_Factor":"{:.2f}"}).background_gradient(subset=['P_Value'], cmap="Reds_r", vmin=0, vmax=0.05),
-                                use_container_width=True
-                            )
+                            st.dataframe(pathway_df.style.format({"P_Value":"{:.3e}", "FDR":"{:.3e}", "Enrichment_Factor":"{:.2f}"}).background_gradient(subset=['P_Value'], cmap="Reds_r", vmin=0, vmax=0.05), use_container_width=True)
+
+        # ===============================================
+        # 终极新增：离线 HTML 报告与 AI 提示词
+        # ===============================================
+        with tabs[8]:
+            st.markdown("### 📄 报告生成中心")
+            st.caption("一键生成面向专家的可视化汇总报告，以及喂给 AI 的文章起草 Prompt。")
+            
+            c_rep1, c_rep2 = st.columns(2)
+            
+            # --- 1. 人类阅读版：完整 HTML 报告 ---
+            with c_rep1:
+                st.markdown("#### 👨‍🔬 1. 完整可视化报告下载 (HTML)")
+                st.write("打包了本次分析的所有参数、数据表格和交互式图表。下载后使用任意浏览器（如 Chrome/Edge）直接打开，无需网络即可查看并截取出版级图片。")
+                
+                def get_html_plot(fig):
+                    if fig is not None:
+                        return fig.to_html(full_html=False, include_plotlyjs=False)
+                    return "<p style='color:red;'>未生成该图表</p>"
+                
+                # 拼接完整的 HTML 文档
+                html_report = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="utf-8">
+                    <title>代谢组学综合分析报告 | {case} vs {ctrl}</title>
+                    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+                    <style>
+                        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 40px auto; max-width: 1100px; color: #333; line-height: 1.6; background-color: #f4f7f6; }}
+                        .container {{ background-color: #fff; padding: 40px; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }}
+                        h1 {{ color: #2c3e50; text-align: center; border-bottom: 2px solid #3498db; padding-bottom: 10px; }}
+                        h2 {{ color: #2980b9; margin-top: 40px; border-left: 4px solid #2980b9; padding-left: 10px; }}
+                        table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; font-size: 14px; text-align: left; }}
+                        th, td {{ border: 1px solid #ddd; padding: 10px; }}
+                        th {{ background-color: #f8f9fa; color: #2c3e50; }}
+                        tr:nth-child(even) {{ background-color: #f9f9f9; }}
+                        .plot-box {{ margin: 30px 0; padding: 15px; border: 1px solid #eee; border-radius: 8px; background: #fafafa; text-align: center; }}
+                        .metric-container {{ display: flex; justify-content: space-around; background: #eef2f5; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+                        .metric {{ text-align: center; }}
+                        .metric-title {{ font-size: 14px; color: #7f8c8d; text-transform: uppercase; }}
+                        .metric-value {{ font-size: 28px; font-weight: bold; color: #e74c3c; }}
+                    </style>
+                </head>
+                <body>
+                <div class="container">
+                    <h1>代谢组学综合分析报告 (SIMCA 规范)</h1>
+                    
+                    <h2>1. 实验项目与参数</h2>
+                    <ul>
+                        <li><b>对比组别:</b> <code>{case}</code> (实验组) vs <code>{ctrl}</code> (对照组)</li>
+                        <li><b>数据规模:</b> 鉴定出 {len(feats)} 个特征</li>
+                        <li><b>筛选标准:</b> VIP > 1.0, P-value < {p_th}, |Log2 FC| > {fc_th}</li>
+                        <li><b>预处理策略:</b> {norm_m} + {scale_m} Scaling</li>
+                    </ul>
+                    
+                    <h2>2. OPLS-DA 模型评估</h2>
+                    <div class="metric-container">
+                        <div class="metric"><div class="metric-title">R²Y (模型解释率)</div><div class="metric-value">{R2Y:.3f}</div></div>
+                        <div class="metric"><div class="metric-title">Q² (模型预测率)</div><div class="metric-value">{Q2:.3f}</div></div>
+                        <div class="metric"><div class="metric-title">Q² 置换检验截距</div><div class="metric-value">{b_q2:.3f}</div></div>
+                    </div>
+                    <p style="text-align: center;"><b>结论:</b> {"该 OPLS-DA 模型分离度极佳且未发生过拟合，预测结果高度可靠。" if (b_q2 < 0.05 and Q2 > 0.5) else "模型分离度一般或存在轻微过拟合，提示两组间代谢差异可能不显著。"}</p>
+
+                    <h2>3. 核心差异代谢物清单 (Top 25 Biomarkers)</h2>
+                    {out_df[['Name', 'Log2_FC', 'P_Value', 'VIP', 'p_corr']].head(25).to_html(index=False, float_format="%.3f")}
+                    
+                    <h2>4. KEGG 代谢通路富集分析 (Top 15)</h2>
+                    {pathway_df[['Pathway', 'Total_in_Pathway', 'Hits', 'Enrichment_Factor', 'P_Value']].head(15).to_html(index=False, float_format="%.4f") if not pathway_df.empty else "<p>未进行通路富集分析或无显著命中。</p>"}
+                    
+                    <h2>5. 统计与多维可视化图表</h2>
+                    <p><i>注：下方图表支持鼠标悬停、缩放及右侧工具栏下载为 PNG/SVG 图片。</i></p>
+                    
+                    <div class="plot-box"><h3>(1) OPLS-DA 得分图</h3>{get_html_plot(fig_opls)}</div>
+                    <div class="plot-box"><h3>(2) 置换检验 (Permutation Test)</h3>{get_html_plot(fig_perm)}</div>
+                    <div class="plot-box"><h3>(3) S-Plot</h3>{get_html_plot(fig_splot)}</div>
+                    <div class="plot-box"><h3>(4) 火山图</h3>{get_html_plot(fig_vol)}</div>
+                    <div class="plot-box"><h3>(5) PCA 宏观质控得分图</h3>{get_html_plot(fig_pca)}</div>
+                """
+                if hm_base64:
+                    html_report += f'<div class="plot-box"><h3>(6) Top 50 差异代谢物聚类热图</h3><img src="data:image/png;base64,{hm_base64}" style="max-width:100%; border:1px solid #ccc;"/></div>'
+                if fig_pathway:
+                    html_report += f'<div class="plot-box"><h3>(7) KEGG 通路富集气泡图</h3>{get_html_plot(fig_pathway)}</div>'
+
+                html_report += """
+                </div>
+                </body>
+                </html>
+                """
+                
+                st.download_button("📥 下载完整交互式网页报告 (.html)", html_report.encode('utf-8'), f"Metabolomics_Report_{case}_vs_{ctrl}.html", "text/html", type="primary")
+
+            # --- 2. AI 撰稿助手 ---
+            with c_rep2:
+                st.markdown("#### 🤖 2. AI 撰稿专属 Prompt")
+                st.write("直接点击右下方拷贝按钮，或下载为 `.md` 发给 ChatGPT / Claude，让它立刻帮您写出 SCI 级别的 Results 和 Discussion 段落。")
+                
+                num_up = len(out_df[out_df['Log2_FC'] > 0]); num_down = len(out_df[out_df['Log2_FC'] < 0])
+                top_mets_str = out_df[['Name', 'Log2_FC', 'P_Value', 'VIP']].head(15).to_markdown(index=False) if not out_df.empty else "无显著差异物"
+                pw_str = "无"
+                if not pathway_df.empty:
+                    sig_pws = pathway_df[pathway_df['P_Value'] < 0.05].head(10)
+                    if not sig_pws.empty: pw_str = sig_pws[['Pathway', 'Hits', 'P_Value']].to_markdown(index=False)
+                
+                prompt_md = f"""请作为一名资深的生物信息学和代谢组学专家，根据以下我提供的代谢组学数据分析结果，帮我撰写一篇英文科研论文的 **Results（结果）** 和 **Discussion（讨论）** 部分。
+
+### 🔬 1. 实验参数与模型质控
+- **对比组别**: {case} (Case) vs {ctrl} (Control)
+- **预处理与缩放**: {norm_m} + {scale_m} Scaling
+- **OPLS-DA 模型评估**: R²Y = {R2Y:.3f}, Q² = {Q2:.3f}, 置换检验 Q² 截距 = {b_q2:.3f} (模型{"稳健且未过拟合" if (b_q2<0.05 and Q2>0.5) else "预测能力一般"})。
+
+### 🧬 2. 差异生物标志物 (Biomarkers)
+- 筛选阈值: VIP > 1.0 且 P-value < {p_th}。
+- 整体情况: 共找到 {num_up + num_down} 个标志物，其中 {num_up} 个在 {case} 组中显著上调，{num_down} 个显著下调。
+- **Top 15 核心标志物清单**:
+{top_mets_str}
+
+### 🕸️ 3. KEGG 代谢通路富集 (P < 0.05)
+{pw_str}
+
+---
+### 📝 撰写要求：
+1. **Results 部分**：总结 OPLS-DA 模型的分离情况和置换检验结果；描述差异代谢物的整体分布；客观描述上述显著富集的 KEGG 通路。
+2. **Discussion 部分**：结合上述查出的 Top 标志物和关键通路，查阅最新生化医学文献，深入探讨 {case} 组相对于 {ctrl} 组发生这些代谢网络改变的生理/病理机制，以及潜在的临床指导意义。
+"""
+                st.text_area("拷贝此文本发送给 AI:", value=prompt_md, height=250)
+                st.download_button("📥 下载 Prompt 文件 (.md)", prompt_md.encode('utf-8'), f"AI_Prompt_{case}_vs_{ctrl}.md", "text/markdown")
