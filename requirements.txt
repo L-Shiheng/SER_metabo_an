@@ -10,4 +10,4 @@ pyarrow
 seaborn
 openpyxl
 joblib
-
+tabulate
