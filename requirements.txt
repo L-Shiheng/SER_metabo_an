@@ -11,3 +11,4 @@ seaborn
 openpyxl
 joblib
 tabulate
+networkx
