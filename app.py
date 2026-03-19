@@ -12,6 +12,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import seaborn as sns
 import matplotlib.pyplot as plt
+import networkx as nx
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from statsmodels.stats.multitest import multipletests
@@ -220,17 +221,14 @@ if st.session_state.data_loaded and st.session_state.raw_df is not None:
         group_col = st.selectbox("分组列", non_num, index=non_num.index('Group') if 'Group' in non_num else 0)
         
         with st.expander("数据预处理配置 (SIMCA 标准工作流)", expanded=False):
-            filter_option = st.radio("分析范围:", ["全部特征", "仅已注释特征"], index=0, help="非靶向代谢组学推荐先用「全部特征」进行全局 OPLS-DA 统计，找寻差异后再关注注释结果。")
-            
+            filter_option = st.radio("分析范围:", ["全部特征", "仅已注释特征"], index=0)
             c_p1, c_p2 = st.columns(2)
-            miss_th = c_p1.slider("剔除缺失率 > X", 0.0, 1.0, 0.20, help="【行业标准 80% 规则】：剔除在总体样本中缺失率超过 20% (0.20) 的低质量特征。")
-            impute_m = c_p2.selectbox("缺失值填充", ["KNN (推荐)", "min", "mean", "zero"], index=0, help="KNN 算法在代谢组学中能最大程度保持原始数据的分布方差。").split()[0]
-            
+            miss_th = c_p1.slider("剔除缺失率 > X", 0.0, 1.0, 0.20)
+            impute_m = c_p2.selectbox("缺失值填充", ["KNN (推荐)", "min", "mean", "zero"], index=0).split()[0]
             c_p3, c_p4 = st.columns(2)
-            norm_m = c_p3.selectbox("样本归一化", ["PQN (推荐)", "Median", "Sum", "None"], index=0, help="PQN (概率商归一化) 是质谱分析中最权威的消除进样量和仪器漂移的方法。").split()[0]
-            scale_m = c_p4.selectbox("特征缩放 (Scaling)", ["Pareto (SIMCA 默认)", "Auto (Z-score)", "None"], index=0, help="Pareto 保留了原始数据的部分结构，是 SIMCA 软件最经典的缩放方式。").split()[0]
-            
-            do_log = st.checkbox("Log2 对数转化 (强烈推荐)", value=True, help="使数据更符合正态分布，缩小高低丰度代谢物的绝对差异，满足 OPLS-DA 和 T 检验的前提假设。")
+            norm_m = c_p3.selectbox("样本归一化", ["PQN (推荐)", "Median", "Sum", "None"], index=0).split()[0]
+            scale_m = c_p4.selectbox("特征缩放 (Scaling)", ["Pareto (SIMCA 默认)", "Auto (Z-score)", "None"], index=0).split()[0]
+            do_log = st.checkbox("Log2 对数转化 (强烈推荐)", value=True)
 
         cur_grps = sorted(raw_df[group_col].astype(str).unique())
         sel_grps = st.multiselect("纳入对比组 (OPLS-DA 需要严格的 2 组对比)", cur_grps, default=cur_grps[:2] if len(cur_grps)>=2 else cur_grps)
@@ -239,13 +237,9 @@ if st.session_state.data_loaded and st.session_state.raw_df is not None:
         valid = list(sel_grps)
         case = c1.selectbox("Case 组 (实验组)", valid, index=0 if valid else None)
         ctrl = c2.selectbox("Control 组 (对照组)", valid, index=1 if len(valid)>1 else 0)
-        p_th = c3.number_input("P-value 阈值", value=0.05, step=0.01, format="%.2f", help="通常认定 P < 0.05 具有统计学显著性差异。")
-        
-        # 将默认 FC 修改为 0.58 (即 1.5 倍差异)，更符合代谢组学特性
-        fc_th = c4.number_input("Log2 FC 阈值", value=0.58, step=0.10, help="0.58 对应 1.5 倍差异；1.0 对应 2.0 倍差异。代谢物变化幅度较小，通常设定为 0.58 或 0.26 (1.2倍)。")
-        
+        p_th = c3.number_input("P-value 阈值", value=0.05, step=0.01)
+        fc_th = c4.number_input("Log2 FC 阈值", value=0.58, step=0.10, help="0.58 对应 1.5 倍差异；1.0 对应 2.0 倍差异")
         submit_button = st.form_submit_button(label='🚀 运行全自动分析 (生成交互图表与离线报告)')
-
 
 if not st.session_state.data_loaded:
     st.title("🧬 MetaboAnalyst Pro (SIMCA Edition)"); st.info("👈 请在左侧面板上传并处理数据"); st.stop()
@@ -256,12 +250,11 @@ if not submit_button:
 if submit_button:
     if len(sel_grps) != 2: st.error("⚠️ OPLS-DA 必须且只能选择 2 个组进行对比！"); st.stop()
     
-    # 初始化变量，用于报告生成
     pathway_df = pd.DataFrame() 
     hm_base64 = ""
-    fig_opls = fig_perm = fig_splot = fig_vip = fig_pca = fig_vol = fig_pathway = None
+    fig_opls = fig_perm = fig_splot = fig_vip = fig_pca = fig_vol = fig_pathway = fig_network = None
 
-    with st.spinner("正在运行 OPLS-DA 置换检验和通路富集..."):
+    with st.spinner("正在运行分析与网络构建..."):
         raw_df = st.session_state.raw_df; meta = st.session_state.feature_meta
         df_proc, feats = data_cleaning_pipeline(raw_df, group_col, miss_th, impute_m, norm_m, do_log, scale_m)
         
@@ -280,6 +273,7 @@ if submit_button:
             stats_df['Name'] = stats_df['Metabolite']
             stats_df['Search_Name'] = stats_df['Metabolite']
             
+        # BUG FIX: 增加 Log2FC 的门槛筛选，确保 Biomarker 纯净度
         stats_df['Sig'] = 'NS'
         stats_df.loc[(stats_df['P_Value']<p_th)&(stats_df['Log2_FC']>fc_th), 'Sig']='Up'
         stats_df.loc[(stats_df['P_Value']<p_th)&(stats_df['Log2_FC']<-fc_th), 'Sig']='Down'
@@ -295,6 +289,8 @@ if submit_button:
 
         vip_df = pd.DataFrame({'Metabolite': feats, 'VIP': opls.vip, 'p_corr': opls.p_corr})
         stats_df = stats_df.merge(vip_df, on='Metabolite')
+        
+        # 核心修复点应用在这里
         stats_df['Is_Biomarker'] = (stats_df['VIP'] > 1.0) & (stats_df['P_Value'] < p_th) & (stats_df['Log2_FC'].abs() > fc_th)
         out_df = stats_df[stats_df['Is_Biomarker']].sort_values('VIP', ascending=False)
 
@@ -303,7 +299,8 @@ if submit_button:
         if b_q2 < 0.05 and Q2 > 0.5: st.success(f"✅ OPLS-DA 模型优秀且未过拟合！ (Q²截距: {b_q2:.3f})")
         else: st.warning(f"⚠️ 模型可能过拟合，或组间差异不大 (Q²截距: {b_q2:.3f})")
 
-        tabs = st.tabs(["🎯 OPLS-DA", "🔄 置换检验", "🧬 S-Plot", "📊 VIP", "🌐 PCA", "🌋 火山/热图", "📑 清单", "🕸️ 通路富集", "📄 导出报告与AI助手"])
+        # 增加网络图 Tab
+        tabs = st.tabs(["🎯 OPLS-DA", "🔄 置换检验", "🧬 S-Plot", "📊 VIP", "🌐 PCA", "🌋 火山/热图", "📑 清单", "🕸️ 通路富集", "🔗 机制网络图", "📄 导出报告与AI助手"])
         
         with tabs[0]:
             c1, c2 = st.columns([1, 4])
@@ -389,7 +386,6 @@ if submit_button:
                         g.ax_heatmap.set_xlabel(""); g.ax_heatmap.set_ylabel("")
                         st.pyplot(g.fig)
                         
-                        # 捕捉热图供离线 HTML 报告使用
                         buf = io.BytesIO()
                         g.savefig(buf, format='png', bbox_inches='tight')
                         buf.seek(0)
@@ -433,22 +429,118 @@ if submit_button:
                             st.dataframe(pathway_df.style.format({"P_Value":"{:.3e}", "FDR":"{:.3e}", "Enrichment_Factor":"{:.2f}"}).background_gradient(subset=['P_Value'], cmap="Reds_r", vmin=0, vmax=0.05), use_container_width=True)
 
         # ===============================================
-        # 终极新增：离线 HTML 报告与 AI 提示词
+        # 终极新增：代谢重编程机制网络图 (Network)
         # ===============================================
         with tabs[8]:
+            st.markdown("### 🔗 代谢重编程机制网络 (Pathway-Metabolite Network)")
+            st.caption("展示显著富集通路（P < 0.05）与核心标志物的相互关联。方块代表通路，圆点代表代谢物（红色上调，蓝色下调）。节点越大代表富集度或 VIP 越高。")
+            
+            if pathway_df.empty or out_df.empty:
+                st.info("需要产生显著的富集通路和差异代谢物后，才能构建重编程网络。")
+            else:
+                sig_pws = pathway_df[pathway_df['P_Value'] < 0.05]
+                if sig_pws.empty:
+                    st.info("当前组别对比下没有 P < 0.05 的显著富集通路，无法绘制网络。")
+                else:
+                    # 1. 构建 NetworkX 图
+                    G = nx.Graph()
+                    
+                    # 提取显著标志物的折叠字典 (Name -> Log2FC)
+                    fc_dict = dict(zip(out_df['Name'], out_df['Log2_FC']))
+                    vip_dict = dict(zip(out_df['Name'], out_df['VIP']))
+                    
+                    # 2. 添加节点和边
+                    for _, row in sig_pws.iterrows():
+                        pw_name = row['Pathway']
+                        # 添加通路节点 (权重为 -log10P 加上基础大小)
+                        G.add_node(pw_name, node_type='pathway', size=max(15, -np.log10(row['P_Value']) * 10))
+                        
+                        hits_str = row['Hit_Metabolites']
+                        if pd.notna(hits_str) and str(hits_str).strip() != "":
+                            hits = [m.strip() for m in hits_str.split(',')]
+                            for hit in hits:
+                                if hit in fc_dict:
+                                    # 添加代谢物节点
+                                    G.add_node(hit, node_type='metabolite', size=max(10, vip_dict.get(hit, 1.0) * 8), fc=fc_dict[hit])
+                                    # 添加连线
+                                    G.add_edge(pw_name, hit)
+
+                    if len(G.nodes) > 0:
+                        # 3. 计算布局 (Fruchterman-Reingold force-directed algorithm)
+                        pos = nx.spring_layout(G, k=0.5, iterations=50, seed=42)
+                        
+                        edge_x, edge_y = [], []
+                        for edge in G.edges():
+                            x0, y0 = pos[edge[0]]
+                            x1, y1 = pos[edge[1]]
+                            edge_x.extend([x0, x1, None])
+                            edge_y.extend([y0, y1, None])
+
+                        edge_trace = go.Scatter(
+                            x=edge_x, y=edge_y, line=dict(width=1, color='#888'),
+                            hoverinfo='none', mode='lines'
+                        )
+
+                        node_x, node_y, node_text, node_color, node_size, node_symbol = [], [], [], [], [], []
+                        for node in G.nodes():
+                            x, y = pos[node]
+                            node_x.append(x)
+                            node_y.append(y)
+                            
+                            node_info = G.nodes[node]
+                            if node_info['node_type'] == 'pathway':
+                                node_color.append('#FFD700') # 金色代表通路
+                                node_size.append(node_info['size'])
+                                node_symbol.append('square')
+                                node_text.append(f"<b>[Pathway]</b> {node}")
+                            else:
+                                fc = node_info['fc']
+                                color = '#CD0000' if fc > 0 else '#00008B' # 红色上调，蓝色下调
+                                node_color.append(color)
+                                node_size.append(node_info['size'])
+                                node_symbol.append('circle')
+                                node_text.append(f"<b>{node}</b><br>Log2FC: {fc:.2f}")
+
+                        node_trace = go.Scatter(
+                            x=node_x, y=node_y, mode='markers+text',
+                            hoverinfo='text', text=[n if G.nodes[n]['node_type']=='pathway' else '' for n in G.nodes()], 
+                            textposition="top center",
+                            hovertext=node_text,
+                            marker=dict(
+                                symbol=node_symbol, showscale=False,
+                                color=node_color, size=node_size,
+                                line_width=1, line_color='black'
+                            )
+                        )
+
+                        fig_network = go.Figure(data=[edge_trace, node_trace],
+                                     layout=go.Layout(
+                                        title='<br>Metabolic Reprogramming Mechanism Network',
+                                        titlefont_size=16,
+                                        showlegend=False,
+                                        hovermode='closest',
+                                        margin=dict(b=20,l=5,r=5,t=40),
+                                        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                                        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False))
+                                     )
+                        fig_network.update_layout(width=900, height=700, plot_bgcolor='white')
+                        st.plotly_chart(fig_network)
+                        st.info("💡 **绘图指南**：黄色的方块代表代谢通路，红蓝色的圆圈代表标志物。这个拓扑网络是您在 BioRender 或 Illustrator 中手绘高分 SCI 文章机制示意图的完美草稿。")
+
+        # ===============================================
+        # 离线 HTML 报告与 AI 提示词
+        # ===============================================
+        with tabs[9]:
             st.markdown("### 📄 报告生成中心")
             st.caption("一键生成面向专家的可视化汇总报告，以及喂给 AI 的文章起草 Prompt。")
             
             c_rep1, c_rep2 = st.columns(2)
             
-            # --- 1. 人类阅读版：完整 HTML 报告 (真·离线版) ---
             with c_rep1:
                 st.markdown("#### 👨‍🔬 1. 完整可视化报告下载 (HTML)")
                 st.write("打包了本次分析的所有参数、数据表格和交互式图表。本文件为 100% 离线版，无需网络即可使用任意浏览器秒开，支持缩放与截取出版级图片。")
                 
-                # 使用列表控制引擎只嵌入一次，实现完美离线且不臃肿
                 js_added = [False] 
-                
                 def get_html_plot(fig):
                     if fig is not None:
                         if not js_added[0]:
@@ -519,6 +611,8 @@ if submit_button:
                     html_report += f'<div class="plot-box"><h3>(6) Top 50 差异代谢物聚类热图</h3><img src="data:image/png;base64,{hm_base64}" style="max-width:100%; border:1px solid #ccc;"/></div>'
                 if 'fig_pathway' in locals() and fig_pathway is not None:
                     html_report += f'<div class="plot-box"><h3>(7) KEGG 通路富集气泡图</h3>{get_html_plot(fig_pathway)}</div>'
+                if 'fig_network' in locals() and fig_network is not None:
+                    html_report += f'<div class="plot-box"><h3>(8) 代谢重编程机制网络图</h3>{get_html_plot(fig_network)}</div>'
 
                 html_report += """
                 </div>
@@ -528,7 +622,6 @@ if submit_button:
                 
                 st.download_button("📥 下载完整交互式网页报告 (.html)", html_report.encode('utf-8'), f"Metabolomics_Report_{case}_vs_{ctrl}.html", "text/html", type="primary")
 
-            # --- 2. AI 撰稿助手 ---
             with c_rep2:
                 st.markdown("#### 🤖 2. AI 撰稿专属 Prompt")
                 st.write("直接点击右下方拷贝按钮，或下载为 `.md` 发给 ChatGPT / Claude，让它立刻帮您写出 SCI 级别的 Results 和 Discussion 段落。")
