@@ -285,7 +285,7 @@ if submit_button:
 
         vip_df = pd.DataFrame({'Metabolite': feats, 'VIP': opls.vip, 'p_corr': opls.p_corr})
         stats_df = stats_df.merge(vip_df, on='Metabolite')
-        stats_df['Is_Biomarker'] = (stats_df['VIP'] > 1.0) & (stats_df['P_Value'] < p_th)
+        stats_df['Is_Biomarker'] = (stats_df['VIP'] > 1.0) & (stats_df['P_Value'] < p_th) & (stats_df['Log2_FC'].abs() > fc_th)
         out_df = stats_df[stats_df['Is_Biomarker']].sort_values('VIP', ascending=False)
 
         st.title("📊 综合代谢组学分析报告")
