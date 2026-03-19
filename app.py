@@ -215,7 +215,7 @@ if st.session_state.data_loaded and st.session_state.raw_df is not None:
     st.download_button("📥 导出清洗前合并数据", csv_data, f"Metabo_{datetime.datetime.now().strftime('%Y%m%d')}.csv", "text/csv")
     st.divider()
 
-        with st.form(key='analysis_form'):
+    with st.form(key='analysis_form'):
         st.markdown("### ⚙️ 统计与富集分析设置 (已设定为行业金标准)")
         non_num = raw_df.select_dtypes(exclude=[np.number]).columns.tolist()
         group_col = st.selectbox("分组列", non_num, index=non_num.index('Group') if 'Group' in non_num else 0)
