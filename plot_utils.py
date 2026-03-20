@@ -3,7 +3,6 @@ import plotly.graph_objects as go
 from sklearn.linear_model import LogisticRegression
 
 def update_layout_square(fig, title="", x_title="", y_title=""):
-    """标准化 Plotly 图表为正方形白底样式"""
     fig.update_layout(
         template="simple_white", width=600, height=600, 
         title={'text': title, 'y':0.95, 'x':0.5, 'xanchor': 'center'}, 
@@ -14,7 +13,6 @@ def update_layout_square(fig, title="", x_title="", y_title=""):
     return fig
 
 def get_ellipse_coordinates(x, y, std_mult=2):
-    """计算 95% 置信椭圆的坐标"""
     if len(x) < 3: return None, None
     mean_x, mean_y = np.mean(x), np.mean(y)
     cov = np.cov(x, y)
@@ -31,23 +29,19 @@ def get_ellipse_coordinates(x, y, std_mult=2):
     return ell_coords[0] + mean_x, ell_coords[1] + mean_y
 
 def plot_nomogram(df_sub, features, feature_names, group_col, case_name):
-    """构建逻辑回归并使用底层 Plotly 画线实现列线图"""
     X = df_sub[features].values
     y = np.where(df_sub[group_col] == case_name, 1, 0)
-    
     if len(np.unique(y)) < 2: return None
     
     clf = LogisticRegression(C=100.0, solver='lbfgs', max_iter=1000)
     clf.fit(X, y)
-    betas = clf.coef_[0]
-    beta0 = clf.intercept_[0]
+    betas, beta0 = clf.coef_[0], clf.intercept_[0]
     
     L_min, L_max, L_ranges = [], [], []
     for i in range(len(features)):
         v_min, v_max = np.min(X[:, i]), np.max(X[:, i])
         L_v1, L_v2 = betas[i]*v_min, betas[i]*v_max
-        L_min.append(min(L_v1, L_v2))
-        L_max.append(max(L_v1, L_v2))
+        L_min.append(min(L_v1, L_v2)); L_max.append(max(L_v1, L_v2))
         L_ranges.append(abs(L_v1 - L_v2))
         
     L_max_range = max(L_ranges) if max(L_ranges) > 0 else 1e-5
@@ -71,10 +65,8 @@ def plot_nomogram(df_sub, features, feature_names, group_col, case_name):
         TP_max += pts_max
         fig.add_trace(go.Scatter(x=[0, pts_max], y=[yf, yf], mode='lines', line=dict(color='black', width=2), showlegend=False))
         v_min, v_max = np.min(X[:, i]), np.max(X[:, i])
-        ticks = np.linspace(v_min, v_max, 5)
-        for tv in ticks:
-            L_tv = betas[i] * tv
-            pt_tv = S * (L_tv - L_min[i])
+        for tv in np.linspace(v_min, v_max, 5):
+            pt_tv = S * (betas[i] * tv - L_min[i])
             fig.add_trace(go.Scatter(x=[pt_tv, pt_tv], y=[yf, yf+0.15], mode='lines', line=dict(color='black', width=2), showlegend=False))
             fig.add_annotation(x=pt_tv, y=yf+0.4, text=f"{tv:.2f}", showarrow=False, font=dict(size=11))
             
@@ -85,27 +77,19 @@ def plot_nomogram(df_sub, features, feature_names, group_col, case_name):
         fig.add_annotation(x=pt, y=ytp+0.4, text=str(pt), showarrow=False, font=dict(size=12))
         
     yprob = y_vals[0]
-    def tp_to_prob(tp):
-        logit = np.clip(beta0 + (tp / S) + sum(L_min), -20, 20)
-        return 1 / (1 + np.exp(-logit))
-    def prob_to_tp(p):
-        return S * (np.log(p / (1 - p)) - beta0 - sum(L_min))
-        
-    min_p, max_p = tp_to_prob(0), tp_to_prob(TP_max)
-    probs_to_plot = [0.01, 0.05, 0.1, 0.3, 0.5, 0.7, 0.9, 0.95, 0.99]
-    valid_probs = [p for p in probs_to_plot if min_p <= p <= max_p]
+    min_p = 1 / (1 + np.exp(-np.clip(beta0 + sum(L_min), -20, 20)))
+    max_p = 1 / (1 + np.exp(-np.clip(beta0 + (TP_max / S) + sum(L_min), -20, 20)))
     
     fig.add_trace(go.Scatter(x=[0, TP_max], y=[yprob, yprob], mode='lines', line=dict(color='black', width=2), showlegend=False))
-    for p in valid_probs:
-        tp = prob_to_tp(p)
+    for p in [p for p in [0.01, 0.05, 0.1, 0.3, 0.5, 0.7, 0.9, 0.95, 0.99] if min_p <= p <= max_p]:
+        tp = S * (np.log(p / (1 - p)) - beta0 - sum(L_min))
         fig.add_trace(go.Scatter(x=[tp, tp], y=[yprob, yprob+0.15], mode='lines', line=dict(color='black', width=2), showlegend=False))
         fig.add_annotation(x=tp, y=yprob+0.4, text=f"{p:.2f}", showarrow=False, font=dict(size=11))
         
     fig.update_layout(
         yaxis=dict(tickvals=y_vals, ticktext=y_labels, showgrid=False, zeroline=False, tickfont=dict(size=13, color='black')),
         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        plot_bgcolor='white', height=250 + 70*len(features),
-        margin=dict(l=150, r=50, t=50, b=50),
-        title={'text': "Diagnostic Nomogram (Logistic Regression)", 'x':0.5, 'xanchor': 'center'}
+        plot_bgcolor='white', height=250 + 70*len(features), margin=dict(l=150, r=50, t=50, b=50),
+        title={'text': "Diagnostic Nomogram", 'x':0.5, 'xanchor': 'center'}
     )
     return fig
