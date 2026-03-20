@@ -98,9 +98,29 @@ with st.sidebar:
             serrf_ready = True
         else: st.warning("⚠️ 需上传 Info 表")
 
-    st.markdown("#### 5. 外部通路库 (可选)")
-    custom_pathway_file = st.file_uploader("不传则自动读取仓库 kegg_pathways.csv", type=["csv", "gmt"], key="pathway_db")
-    uploaded_files = st.file_uploader("6. 上传 MetDNA 数据", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
+    # ==========================================
+    # 🟢 核心新增：KEGG 数据库在线同步模块
+    # ==========================================
+    st.markdown("#### 5. 通路数据库")
+    
+    if st.button("🔄 在线同步最新 KEGG 库", use_container_width=True, help="点击后将在后台运行您的 get_kegg_db.py 脚本，实时抓取 KEGG 官网最新数据并覆盖本地的 kegg_pathways.csv 文件。"):
+        with st.spinner("⏳ 正在连接 KEGG API 获取最新通路数据（约需 1-3 分钟，请勿关闭网页）..."):
+            import subprocess
+            import sys
+            try:
+                # 使用 sys.executable 确保调用的是当前 Streamlit 环境所在的 Python 解析器
+                res = subprocess.run([sys.executable, "get_kegg_db.py"], capture_output=True, text=True)
+                if res.returncode == 0:
+                    st.success(f"✅ KEGG 数据库已成功更新！\n\n*(更新时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})*")
+                else:
+                    st.error(f"❌ 更新脚本执行报错，请检查网络或脚本代码:\n```text\n{res.stderr}\n```")
+            except Exception as e:
+                st.error(f"❌ 无法启动更新程序: {str(e)}")
+
+    custom_pathway_file = st.file_uploader("也可手动上传通路库 (默认使用自动更新的 kegg_pathways.csv)", type=["csv", "gmt"], key="pathway_db")
+    
+    st.markdown("#### 6. 上传 MetDNA 数据")
+    uploaded_files = st.file_uploader("结果文件 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
     st.markdown("---")
     start_process = st.container().button("📥 开始处理数据", use_container_width=True, type="primary")
 
@@ -159,6 +179,7 @@ if start_process:
                 if len(parsed_results) == 1: st.session_state.raw_df, st.session_state.feature_meta = parsed_results[0][0], parsed_results[0][1]
                 else: st.session_state.raw_df, st.session_state.feature_meta, _ = merge_multiple_dfs(parsed_results)
                 st.session_state.data_loaded = True
+                st.success("✅ 处理完成！")
                 st.rerun() 
 
 # ==========================================
@@ -167,6 +188,8 @@ if start_process:
 if st.session_state.data_loaded and st.session_state.raw_df is not None:
     raw_df = st.session_state.raw_df
     st.info(f"数据总览: {len(raw_df)} 样本 x {len(raw_df.columns)-3} 特征")
+    csv_data = raw_df.to_csv(index=False).encode('utf-8')
+    st.download_button("📥 导出清洗前合并数据", csv_data, f"Metabo_{datetime.datetime.now().strftime('%Y%m%d')}.csv", "text/csv")
     st.divider()
 
     with st.form(key='analysis_form'):
@@ -188,8 +211,8 @@ if st.session_state.data_loaded and st.session_state.raw_df is not None:
         with st.expander("🎨 可视化高级工具栏 (图表参数微调)", expanded=False):
             c_t1, c_t2, c_t3 = st.columns(3)
             vip_show_num = c_t1.slider("VIP 柱状图显示数量", min_value=10, max_value=50, value=25, step=5)
-            nomo_num = c_t2.slider("列线图纳入标志物数", min_value=2, max_value=8, value=4, help="推荐 3-5 个。")
-            pw_show_num = c_t3.slider("气泡/网络图通路数", min_value=5, max_value=30, value=15, step=5, help="限制展示最显著通路数量，防止拥挤。")
+            nomo_num = c_t2.slider("列线图纳入标志物数", min_value=2, max_value=8, value=4, help="推荐 3-5 个，过多会导致模型过拟合。")
+            pw_show_num = c_t3.slider("气泡/网络图通路数", min_value=5, max_value=30, value=15, step=5, help="限制展示的最显著通路数量，防止图表拥挤。")
 
         cur_grps = sorted(raw_df[group_col].astype(str).unique())
         sel_grps = st.multiselect("纳入对比组 (OPLS-DA 需要严格的 2 组对比)", cur_grps, default=cur_grps[:2] if len(cur_grps)>=2 else cur_grps)
@@ -199,12 +222,12 @@ if st.session_state.data_loaded and st.session_state.raw_df is not None:
         case = c1.selectbox("Case 组 (实验组)", valid, index=0 if valid else None)
         ctrl = c2.selectbox("Control 组 (对照组)", valid, index=1 if len(valid)>1 else 0)
         p_th = c3.number_input("P-value 阈值", value=0.05, step=0.01)
-        fc_th = c4.number_input("Log2 FC 阈值", value=0.58, step=0.10, help="0.58 对应 1.5 倍差异")
+        fc_th = c4.number_input("Log2 FC 阈值", value=0.58, step=0.10, help="0.58 对应 1.5 倍差异；1.0 对应 2.0 倍差异")
         
         submit_button = st.form_submit_button(label='🚀 运行全自动分析 (生成交互图表与离线报告)')
 
 if not st.session_state.data_loaded:
-    st.title("🧬 MetaboAnalyst Pro"); st.info("👈 请在左侧面板上传并处理数据"); st.stop()
+    st.title("🧬 MetaboAnalyst Pro (SIMCA Edition)"); st.info("👈 请在左侧面板上传并处理数据"); st.stop()
 if not submit_button:
     st.title("✅ 数据准备就绪"); st.dataframe(st.session_state.raw_df.head(50)); st.stop()
 
@@ -218,7 +241,7 @@ if submit_button:
     hm_base64 = ""
     fig_opls = fig_perm = fig_splot = fig_vip = fig_pca = fig_vol = fig_pathway = fig_network = fig_nomogram = None
 
-    with st.spinner("正在运行核心分析与网络构建..."):
+    with st.spinner("正在运行分析与网络构建..."):
         raw_df = st.session_state.raw_df; meta = st.session_state.feature_meta
         df_proc, feats = data_cleaning_pipeline(raw_df, group_col, miss_th, impute_m, norm_m, do_log, scale_m)
         
@@ -354,7 +377,7 @@ if submit_button:
 
         with tabs[7]:
             st.markdown("### 📏 临床诊断列线图 (Diagnostic Nomogram)")
-            st.caption(f"基于 Logistic 回归模型构建的列线图。自动提取 Top {nomo_num} 差异标志物构建风险预测模型。")
+            st.caption(f"基于 Logistic 回归模型构建的列线图。系统自动提取 Top {nomo_num} 差异代谢物构建风险模型，用于直观评估样本属于实验组 (Case) 的概率。")
             if len(out_df) < 2:
                 st.warning("⚠️ 显著差异代谢物不足 2 个，无法构建列线图回归模型。")
             else:
@@ -367,10 +390,11 @@ if submit_button:
                         fig_nomogram = plot_nomogram(df_sub, nomo_feats, nomo_names, group_col, case)
                         if fig_nomogram is not None:
                             st.plotly_chart(fig_nomogram)
+                            st.info("💡 **解读指南**：找到每个代谢物水平对应的 Points，将这些点数相加得到 Total Points，即可在最上方的 Risk Prob 轴中查出对应的发病/实验组风险概率。")
                         else:
                             st.error("构建列线图失败，请检查样本的组别分布。")
                     except Exception as e:
-                        st.warning(f"列线图模型无法收敛。尝试在高级工具栏减少'列线图纳入标志物数'。详情：{str(e)}")
+                        st.warning(f"由于数据极端分布或特征高度共线性，列线图模型无法收敛。尝试在左侧高级工具栏减少'列线图纳入标志物数'。错误详情：{str(e)}")
 
         with tabs[8]:
             st.markdown("### 🕸️ KEGG 代谢通路富集")
@@ -402,7 +426,7 @@ if submit_button:
 
         with tabs[9]:
             st.markdown("### 🔗 代谢重编程机制网络 (Pathway-Metabolite Network)")
-            st.caption("展示显著富集通路（P < 0.05）与核心标志物的相互关联。")
+            st.caption("展示显著富集通路（P < 0.05）与核心标志物的相互关联。方块代表通路，圆点代表代谢物（红色上调，蓝色下调）。")
             if pathway_df.empty or out_df.empty: st.info("需要产生显著通路和差异代谢物才能构建网络。")
             else:
                 sig_pws = pathway_df[pathway_df['P_Value'] < 0.05].head(pw_show_num)
