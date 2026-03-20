@@ -79,7 +79,7 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
         html_report += f'''
         <div class="plot-box">
             <h3>(6) Top 50 差异代谢物聚类热图</h3>
-            < img src="data:image/png;base64,{clean_b64}" style="max-width:100%; border:1px solid #ccc;"/>
+            <img src="data:image/png;base64,{clean_b64}" style="max-width:100%; border:1px solid #ccc;"/>
         </div>
         '''
         
