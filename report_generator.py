@@ -64,8 +64,6 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
         {pathway_df[['Pathway', 'Total_in_Pathway', 'Hits', 'Enrichment_Factor', 'P_Value']].head(pw_show_num).to_html(index=False, float_format="%.4f") if not pathway_df.empty else "<p>未进行通路富集分析或无显著命中。</p >"}
         
         <h2>5. 统计与多维可视化图表</h2>
-        <p><i>注：本报告为纯离线交互版。图表支持鼠标悬停、框选缩放，点击图表右上角相机图标 📷 即可下载透明底色高清图片。</i></p >
-        
         <div class="plot-box"><h3>(1) OPLS-DA 得分图</h3>{get_html_plot(fig_opls)}</div>
         <div class="plot-box"><h3>(2) 置换检验 (Permutation Test)</h3>{get_html_plot(fig_perm)}</div>
         <div class="plot-box"><h3>(3) S-Plot</h3>{get_html_plot(fig_splot)}</div>
@@ -73,44 +71,24 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
         <div class="plot-box"><h3>(5) PCA 宏观质控得分图</h3>{get_html_plot(fig_pca)}</div>
     """
     
-    # 🟢 终极防断行策略：多行独立区块 + 单引号隔离
+    # 🟢 极致防御性写法：清理一切可能破坏 HTML 语法的换行符，并使用安全的单引号包裹
     if hm_base64:
+        clean_b64 = hm_base64.replace('\n', '').replace('\r', '').strip()
         html_report += f'''
         <div class="plot-box">
             <h3>(6) Top 50 差异代谢物聚类热图</h3>
-            < img src='data:image/png;base64,{hm_base64.strip()}' style='max-width:100%; border:1px solid #ccc;' />
+            < img src='data:image/png;base64,{clean_b64}' style='max-width:100%; border:1px solid #ccc;' />
         </div>
         '''
         
     if fig_nomogram is not None:
-        html_report += f'''
-        <div class="plot-box">
-            <h3>(7) 诊断预测列线图 (Top {nomo_num})</h3>
-            {get_html_plot(fig_nomogram)}
-        </div>
-        '''
-        
+        html_report += f'''<div class="plot-box"><h3>(7) 诊断预测列线图 (Top {nomo_num})</h3>{get_html_plot(fig_nomogram)}</div>'''
     if fig_pathway is not None:
-        html_report += f'''
-        <div class="plot-box">
-            <h3>(8) KEGG 通路富集气泡图</h3>
-            {get_html_plot(fig_pathway)}
-        </div>
-        '''
-        
+        html_report += f'''<div class="plot-box"><h3>(8) KEGG 通路富集气泡图</h3>{get_html_plot(fig_pathway)}</div>'''
     if fig_network is not None:
-        html_report += f'''
-        <div class="plot-box">
-            <h3>(9) 代谢重编程机制网络图</h3>
-            {get_html_plot(fig_network)}
-        </div>
-        '''
+        html_report += f'''<div class="plot-box"><h3>(9) 代谢重编程机制网络图</h3>{get_html_plot(fig_network)}</div>'''
 
-    html_report += """
-    </div>
-    </body>
-    </html>
-    """
+    html_report += "</div></body></html>"
     return html_report
 
 def generate_ai_prompt(case, ctrl, norm_m, scale_m, R2Y, Q2, b_q2, p_th, fc_th, out_df, pathway_df):
