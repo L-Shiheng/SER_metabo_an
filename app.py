@@ -20,17 +20,16 @@ from sklearn.preprocessing import StandardScaler
 # ==========================================
 st.set_page_config(page_title="MetaboAnalyst Pro (SIMCA Edition)", page_icon="🧬", layout="wide")
 
-# 🟢 解决 Seaborn/Matplotlib 热图中文和负号乱码问题
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'PingFang SC', 'Arial Unicode MS', 'sans-serif']
 plt.rcParams['axes.unicode_minus'] = False
 
 try:
-    from data_preprocessing import data_cleaning_pipeline, parse_metdna_file, merge_multiple_dfs, align_sample_info, OPLS_DA, run_pathway_enrichment
+    from data_preprocessing import data_cleaning_pipeline, parse_metdna_file, parse_manual_targeted_files, merge_multiple_dfs, align_sample_info, OPLS_DA, run_pathway_enrichment
     from stats_utils import run_pairwise_statistics
     from plot_utils import update_layout_square, get_ellipse_coordinates, plot_nomogram
     from report_generator import generate_offline_html, generate_ai_prompt
 except ImportError as e:
-    st.error(f"❌ 严重错误：未找到依赖文件。请确保拆分的新文件都在同一目录下！详情: {e}")
+    st.error(f"❌ 严重错误：未找到依赖文件。请确保您的 data_preprocessing.py 等文件已更新！详情: {e}")
     st.stop()
 
 try:
@@ -81,10 +80,9 @@ with st.sidebar:
 
     if not candidate_samples and st.session_state.all_sample_ids: candidate_samples = st.session_state.all_sample_ids
     excluded_samples = st.multiselect("2. 样本剔除 (黑名单)", options=candidate_samples, default=[])
-    feature_scope = st.radio("3. 数据范围", ["仅已注释特征 (推荐)", "全部特征"], index=0)
-    use_serrf = st.checkbox("4. 启用 SERRF", value=False)
-    serrf_ready = False
     
+    use_serrf = st.checkbox("3. 启用 SERRF 批次校正", value=False)
+    serrf_ready = False
     if use_serrf:
         if info_df is not None:
             cols = list(info_df.columns); cols_lower = [c.lower() for c in cols]
@@ -98,26 +96,38 @@ with st.sidebar:
             serrf_ready = True
         else: st.warning("⚠️ 需上传 Info 表")
 
-    st.markdown("#### 5. 通路数据库")
-    if st.button("🔄 在线同步最新 KEGG 库", use_container_width=True, help="点击后将在后台运行您的 get_kegg_db.py 脚本，实时抓取 KEGG 官网最新数据并覆盖本地的 kegg_pathways.csv 文件。"):
-        with st.spinner("⏳ 正在连接 KEGG API 获取最新通路数据（约需 1-3 分钟，请勿关闭网页）..."):
-            import subprocess
-            import sys
+    st.markdown("#### 4. 通路数据库")
+    if st.button("🔄 在线同步最新 KEGG 库", use_container_width=True):
+        with st.spinner("⏳ 正在连接 KEGG API 获取最新通路数据..."):
+            import subprocess, sys
             try:
                 res = subprocess.run([sys.executable, "get_kegg_db.py"], capture_output=True, text=True)
-                if res.returncode == 0:
-                    st.success(f"✅ KEGG 数据库已成功更新！\n\n*(更新时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})*")
-                else:
-                    st.error(f"❌ 更新脚本执行报错:\n```text\n{res.stderr}\n```")
-            except Exception as e:
-                st.error(f"❌ 无法启动更新程序: {str(e)}")
-
-    custom_pathway_file = st.file_uploader("也可手动上传通路库 (默认使用 kegg_pathways.csv)", type=["csv", "gmt"], key="pathway_db")
+                if res.returncode == 0: st.success(f"✅ 更新成功！")
+                else: st.error(f"❌ 报错:\n{res.stderr}")
+            except Exception as e: st.error(f"❌ 失败: {str(e)}")
+    custom_pathway_file = st.file_uploader("手动上传通路库 (可选)", type=["csv", "gmt"], key="pathway_db")
     
-    st.markdown("#### 6. 上传 MetDNA 数据")
-    uploaded_files = st.file_uploader("结果文件 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
+    # ==========================================
+    # 🟢 核心新增：数据来源与上传模块
+    # ==========================================
+    st.markdown("#### 5. 上传代谢组学数据")
+    data_source = st.radio("选择数据格式:", ["MetDNA (自动解析)", "手动靶向宽表 (岛津MRM等)"], index=0)
+    
+    metric_suffix = " : 面积 "
+    mode_regex = r'-(P|N|POS|NEG|HILIC-P|HILIC-N)-'
+    
+    if data_source == "手动靶向宽表 (岛津MRM等)":
+        st.info("💡 系统将自动合并文件、提取指定列，并智能匹配样本名。")
+        c1, c2 = st.columns(2)
+        metric_suffix = c1.text_input("提取指标 (后缀)", value=" : 面积 ", help="比如您的表头是'Sample1 : 面积 '，请填入' : 面积 '（注意前后的空格）。系统会自动丢弃浓度和S/N列。")
+        mode_regex = c2.text_input("模式清洗正则", value=r'-(P|N|POS|NEG)-', help="将正负离子模式缩写替换为'-'，比如匹配到'-P-'时，G-CN-P-1会变成G-CN-1，从而匹配Info表。")
+        feature_scope = "全部特征" # 手动表默认没有注释布尔值，直接用全部特征
+    else:
+        feature_scope = st.radio("特征范围", ["仅已注释特征", "全部特征"], index=0)
+        
+    uploaded_files = st.file_uploader("支持多文件合并", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
     st.markdown("---")
-    start_process = st.container().button("📥 开始处理数据", use_container_width=True, type="primary")
+    start_process = st.container().button("📥 开始处理并加载数据", use_container_width=True, type="primary")
 
 # ==========================================
 # 2. 数据处理运行
@@ -127,55 +137,83 @@ if start_process:
     if not uploaded_files: st.error("请先上传数据文件！")
     else:
         progress_bar = st.progress(0); status_text = st.empty()
-        with st.spinner("正在处理..."):
-            parsed_results = []; current_run_samples = set()
-            for i, file in enumerate(uploaded_files):
-                status_text.text(f"处理中: {file.name} ...")
-                try:
-                    file.seek(0)
-                    file_type = 'csv' if file.name.endswith('.csv') else 'excel'
-                    unique_name = f"{os.path.splitext(file.name)[0]}_{i+1}{os.path.splitext(file.name)[1]}"
-                    df_t, meta, err = parse_metdna_file(file, unique_name, file_type=file_type)
-                    if err: st.warning(f"{file.name}: {err}"); continue
+        
+        # 🟢 分支处理逻辑：手动靶向宽表
+        if data_source == "手动靶向宽表 (岛津MRM等)":
+            with st.spinner("正在融合并去重靶向数据 (取最高响应值)..."):
+                df_t, meta, err = parse_manual_targeted_files(uploaded_files, metric_suffix, mode_regex)
+                if err: 
+                    st.error(err)
+                else:
                     if excluded_samples:
-                        ex_fingerprints = set([re.sub(r'[^a-z0-9]', '', str(s).strip().lower()) for s in excluded_samples])
-                        df_t = df_t[~df_t['SampleID'].astype(str).apply(lambda s: re.sub(r'[^a-z0-9]', '', str(s).strip().lower())).isin(ex_fingerprints)]
-                    current_run_samples.update(df_t['SampleID'].astype(str).tolist())
-
-                    if feature_scope.startswith("仅已注释"):
-                        annotated_ids = meta[meta['Is_Annotated'] == True].index
-                        df_t = df_t[['SampleID', 'Group', 'Source_Files'] + [c for c in df_t.columns if c in annotated_ids]]
-                        meta = meta.loc[meta.index.isin(df_t.columns)]
-                        
-                    info_aligned = None
+                        ex_fps = set([re.sub(r'[^a-z0-9]', '', str(s).strip().lower()) for s in excluded_samples])
+                        df_t = df_t[~df_t['SampleID'].astype(str).apply(lambda s: re.sub(r'[^a-z0-9]', '', str(s).strip().lower())).isin(ex_fps)]
+                    
                     if info_df is not None:
                         info_aligned = align_sample_info(df_t, info_df, sample_col_name=user_sample_col)
-                        if user_group_col and user_group_col in info_aligned.columns: df_t['Group'] = info_aligned[user_group_col].fillna(df_t['Group']).values
+                        if user_group_col and user_group_col in info_aligned.columns: df_t['Group'] = info_aligned[user_group_col].fillna('Unknown').values
                         else:
                             g_col = next((c for c in info_aligned.columns if c.lower() in ['group', 'class']), None)
-                            if g_col: df_t['Group'] = info_aligned[g_col].fillna(df_t['Group']).values
+                            if g_col: df_t['Group'] = info_aligned[g_col].fillna('Unknown').values
                     
-                    if use_serrf and serrf_ready and info_aligned is not None:
-                        if info_aligned[run_order_col].notna().sum() == 0: st.session_state.qc_report[unique_name] = {"Status": "Failed (No Match)"}
-                        else:
-                            corrected_data, serrf_stats = serrf_normalization(df_t.select_dtypes(include=[np.number]), info_aligned, run_order_col, sample_type_col, qc_label)
-                            if corrected_data is not None:
-                                for c in corrected_data.columns: df_t[c] = corrected_data[c].values
-                                st.session_state.qc_report[unique_name] = {"Status": "Success" if serrf_stats['RSD_After'] < serrf_stats['RSD_Before'] else "Skipped (Worse)"}
-                            else: st.error(f"❌ {file.name}: SERRF失败")
+                    # 手动表暂不在此处循环显示 SERRF，直接统一加载
+                    st.session_state.raw_df = df_t
+                    st.session_state.feature_meta = meta
+                    st.session_state.data_loaded = True
+                    st.success("✅ 手动靶向数据清洗与融合完成！")
+                    st.rerun()
 
-                    parsed_results.append((df_t, meta, unique_name))
-                    del df_t, meta, info_aligned; gc.collect()
-                except Exception as e: st.error(f"处理 {file.name} 失败: {str(e)}")
-                progress_bar.progress((i + 1) / len(uploaded_files))
-
-            if parsed_results:
-                st.session_state.all_sample_ids = sorted(list(set(st.session_state.all_sample_ids) | current_run_samples))
-                if len(parsed_results) == 1: st.session_state.raw_df, st.session_state.feature_meta = parsed_results[0][0], parsed_results[0][1]
-                else: st.session_state.raw_df, st.session_state.feature_meta, _ = merge_multiple_dfs(parsed_results)
-                st.session_state.data_loaded = True
-                st.success("✅ 处理完成！")
-                st.rerun() 
+        # 🟢 原有的处理逻辑：MetDNA
+        else:
+            with st.spinner("正在处理 MetDNA 数据..."):
+                parsed_results = []; current_run_samples = set()
+                for i, file in enumerate(uploaded_files):
+                    status_text.text(f"处理中: {file.name} ...")
+                    try:
+                        file.seek(0)
+                        file_type = 'csv' if file.name.endswith('.csv') else 'excel'
+                        unique_name = f"{os.path.splitext(file.name)[0]}_{i+1}{os.path.splitext(file.name)[1]}"
+                        df_t, meta, err = parse_metdna_file(file, unique_name, file_type=file_type)
+                        if err: st.warning(f"{file.name}: {err}"); continue
+                        if excluded_samples:
+                            ex_fingerprints = set([re.sub(r'[^a-z0-9]', '', str(s).strip().lower()) for s in excluded_samples])
+                            df_t = df_t[~df_t['SampleID'].astype(str).apply(lambda s: re.sub(r'[^a-z0-9]', '', str(s).strip().lower())).isin(ex_fingerprints)]
+                        current_run_samples.update(df_t['SampleID'].astype(str).tolist())
+    
+                        if feature_scope.startswith("仅已注释"):
+                            annotated_ids = meta[meta['Is_Annotated'] == True].index
+                            df_t = df_t[['SampleID', 'Group', 'Source_Files'] + [c for c in df_t.columns if c in annotated_ids]]
+                            meta = meta.loc[meta.index.isin(df_t.columns)]
+                            
+                        info_aligned = None
+                        if info_df is not None:
+                            info_aligned = align_sample_info(df_t, info_df, sample_col_name=user_sample_col)
+                            if user_group_col and user_group_col in info_aligned.columns: df_t['Group'] = info_aligned[user_group_col].fillna(df_t['Group']).values
+                            else:
+                                g_col = next((c for c in info_aligned.columns if c.lower() in ['group', 'class']), None)
+                                if g_col: df_t['Group'] = info_aligned[g_col].fillna(df_t['Group']).values
+                        
+                        if use_serrf and serrf_ready and info_aligned is not None:
+                            if info_aligned[run_order_col].notna().sum() == 0: st.session_state.qc_report[unique_name] = {"Status": "Failed (No Match)"}
+                            else:
+                                corrected_data, serrf_stats = serrf_normalization(df_t.select_dtypes(include=[np.number]), info_aligned, run_order_col, sample_type_col, qc_label)
+                                if corrected_data is not None:
+                                    for c in corrected_data.columns: df_t[c] = corrected_data[c].values
+                                    st.session_state.qc_report[unique_name] = {"Status": "Success" if serrf_stats['RSD_After'] < serrf_stats['RSD_Before'] else "Skipped (Worse)"}
+                                else: st.error(f"❌ {file.name}: SERRF失败")
+    
+                        parsed_results.append((df_t, meta, unique_name))
+                        del df_t, meta, info_aligned; gc.collect()
+                    except Exception as e: st.error(f"处理 {file.name} 失败: {str(e)}")
+                    progress_bar.progress((i + 1) / len(uploaded_files))
+    
+                if parsed_results:
+                    st.session_state.all_sample_ids = sorted(list(set(st.session_state.all_sample_ids) | current_run_samples))
+                    if len(parsed_results) == 1: st.session_state.raw_df, st.session_state.feature_meta = parsed_results[0][0], parsed_results[0][1]
+                    else: st.session_state.raw_df, st.session_state.feature_meta, _ = merge_multiple_dfs(parsed_results)
+                    st.session_state.data_loaded = True
+                    st.success("✅ 处理完成！")
+                    st.rerun() 
 
 # ==========================================
 # 3. 统计与可视化展示区
@@ -193,7 +231,6 @@ if st.session_state.data_loaded and st.session_state.raw_df is not None:
         group_col = st.selectbox("分组列", non_num, index=non_num.index('Group') if 'Group' in non_num else 0)
         
         with st.expander("数据预处理配置 (SIMCA 标准工作流)", expanded=False):
-            filter_option = st.radio("分析范围:", ["全部特征", "仅已注释特征"], index=0)
             c_p1, c_p2 = st.columns(2)
             miss_th = c_p1.slider("剔除缺失率 > X", 0.0, 1.0, 0.20)
             impute_m = c_p2.selectbox("缺失值填充", ["KNN (推荐)", "min", "mean", "zero"], index=0).split()[0]
@@ -239,10 +276,6 @@ if submit_button:
     with st.spinner("正在运行核心分析与网络构建..."):
         raw_df = st.session_state.raw_df; meta = st.session_state.feature_meta
         df_proc, feats = data_cleaning_pipeline(raw_df, group_col, miss_th, impute_m, norm_m, do_log, scale_m)
-        
-        if filter_option == "仅已注释特征":
-            anno_ids = meta[meta['Is_Annotated']==True].index.tolist() if meta is not None else []
-            feats = [f for f in feats if f in anno_ids]
         
         df_sub = df_proc[df_proc[group_col].isin(sel_grps)].copy()
  
@@ -409,9 +442,7 @@ if submit_button:
                                 hover_name='Pathway', hover_data={'Hit_Metabolites': True, 'P_Value': ':.4f', 'Enrichment_Factor': ':.2f'},
                                 color_continuous_scale='Reds_r', size_max=40
                             )
-                            # 🟢 完美修正：加上半透明边缘防止重叠不可见
                             fig_pathway.update_traces(marker=dict(line=dict(width=1, color='black'), opacity=0.6))
-                            
                             fig_pathway.update_layout(
                                 template="simple_white", width=800, height=600,
                                 title={'text': "Pathway Enrichment Bubble Plot", 'y':0.95, 'x':0.5, 'xanchor': 'center'},
