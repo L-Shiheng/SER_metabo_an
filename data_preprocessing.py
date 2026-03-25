@@ -11,13 +11,11 @@ import statsmodels.stats.multitest
 # ==========================================
 
 def parse_metdna_file(file, unique_name, file_type='csv'):
-    """解析传统的 MetDNA 结果文件"""
     try:
         if file_type == 'csv': df = pd.read_csv(file)
         else: df = pd.read_excel(file)
         
         if 'Sample' in df.columns and 'Metabolite' in df.columns:
-            # Long format
             df_wide = df.pivot_table(index='Sample', columns='Metabolite', values='Value').reset_index()
             df_wide.rename(columns={'Sample': 'SampleID'}, inplace=True)
             df_wide['Group'] = 'Unknown'
@@ -25,7 +23,6 @@ def parse_metdna_file(file, unique_name, file_type='csv'):
             meta = pd.DataFrame({'Original_Name': df_wide.columns[2:], 'Clean_Name': df_wide.columns[2:], 'Is_Annotated': True}, index=df_wide.columns[2:])
             return df_wide, meta, None
         else:
-            # Wide format (MetDNA Default)
             sample_cols = [c for c in df.columns if c not in ['name', 'mz', 'rt', 'adduct', 'Formula', 'KEGG', 'HMDB']]
             df_t = df[sample_cols].set_index(sample_cols[0]).T.reset_index()
             df_t.columns.name = None
@@ -45,32 +42,27 @@ def parse_metdna_file(file, unique_name, file_type='csv'):
         return None, None, str(e)
 
 def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_regex=r'-(P|N|POS|NEG|HILIC-P|HILIC-N)-'):
-    """解析手动靶向宽表 (岛津MRM等多文件融合与智能去重)"""
     try:
         all_dfs = []
         for file in file_list:
             file.seek(0)
-            # 兼容 csv 和 excel
             if file.name.endswith('.csv'): df = pd.read_csv(file)
             else: df = pd.read_excel(file)
             
-            comp_col = df.columns[0] # 默认第一列是化合物名称
-            # 1. 精准提取包含指标后缀的列 (如 " : 面积 ")
+            comp_col = df.columns[0] 
             metric_cols = [c for c in df.columns if metric_suffix in str(c)]
             if not metric_cols:
-                continue # 如果这个文件里没有找到该指标，跳过
+                continue 
                 
             sub_df = df[[comp_col] + metric_cols].copy()
             
-            # 2. 智能清洗表头
             def clean_col_name(c):
-                c = str(c).replace(metric_suffix, "").strip() # 砍掉 " : 面积 "
-                c = re.sub(mode_regex, '-', c, flags=re.IGNORECASE) # 替换 "-P-" 为 "-"
+                c = str(c).replace(metric_suffix, "").strip() 
+                c = re.sub(mode_regex, '-', c, flags=re.IGNORECASE) 
                 return c
                 
             sub_df.rename(columns={c: clean_col_name(c) for c in metric_cols}, inplace=True)
             
-            # 3. 计算该文件内每个化合物的“平均响应强度”用于去重竞争
             for c in sub_df.columns[1:]:
                 sub_df[c] = pd.to_numeric(sub_df[c], errors='coerce')
             sub_df['__mean_resp__'] = sub_df.iloc[:, 1:].mean(axis=1)
@@ -79,13 +71,10 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
         if not all_dfs:
             return None, None, "所有上传的文件中都没有找到您指定的提取指标！请检查后缀拼写（注意空格）。"
             
-        # 4. 纵向拼缝与“最高响应”去重 (方案A)
         combined = pd.concat(all_dfs, ignore_index=True)
-        # 按照响应强度降序排列，然后去重（保留第一个，即强度最大的那个）
         combined = combined.sort_values('__mean_resp__', ascending=False).drop_duplicates(subset=[combined.columns[0]])
         combined = combined.drop(columns=['__mean_resp__'])
         
-        # 5. 矩阵翻转为系统标准格式
         combined.set_index(combined.columns[0], inplace=True)
         df_t = combined.T
         df_t.index.name = 'SampleID'
@@ -93,7 +82,6 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
         df_t['Group'] = 'Unknown'
         df_t['Source_Files'] = 'Manual_Targeted_Merged'
         
-        # 构建 meta 信息
         meta = pd.DataFrame(index=combined.index)
         meta['Original_Name'] = combined.index
         meta['Clean_Name'] = combined.index
@@ -120,15 +108,21 @@ def align_sample_info(df, info_df, sample_col_name='SampleName'):
     return merged
 
 # ==========================================
-# 2. 数据清洗与预处理核心流水线
+# 2. 数据清洗与预处理核心流水线 (🌟 已加装防弹机制)
 # ==========================================
 def impute_missing_values(df, features, method='knn'):
     df_imp = df.copy()
     X = df_imp[features].values
-    if method == 'knn': X_imp = KNNImputer(n_neighbors=5).fit_transform(X)
-    elif method == 'min': X_imp = np.where(np.isnan(X), np.nanmin(X, axis=0) * 0.5, X)
-    elif method == 'mean': X_imp = np.where(np.isnan(X), np.nanmean(X, axis=0), X)
-    else: X_imp = np.nan_to_num(X, nan=0.0)
+    n_neighbors = min(5, max(1, len(X) - 1)) # 智能适配极小样本量
+    
+    with np.errstate(all='ignore'): # 忽略运算过程中的底层警告
+        if method == 'knn': X_imp = KNNImputer(n_neighbors=n_neighbors).fit_transform(X)
+        elif method == 'min': X_imp = np.where(np.isnan(X), np.nanmin(X, axis=0) * 0.5, X)
+        elif method == 'mean': X_imp = np.where(np.isnan(X), np.nanmean(X, axis=0), X)
+        else: X_imp = np.nan_to_num(X, nan=0.0)
+    
+    # 🛡️ 终极防御 1：哪怕算法没填上，强制清零，绝不抛出 NaN 给下游
+    X_imp = np.nan_to_num(X_imp, nan=0.0, posinf=0.0, neginf=0.0)
     df_imp[features] = X_imp
     return df_imp
 
@@ -150,6 +144,7 @@ def normalize_data(df, features, method='pqn'):
         s[s == 0] = 1.0
         X_norm = X / s
     else: X_norm = X
+    
     df_norm = df.copy()
     df_norm[features] = X_norm
     return df_norm
@@ -167,6 +162,9 @@ def scale_data(df, features, method='pareto'):
         std[std == 0] = 1.0
         X_scaled = (X - mean) / std
     else: X_scaled = X
+    
+    # 🛡️ 终极防御 3：缩放后强制清理一切非正常数字
+    X_scaled = np.nan_to_num(X_scaled, nan=0.0, posinf=0.0, neginf=0.0)
     df_scaled = df.copy()
     df_scaled[features] = X_scaled
     return df_scaled
@@ -174,24 +172,19 @@ def scale_data(df, features, method='pareto'):
 def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='pqn', do_log=True, scale_m='pareto'):
     features = [c for c in df.columns if c not in ['SampleID', group_col, 'Source_Files'] and pd.api.types.is_numeric_dtype(df[c])]
     
-    # Missing Value Filtering
     miss_rates = df[features].isnull().mean()
     keep_feats = miss_rates[miss_rates <= miss_th].index.tolist()
     df_proc = df[['SampleID', group_col] + keep_feats].copy()
     
-    # Imputation
     df_proc = impute_missing_values(df_proc, keep_feats, method=impute_m)
-    
-    # Normalization
     df_proc = normalize_data(df_proc, keep_feats, method=norm_m)
     
-    # Log Transformation
     if do_log:
         X = df_proc[keep_feats].values
-        X = np.log2(X + 1)
+        # 🛡️ 终极防御 2：强制截断可能存在的负数，防止 log 报错
+        X = np.log2(np.clip(X, 0, None) + 1)
         df_proc[keep_feats] = X
         
-    # Scaling
     df_proc = scale_data(df_proc, keep_feats, method=scale_m)
     return df_proc, keep_feats
 
@@ -208,10 +201,11 @@ class OPLS_DA:
         self.pls.fit(self.X_, self.y_)
         self.t = self.pls.x_scores_[:, 0]
         self.w = self.pls.x_weights_[:, 0]
-        self.p = np.dot(self.X_.T, self.t) / np.dot(self.t.T, self.t)
+        self.p = np.dot(self.X_.T, self.t) / (np.dot(self.t.T, self.t) + 1e-8)
         
-        w_ortho = self.p - (np.dot(self.w.T, self.p) / np.dot(self.w.T, self.w)) * self.w
-        w_ortho = w_ortho / np.linalg.norm(w_ortho)
+        w_ortho = self.p - (np.dot(self.w.T, self.p) / (np.dot(self.w.T, self.w) + 1e-8)) * self.w
+        w_ortho_norm = np.linalg.norm(w_ortho)
+        w_ortho = w_ortho / w_ortho_norm if w_ortho_norm > 0 else w_ortho
         self.t_ortho = np.dot(self.X_, w_ortho)
         
         self.vip = self._calculate_vip()
@@ -224,8 +218,8 @@ class OPLS_DA:
         s = np.diag(t.T @ t @ q.T @ q).reshape(h, -1)
         total_s = np.sum(s)
         for i in range(p):
-            weight = np.array([(w[i, j] / np.linalg.norm(w[:, j]))**2 for j in range(h)])
-            vips[i] = np.sqrt(p * (s.T @ weight) / total_s)
+            weight = np.array([(w[i, j] / (np.linalg.norm(w[:, j])+1e-8))**2 for j in range(h)])
+            vips[i] = np.sqrt(p * (s.T @ weight) / (total_s+1e-8))
         return vips
         
     def _calculate_p_corr(self):
@@ -241,7 +235,7 @@ class OPLS_DA:
         corrs = []; r2s = []; q2s = []
         original_r2 = self.pls.score(X, y)
         y_pred = self.pls.predict(X)
-        original_q2 = 1 - np.sum((y - y_pred.flatten())**2) / np.sum((y - np.mean(y))**2)
+        original_q2 = 1 - np.sum((y - y_pred.flatten())**2) / (np.sum((y - np.mean(y))**2) + 1e-8)
         
         for _ in range(n_permutations):
             y_perm = np.random.permutation(y)
@@ -250,7 +244,7 @@ class OPLS_DA:
             pls_perm.fit(X, y_perm)
             r2s.append(pls_perm.score(X, y_perm))
             y_pred_perm = pls_perm.predict(X)
-            q2 = 1 - np.sum((y_perm - y_pred_perm.flatten())**2) / np.sum((y_perm - np.mean(y_perm))**2)
+            q2 = 1 - np.sum((y_perm - y_pred_perm.flatten())**2) / (np.sum((y_perm - np.mean(y_perm))**2) + 1e-8)
             q2s.append(q2)
             
         return np.array(corrs), np.array(r2s), np.array(q2s), original_r2, original_q2
