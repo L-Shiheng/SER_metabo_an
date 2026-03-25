@@ -4,6 +4,7 @@ import re
 from sklearn.impute import KNNImputer
 from sklearn.cross_decomposition import PLSRegression
 from scipy import stats
+import statsmodels.stats.multitest
 
 # ==========================================
 # 1. 数据读取与解析模块
@@ -295,5 +296,5 @@ def run_pathway_enrichment(sig_metabolites, all_measured_metabolites, custom_db_
     res_df = pd.DataFrame(results)
     if not res_df.empty:
         res_df = res_df.sort_values('P_Value')
-        _, res_df['FDR'], _, _ = statsmodels.stats.multitest.multipletests(res_df['P_Value'], method='fdr_bh') if 'statsmodels' in globals() else (None, res_df['P_Value'], None, None)
+        _, res_df['FDR'], _, _ = statsmodels.stats.multitest.multipletests(res_df['P_Value'], method='fdr_bh')
     return res_df
