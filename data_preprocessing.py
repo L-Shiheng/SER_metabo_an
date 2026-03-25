@@ -108,20 +108,19 @@ def align_sample_info(df, info_df, sample_col_name='SampleName'):
     return merged
 
 # ==========================================
-# 2. 数据清洗与预处理核心流水线 (🌟 已加装防弹机制)
+# 2. 数据清洗与预处理核心流水线
 # ==========================================
 def impute_missing_values(df, features, method='knn'):
     df_imp = df.copy()
     X = df_imp[features].values
-    n_neighbors = min(5, max(1, len(X) - 1)) # 智能适配极小样本量
+    n_neighbors = min(5, max(1, len(X) - 1))
     
-    with np.errstate(all='ignore'): # 忽略运算过程中的底层警告
+    with np.errstate(all='ignore'):
         if method == 'knn': X_imp = KNNImputer(n_neighbors=n_neighbors).fit_transform(X)
         elif method == 'min': X_imp = np.where(np.isnan(X), np.nanmin(X, axis=0) * 0.5, X)
         elif method == 'mean': X_imp = np.where(np.isnan(X), np.nanmean(X, axis=0), X)
         else: X_imp = np.nan_to_num(X, nan=0.0)
     
-    # 🛡️ 终极防御 1：哪怕算法没填上，强制清零，绝不抛出 NaN 给下游
     X_imp = np.nan_to_num(X_imp, nan=0.0, posinf=0.0, neginf=0.0)
     df_imp[features] = X_imp
     return df_imp
@@ -146,7 +145,7 @@ def normalize_data(df, features, method='pqn'):
     else: X_norm = X
     
     df_norm = df.copy()
-    df_norm[features] = X_norm
+    df_norm[features] = np.nan_to_num(X_norm, nan=0.0, posinf=0.0, neginf=0.0)
     return df_norm
 
 def scale_data(df, features, method='pareto'):
@@ -163,10 +162,8 @@ def scale_data(df, features, method='pareto'):
         X_scaled = (X - mean) / std
     else: X_scaled = X
     
-    # 🛡️ 终极防御 3：缩放后强制清理一切非正常数字
-    X_scaled = np.nan_to_num(X_scaled, nan=0.0, posinf=0.0, neginf=0.0)
     df_scaled = df.copy()
-    df_scaled[features] = X_scaled
+    df_scaled[features] = np.nan_to_num(X_scaled, nan=0.0, posinf=0.0, neginf=0.0)
     return df_scaled
 
 def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='pqn', do_log=True, scale_m='pareto'):
@@ -181,24 +178,31 @@ def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='p
     
     if do_log:
         X = df_proc[keep_feats].values
-        # 🛡️ 终极防御 2：强制截断可能存在的负数，防止 log 报错
         X = np.log2(np.clip(X, 0, None) + 1)
-        df_proc[keep_feats] = X
+        df_proc[keep_feats] = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
         
     df_proc = scale_data(df_proc, keep_feats, method=scale_m)
     return df_proc, keep_feats
 
 # ==========================================
-# 3. OPLS-DA 算法核心
+# 3. OPLS-DA 算法核心 (🌟 终极强防御：确保矩阵绝对安全)
 # ==========================================
 class OPLS_DA:
     def __init__(self, n_components=1):
         self.n_components = n_components
     
+    def _clean_matrix(self, matrix):
+        """物理层面的清道夫，彻底绞杀任何 NaN 和 Inf"""
+        mat = np.array(matrix, dtype=np.float64)
+        return np.nan_to_num(mat, nan=0.0, posinf=0.0, neginf=0.0)
+
     def fit(self, X, y):
-        self.X_ = np.array(X); self.y_ = np.array(y)
+        self.X_ = self._clean_matrix(X)
+        self.y_ = self._clean_matrix(y)
+        
         self.pls = PLSRegression(n_components=self.n_components, scale=False)
         self.pls.fit(self.X_, self.y_)
+        
         self.t = self.pls.x_scores_[:, 0]
         self.w = self.pls.x_weights_[:, 0]
         self.p = np.dot(self.X_.T, self.t) / (np.dot(self.t.T, self.t) + 1e-8)
@@ -232,18 +236,21 @@ class OPLS_DA:
         return p_corr
         
     def permutation_test(self, X, y, n_permutations=100):
+        X_clean = self._clean_matrix(X)
+        y_clean = self._clean_matrix(y)
+        
         corrs = []; r2s = []; q2s = []
-        original_r2 = self.pls.score(X, y)
-        y_pred = self.pls.predict(X)
-        original_q2 = 1 - np.sum((y - y_pred.flatten())**2) / (np.sum((y - np.mean(y))**2) + 1e-8)
+        original_r2 = self.pls.score(X_clean, y_clean)
+        y_pred = self.pls.predict(X_clean)
+        original_q2 = 1 - np.sum((y_clean - y_pred.flatten())**2) / (np.sum((y_clean - np.mean(y_clean))**2) + 1e-8)
         
         for _ in range(n_permutations):
-            y_perm = np.random.permutation(y)
-            corrs.append(np.abs(np.corrcoef(y, y_perm)[0, 1]))
+            y_perm = np.random.permutation(y_clean)
+            corrs.append(np.abs(np.corrcoef(y_clean, y_perm)[0, 1]))
             pls_perm = PLSRegression(n_components=self.n_components, scale=False)
-            pls_perm.fit(X, y_perm)
-            r2s.append(pls_perm.score(X, y_perm))
-            y_pred_perm = pls_perm.predict(X)
+            pls_perm.fit(X_clean, y_perm)
+            r2s.append(pls_perm.score(X_clean, y_perm))
+            y_pred_perm = pls_perm.predict(X_clean)
             q2 = 1 - np.sum((y_perm - y_pred_perm.flatten())**2) / (np.sum((y_perm - np.mean(y_perm))**2) + 1e-8)
             q2s.append(q2)
             
