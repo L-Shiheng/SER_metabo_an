@@ -108,7 +108,7 @@ def align_sample_info(df, info_df, sample_col_name='SampleName'):
     return merged
 
 # ==========================================
-# 2. 数据清洗与预处理核心流水线 (🌟 已融入 QC 过滤机制)
+# 2. 数据清洗与预处理核心流水线 (完美保留了 QC 过滤机制)
 # ==========================================
 def impute_missing_values(df, features, method='knn'):
     df_imp = df.copy()
@@ -192,7 +192,7 @@ def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='p
         
     df_proc = scale_data(df_proc, keep_feats, method=scale_m)
     
-    # 🌟 防御层 3：彻底剔除“零方差”特征 (如果某个化合物数值一条直线完全没波动，会导致底层运算报错)
+    # 🌟 防御层 3：彻底剔除“零方差”特征 (如果在所有样本中数值无波动，则剔除)
     variances = df_proc[keep_feats].var()
     keep_feats = variances[variances > 1e-10].index.tolist()
     df_proc = df_proc[['SampleID', group_col] + keep_feats]
@@ -200,7 +200,7 @@ def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='p
     return df_proc, keep_feats
 
 # ==========================================
-# 3. OPLS-DA 算法核心
+# 3. OPLS-DA 算法核心 (🌟 修正了标量提取报错)
 # ==========================================
 class OPLS_DA:
     def __init__(self, n_components=1):
@@ -233,13 +233,20 @@ class OPLS_DA:
     def _calculate_vip(self):
         t = self.pls.x_scores_; w = self.pls.x_weights_; q = self.pls.y_loadings_
         p, h = w.shape; vips = np.zeros((p,))
-        s = np.diag(t.T @ t @ q.T @ q).reshape(h, -1)
+        
+        # 🟢 修正点：将 .reshape(h, -1) 移除，确保 s 是纯净的 1D array
+        s = np.diag(t.T @ t @ q.T @ q) 
         total_s = np.sum(s)
+        
         for i in range(p):
             weight = np.array([(w[i, j] / (np.linalg.norm(w[:, j])+1e-8))**2 for j in range(h)])
-            val = p * (s.T @ weight) / (total_s+1e-8)
-            # 🌟 终极防御：如果由于浮点数误差导致 val 变成微小负数，强行拉到 0，防止 sqrt 报错
+            
+            # 🟢 修正点：使用 np.dot 保证输出为纯净的标量 (Python scalar)
+            val = p * np.dot(s, weight) / (total_s + 1e-8)
+            
+            # 确保传递给 vips 的是纯数字
             vips[i] = np.sqrt(np.clip(val, 0, None))
+            
         return vips
         
     def _calculate_p_corr(self):
