@@ -108,7 +108,7 @@ def align_sample_info(df, info_df, sample_col_name='SampleName'):
     return merged
 
 # ==========================================
-# 2. 数据清洗与预处理核心流水线
+# 2. 数据清洗与预处理核心流水线 (🌟 已融入 QC 过滤机制)
 # ==========================================
 def impute_missing_values(df, features, method='knn'):
     df_imp = df.copy()
@@ -169,8 +169,17 @@ def scale_data(df, features, method='pareto'):
 def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='pqn', do_log=True, scale_m='pareto'):
     features = [c for c in df.columns if c not in ['SampleID', group_col, 'Source_Files'] and pd.api.types.is_numeric_dtype(df[c])]
     
+    # 🌟 防御层 1：全局缺失率过滤
     miss_rates = df[features].isnull().mean()
     keep_feats = miss_rates[miss_rates <= miss_th].index.tolist()
+    
+    # 🌟 防御层 2 (用户定制)：QC 专属缺失率过滤
+    qc_mask = df[group_col].astype(str).str.contains('QC', case=False, na=False) | df['SampleID'].astype(str).str.contains('QC', case=False, na=False)
+    if qc_mask.any():
+        qc_miss_rates = df.loc[qc_mask, keep_feats].isnull().mean()
+        # 只要 QC 中的缺失率超过阈值，立刻把这个化合物踢出保留名单
+        keep_feats = qc_miss_rates[qc_miss_rates <= miss_th].index.tolist()
+        
     df_proc = df[['SampleID', group_col] + keep_feats].copy()
     
     df_proc = impute_missing_values(df_proc, keep_feats, method=impute_m)
@@ -182,17 +191,22 @@ def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='p
         df_proc[keep_feats] = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
         
     df_proc = scale_data(df_proc, keep_feats, method=scale_m)
+    
+    # 🌟 防御层 3：彻底剔除“零方差”特征 (如果某个化合物数值一条直线完全没波动，会导致底层运算报错)
+    variances = df_proc[keep_feats].var()
+    keep_feats = variances[variances > 1e-10].index.tolist()
+    df_proc = df_proc[['SampleID', group_col] + keep_feats]
+    
     return df_proc, keep_feats
 
 # ==========================================
-# 3. OPLS-DA 算法核心 (🌟 终极强防御：确保矩阵绝对安全)
+# 3. OPLS-DA 算法核心
 # ==========================================
 class OPLS_DA:
     def __init__(self, n_components=1):
         self.n_components = n_components
     
     def _clean_matrix(self, matrix):
-        """物理层面的清道夫，彻底绞杀任何 NaN 和 Inf"""
         mat = np.array(matrix, dtype=np.float64)
         return np.nan_to_num(mat, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -223,7 +237,9 @@ class OPLS_DA:
         total_s = np.sum(s)
         for i in range(p):
             weight = np.array([(w[i, j] / (np.linalg.norm(w[:, j])+1e-8))**2 for j in range(h)])
-            vips[i] = np.sqrt(p * (s.T @ weight) / (total_s+1e-8))
+            val = p * (s.T @ weight) / (total_s+1e-8)
+            # 🌟 终极防御：如果由于浮点数误差导致 val 变成微小负数，强行拉到 0，防止 sqrt 报错
+            vips[i] = np.sqrt(np.clip(val, 0, None))
         return vips
         
     def _calculate_p_corr(self):
