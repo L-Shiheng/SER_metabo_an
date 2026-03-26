@@ -1,85 +1,84 @@
 import pandas as pd
 import numpy as np
 import re
+import os
 from sklearn.impute import KNNImputer
 from sklearn.cross_decomposition import PLSRegression
 from scipy import stats
 import statsmodels.stats.multitest
 
 # ==========================================
-# 1. 数据读取与解析模块 (🌟 彻底强化 MetDNA 与手工表的双引擎)
+# 1. 数据读取与解析模块 (融合了您的专业 MetDNA 识别器)
 # ==========================================
 
-def parse_metdna_file(file, unique_name, file_type='csv'):
-    try:
-        if file_type == 'csv': df = pd.read_csv(file)
-        else: df = pd.read_excel(file)
-        
-        # 🌟 防御 1：自动处理 MetDNA 中常见的同名化合物（加后缀去重）
-        def make_unique(names):
-            seen = set()
-            res = []
-            for n in names:
-                base = str(n).strip()
-                new_n = base
-                i = 1
-                while new_n in seen:
-                    new_n = f"{base}_{i}"
-                    i += 1
-                seen.add(new_n)
-                res.append(new_n)
-            return res
+def make_unique(series):
+    seen = set(); result = []
+    for item in series:
+        new_item = item; counter = 1
+        while new_item in seen:
+            new_item = f"{item}_{counter}"; counter += 1
+        seen.add(new_item); result.append(new_item)
+    return result
 
-        if 'Sample' in df.columns and 'Metabolite' in df.columns:
-            # Long format 处理
-            df['Metabolite'] = make_unique(df['Metabolite'].values)
-            df_wide = df.pivot_table(index='Sample', columns='Metabolite', values='Value').reset_index()
-            df_wide.rename(columns={'Sample': 'SampleID'}, inplace=True)
-            df_wide['Group'] = 'Unknown'
-            df_wide['Source_Files'] = unique_name
+def parse_metdna_file(file_buffer, file_name, file_type='csv'):
+    try:
+        if file_type == 'csv':
+            try: df = pd.read_csv(file_buffer, engine='pyarrow')
+            except: file_buffer.seek(0); df = pd.read_csv(file_buffer)
+        else: df = pd.read_excel(file_buffer)
+    except Exception as e: return None, None, f"读取失败: {str(e)}"
+
+    # 完整沿用您提供的精细列名黑名单
+    known_meta_cols = {'peak_name', 'mz', 'rt', 'id', 'id_zhulab', 'name', 'formula', 'confidence_level', 'smiles', 'inchikey', 'isotope', 'adduct', 'total_score', 'mz_error', 'rt_error_abs', 'rt_error_rela', 'ms2_score', 'iden_score', 'iden_type', 'peak_group_id', 'base_peak', 'num_peaks', 'cons_formula_pred', 'id_kegg', 'id_hmdb', 'id_metacyc', 'stereo_isomer_id', 'stereo_isomer_name'}
+    potential_cols = [c for c in df.columns if str(c).lower() not in known_meta_cols]
+    sample_cols = []
+    if potential_cols:
+        subset = df[potential_cols].head(5)
+        is_numeric = subset.apply(lambda x: pd.to_numeric(x, errors='coerce').notna().all())
+        sample_cols = is_numeric[is_numeric].index.tolist()
             
-            # 🌟 防御 2：强制数值转换，防止文本 'NA' 破坏矩阵
-            for c in df_wide.columns:
-                if c not in ['SampleID', 'Group', 'Source_Files']:
-                    df_wide[c] = pd.to_numeric(df_wide[c], errors='coerce')
-                    
-            meta = pd.DataFrame({'Original_Name': df_wide.columns[2:], 'Clean_Name': df_wide.columns[2:], 'Is_Annotated': True}, index=df_wide.columns[2:])
-            return df_wide, meta, None
-        else:
-            # Wide format 处理 (MetDNA 默认格式)
-            id_col = df.columns[0]
-            df[id_col] = make_unique(df[id_col].values) # 防止同名列名崩溃
-            
-            sample_cols = [c for c in df.columns if c not in [id_col, 'name', 'mz', 'rt', 'adduct', 'Formula', 'KEGG', 'HMDB']]
-            df_t = df.set_index(id_col)[sample_cols].T.reset_index()
-            df_t.columns.name = None
-            df_t.rename(columns={'index': 'SampleID'}, inplace=True)
-            df_t['Group'] = 'Unknown'
-            df_t['Source_Files'] = unique_name
-            
-            # 🌟 防御 2：强制数值转换，防止矩阵被判为 Object 而被过滤
-            for c in df_t.columns:
-                if c not in ['SampleID', 'Group', 'Source_Files']:
-                    df_t[c] = pd.to_numeric(df_t[c], errors='coerce')
-            
-            meta_idx = df[id_col].values
-            meta = pd.DataFrame(index=meta_idx)
-            
-            kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
-            if kegg_col is not None:
-                kegg_vals = df[kegg_col].fillna('').astype(str).values
-                meta['Original_Name'] = [f"{n} | {k}" if k.strip() and k.lower() != 'nan' else str(n) for n, k in zip(meta_idx, kegg_vals)]
-            else:
-                meta['Original_Name'] = meta_idx
-                
-            meta['Clean_Name'] = meta_idx
-            meta['Is_Annotated'] = True 
-            if kegg_col is not None:
-                kegg_mask = df[kegg_col].astype(str).str.strip().str.lower()
-                meta['Is_Annotated'] = (kegg_mask != '') & (kegg_mask != 'nan') & (kegg_mask != 'none')
-            return df_t, meta, None
-    except Exception as e:
-        return None, None, str(e)
+    if not sample_cols: return None, None, "未找到样本数据列。"
+
+    file_tag = os.path.splitext(os.path.basename(file_name))[0]
+    clean_tag = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', file_tag)
+    if 'name' not in df.columns: df['name'] = ""
+    
+    df['name'] = df['name'].fillna("").astype(str)
+    mask_annotated = (df['name'] != "") & (df['name'].str.lower() != "nan")
+    clean_names = df['name'].str.split(';', expand=True)[0]
+    mz_str = df['mz'].map('{:.4f}'.format).astype(str) if 'mz' in df.columns else ""
+    rt_str = df['rt'].map('{:.2f}'.format).astype(str) if 'rt' in df.columns else ""
+    unannotated_ids = "m/z" + mz_str + "_RT" + rt_str + "_" + clean_tag
+    final_ids = np.where(mask_annotated, clean_names + "_" + clean_tag, unannotated_ids)
+    final_ids = make_unique(final_ids)
+
+    # 🌟 融入最新的 KEGG ID 自动抓取技术
+    kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
+    if kegg_col is not None:
+        kegg_vals = df[kegg_col].fillna('').astype(str).values
+        orig_names = [f"{n} | {k}" if str(k).strip() and str(k).lower() != 'nan' else str(n) for n, k in zip(df['name'], kegg_vals)]
+    else:
+        orig_names = df['name']
+
+    meta_df = pd.DataFrame({
+        "Original_Name": orig_names, 
+        "Clean_Name": np.where(mask_annotated, clean_names, final_ids), 
+        "Is_Annotated": mask_annotated
+    }, index=final_ids)
+    
+    df_data = df[sample_cols].copy()
+    df_data.index = meta_df.index
+    df_transposed = df_data.T
+    
+    # 🌟 绝杀修复点：强制转换为数字，防止矩阵变成 Object 导致下游特征归零！
+    df_transposed = df_transposed.apply(pd.to_numeric, errors='coerce')
+    
+    df_transposed.reset_index(inplace=True)
+    df_transposed.rename(columns={'index': 'SampleID'}, inplace=True)
+    df_transposed['Source_Files'] = clean_tag
+    df_transposed['Group'] = 'Unknown'
+    
+    return df_transposed, meta_df, None
 
 def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_regex=r'-(P|N|POS|NEG|HILIC-P|HILIC-N)-'):
     try:
@@ -100,8 +99,7 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
                     if k and k.lower() != 'nan': kegg_mapping[n] = k
                     
             metric_cols = [c for c in df.columns if metric_suffix in str(c)]
-            if not metric_cols:
-                continue 
+            if not metric_cols: continue 
                 
             sub_df = df[[comp_col] + metric_cols].copy()
             sub_df.rename(columns={comp_col: '__Compound__'}, inplace=True)
@@ -112,14 +110,13 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
                 return c.replace('--', '-') 
                 
             sub_df.rename(columns={c: clean_col_name(c) for c in metric_cols}, inplace=True)
-            
             for c in sub_df.columns[1:]:
                 sub_df[c] = pd.to_numeric(sub_df[c], errors='coerce')
             sub_df['__mean_resp__'] = sub_df.iloc[:, 1:].mean(axis=1)
             all_dfs.append(sub_df)
             
         if not all_dfs:
-            return None, None, "所有上传的文件中都没有找到您指定的提取指标！请检查后缀拼写（注意空格）。"
+            return None, None, "所有上传的文件中都没有找到提取指标！"
             
         combined = pd.concat(all_dfs, ignore_index=True)
         combined = combined.sort_values('__mean_resp__', ascending=False).drop_duplicates(subset=['__Compound__'])
@@ -163,7 +160,7 @@ def align_sample_info(df, info_df, sample_col_name='SampleName'):
     return merged
 
 # ==========================================
-# 2. 数据清洗与预处理核心流水线
+# 2. 数据清洗与预处理核心流水线 (SIMCA 引擎 + QC 过滤)
 # ==========================================
 def impute_missing_values(df, features, method='knn'):
     df_imp = df.copy()
@@ -250,7 +247,7 @@ def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='p
     return df_proc, keep_feats
 
 # ==========================================
-# 3. OPLS-DA 算法核心 
+# 3. OPLS-DA 算法核心 (彻底解决了数组脱壳问题)
 # ==========================================
 class OPLS_DA:
     def __init__(self, n_components=1):
@@ -339,7 +336,7 @@ class OPLS_DA:
         return np.array(corrs), np.array(r2s), np.array(q2s), original_r2, original_q2
 
 # ==========================================
-# 4. 极致背景校验的通路富集算法 (🌟 自动屏蔽重复后缀，确撞库成功)
+# 4. 极致背景校验的通路富集算法 (支持 KEGG ID)
 # ==========================================
 def run_pathway_enrichment(sig_metabolites, all_measured_metabolites, custom_db_source=None):
     if custom_db_source is not None:
@@ -358,7 +355,6 @@ def run_pathway_enrichment(sig_metabolites, all_measured_metabolites, custom_db_
             for p in parts:
                 c = p.strip().lower()
                 if not c or c == 'nan': continue
-                # 🌟 核心修复：把自动生成的 _1, _2 等后缀去掉，否则会导致撞库失败！
                 c_clean = re.sub(r'_\d+$', '', c)
                 terms.add(c_clean)
                 terms.add(c) 
@@ -378,7 +374,6 @@ def run_pathway_enrichment(sig_metabolites, all_measured_metabolites, custom_db_
         
         pw_comps = set([c.lower().strip() for c in comp_str.split(';')])
         M = len(pw_comps) 
-        
         hits = pw_comps.intersection(sig_set)
         k = len(hits)
         
