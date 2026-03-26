@@ -56,10 +56,13 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
                 
             sub_df = df[[comp_col] + metric_cols].copy()
             
+            # 🌟 新增防御：强制统一所有文件第一列的名字，防止 4 个文件拼接时错位！
+            sub_df.rename(columns={comp_col: '__Compound__'}, inplace=True)
+            
             def clean_col_name(c):
                 c = str(c).replace(metric_suffix, "").strip() 
                 c = re.sub(mode_regex, '-', c, flags=re.IGNORECASE) 
-                return c
+                return c.replace('--', '-') # 防止出现双横杠
                 
             sub_df.rename(columns={c: clean_col_name(c) for c in metric_cols}, inplace=True)
             
@@ -72,10 +75,11 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
             return None, None, "所有上传的文件中都没有找到您指定的提取指标！请检查后缀拼写（注意空格）。"
             
         combined = pd.concat(all_dfs, ignore_index=True)
-        combined = combined.sort_values('__mean_resp__', ascending=False).drop_duplicates(subset=[combined.columns[0]])
+        # 按照最高响应去重，绝对的生信金标准
+        combined = combined.sort_values('__mean_resp__', ascending=False).drop_duplicates(subset=['__Compound__'])
         combined = combined.drop(columns=['__mean_resp__'])
         
-        combined.set_index(combined.columns[0], inplace=True)
+        combined.set_index('__Compound__', inplace=True)
         df_t = combined.T
         df_t.index.name = 'SampleID'
         df_t = df_t.reset_index()
@@ -108,7 +112,7 @@ def align_sample_info(df, info_df, sample_col_name='SampleName'):
     return merged
 
 # ==========================================
-# 2. 数据清洗与预处理核心流水线 (完美保留了 QC 过滤机制)
+# 2. 数据清洗与预处理核心流水线
 # ==========================================
 def impute_missing_values(df, features, method='knn'):
     df_imp = df.copy()
@@ -173,11 +177,11 @@ def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='p
     miss_rates = df[features].isnull().mean()
     keep_feats = miss_rates[miss_rates <= miss_th].index.tolist()
     
-    # 🌟 防御层 2 (用户定制)：QC 专属缺失率过滤
+    # 🌟 防御层 2 (完美保留您的需求)：QC 专属缺失率过滤
     qc_mask = df[group_col].astype(str).str.contains('QC', case=False, na=False) | df['SampleID'].astype(str).str.contains('QC', case=False, na=False)
     if qc_mask.any():
         qc_miss_rates = df.loc[qc_mask, keep_feats].isnull().mean()
-        # 只要 QC 中的缺失率超过阈值，立刻把这个化合物踢出保留名单
+        # 只要 QC 中的缺失率超过阈值，立刻把这个化合物剔除
         keep_feats = qc_miss_rates[qc_miss_rates <= miss_th].index.tolist()
         
     df_proc = df[['SampleID', group_col] + keep_feats].copy()
@@ -192,7 +196,7 @@ def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='p
         
     df_proc = scale_data(df_proc, keep_feats, method=scale_m)
     
-    # 🌟 防御层 3：彻底剔除“零方差”特征 (如果在所有样本中数值无波动，则剔除)
+    # 防御层 3：剔除零方差特征
     variances = df_proc[keep_feats].var()
     keep_feats = variances[variances > 1e-10].index.tolist()
     df_proc = df_proc[['SampleID', group_col] + keep_feats]
@@ -200,7 +204,7 @@ def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='p
     return df_proc, keep_feats
 
 # ==========================================
-# 3. OPLS-DA 算法核心 (🌟 修正了标量提取报错)
+# 3. OPLS-DA 算法核心 (🌟 彻底重构纯数字循环机制，断绝数组碰撞)
 # ==========================================
 class OPLS_DA:
     def __init__(self, n_components=1):
@@ -231,21 +235,34 @@ class OPLS_DA:
         return self
         
     def _calculate_vip(self):
-        t = self.pls.x_scores_; w = self.pls.x_weights_; q = self.pls.y_loadings_
-        p, h = w.shape; vips = np.zeros((p,))
+        # 🌟 强行将矩阵全部拉成 Float 类型，不用 Numpy 高阶乘法，改为纯数字累加
+        t = np.asarray(self.pls.x_scores_, dtype=float)
+        w = np.asarray(self.pls.x_weights_, dtype=float)
+        q = np.asarray(self.pls.y_loadings_, dtype=float)
+        p, h = w.shape
         
-        # 🟢 修正点：将 .reshape(h, -1) 移除，确保 s 是纯净的 1D array
-        s = np.diag(t.T @ t @ q.T @ q) 
+        vips = np.zeros(p)
+        s = np.zeros(h)
+        for a in range(h):
+            t_a = t[:, a]
+            q_a = q[:, a] if q.ndim > 1 else q[a]
+            s[a] = np.dot(t_a, t_a) * (q_a ** 2)
+            
         total_s = np.sum(s)
-        
+        if total_s == 0:
+            return vips
+            
+        # 🌟 最安全的循环：保证内部运算全是 Scalar 纯数字
         for i in range(p):
-            weight = np.array([(w[i, j] / (np.linalg.norm(w[:, j])+1e-8))**2 for j in range(h)])
+            val = 0.0
+            for a in range(h):
+                norm_w = np.linalg.norm(w[:, a])
+                if norm_w > 0:
+                    weight_a = (w[i, a] / norm_w) ** 2
+                    val += s[a] * weight_a
             
-            # 🟢 修正点：使用 np.dot 保证输出为纯净的标量 (Python scalar)
-            val = p * np.dot(s, weight) / (total_s + 1e-8)
-            
-            # 确保传递给 vips 的是纯数字
-            vips[i] = np.sqrt(np.clip(val, 0, None))
+            vip_val = p * val / total_s
+            vips[i] = np.sqrt(max(0.0, float(vip_val))) # 彻底规避负数开方和数组赋值
             
         return vips
         
