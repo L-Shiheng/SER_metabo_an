@@ -55,14 +55,12 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
                 continue 
                 
             sub_df = df[[comp_col] + metric_cols].copy()
-            
-            # 🌟 新增防御：强制统一所有文件第一列的名字，防止 4 个文件拼接时错位！
             sub_df.rename(columns={comp_col: '__Compound__'}, inplace=True)
             
             def clean_col_name(c):
                 c = str(c).replace(metric_suffix, "").strip() 
                 c = re.sub(mode_regex, '-', c, flags=re.IGNORECASE) 
-                return c.replace('--', '-') # 防止出现双横杠
+                return c.replace('--', '-') 
                 
             sub_df.rename(columns={c: clean_col_name(c) for c in metric_cols}, inplace=True)
             
@@ -75,7 +73,6 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
             return None, None, "所有上传的文件中都没有找到您指定的提取指标！请检查后缀拼写（注意空格）。"
             
         combined = pd.concat(all_dfs, ignore_index=True)
-        # 按照最高响应去重，绝对的生信金标准
         combined = combined.sort_values('__mean_resp__', ascending=False).drop_duplicates(subset=['__Compound__'])
         combined = combined.drop(columns=['__mean_resp__'])
         
@@ -173,19 +170,17 @@ def scale_data(df, features, method='pareto'):
 def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='pqn', do_log=True, scale_m='pareto'):
     features = [c for c in df.columns if c not in ['SampleID', group_col, 'Source_Files'] and pd.api.types.is_numeric_dtype(df[c])]
     
-    # 🌟 防御层 1：全局缺失率过滤
+    # 全局缺失率过滤
     miss_rates = df[features].isnull().mean()
     keep_feats = miss_rates[miss_rates <= miss_th].index.tolist()
     
-    # 🌟 防御层 2 (完美保留您的需求)：QC 专属缺失率过滤
+    # QC 专属缺失率过滤
     qc_mask = df[group_col].astype(str).str.contains('QC', case=False, na=False) | df['SampleID'].astype(str).str.contains('QC', case=False, na=False)
     if qc_mask.any():
         qc_miss_rates = df.loc[qc_mask, keep_feats].isnull().mean()
-        # 只要 QC 中的缺失率超过阈值，立刻把这个化合物剔除
         keep_feats = qc_miss_rates[qc_miss_rates <= miss_th].index.tolist()
         
     df_proc = df[['SampleID', group_col] + keep_feats].copy()
-    
     df_proc = impute_missing_values(df_proc, keep_feats, method=impute_m)
     df_proc = normalize_data(df_proc, keep_feats, method=norm_m)
     
@@ -196,7 +191,7 @@ def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='p
         
     df_proc = scale_data(df_proc, keep_feats, method=scale_m)
     
-    # 防御层 3：剔除零方差特征
+    # 剔除零方差特征
     variances = df_proc[keep_feats].var()
     keep_feats = variances[variances > 1e-10].index.tolist()
     df_proc = df_proc[['SampleID', group_col] + keep_feats]
@@ -204,7 +199,7 @@ def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='p
     return df_proc, keep_feats
 
 # ==========================================
-# 3. OPLS-DA 算法核心 (🌟 彻底重构纯数字循环机制，断绝数组碰撞)
+# 3. OPLS-DA 算法核心 (🌟 彻底修复数组嵌套维度的 Bug)
 # ==========================================
 class OPLS_DA:
     def __init__(self, n_components=1):
@@ -235,7 +230,6 @@ class OPLS_DA:
         return self
         
     def _calculate_vip(self):
-        # 🌟 强行将矩阵全部拉成 Float 类型，不用 Numpy 高阶乘法，改为纯数字累加
         t = np.asarray(self.pls.x_scores_, dtype=float)
         w = np.asarray(self.pls.x_weights_, dtype=float)
         q = np.asarray(self.pls.y_loadings_, dtype=float)
@@ -245,24 +239,27 @@ class OPLS_DA:
         s = np.zeros(h)
         for a in range(h):
             t_a = t[:, a]
-            q_a = q[:, a] if q.ndim > 1 else q[a]
-            s[a] = np.dot(t_a, t_a) * (q_a ** 2)
             
-        total_s = np.sum(s)
+            # 🌟 核心防线：不管 q 是一维、二维还是包裹了几层，强制提纯为单一的 float 标量！
+            q_a = float(q[0, a]) if q.ndim > 1 else float(q[a])
+            
+            # 使用 float() 彻底将矩阵乘法结果转为 Python 纯数字
+            s[a] = float(np.dot(t_a, t_a) * (q_a ** 2))
+            
+        total_s = float(np.sum(s))
         if total_s == 0:
             return vips
             
-        # 🌟 最安全的循环：保证内部运算全是 Scalar 纯数字
         for i in range(p):
             val = 0.0
             for a in range(h):
-                norm_w = np.linalg.norm(w[:, a])
+                norm_w = float(np.linalg.norm(w[:, a]))
                 if norm_w > 0:
-                    weight_a = (w[i, a] / norm_w) ** 2
-                    val += s[a] * weight_a
+                    weight_a = (float(w[i, a]) / norm_w) ** 2
+                    val += float(s[a]) * weight_a
             
-            vip_val = p * val / total_s
-            vips[i] = np.sqrt(max(0.0, float(vip_val))) # 彻底规避负数开方和数组赋值
+            vip_val = float(p) * val / total_s
+            vips[i] = np.sqrt(max(0.0, vip_val))
             
         return vips
         
