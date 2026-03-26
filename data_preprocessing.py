@@ -7,7 +7,7 @@ from scipy import stats
 import statsmodels.stats.multitest
 
 # ==========================================
-# 1. 数据读取与解析模块
+# 1. 数据读取与解析模块 (🌟 彻底强化 MetDNA 与手工表的双引擎)
 # ==========================================
 
 def parse_metdna_file(file, unique_name, file_type='csv'):
@@ -15,28 +15,68 @@ def parse_metdna_file(file, unique_name, file_type='csv'):
         if file_type == 'csv': df = pd.read_csv(file)
         else: df = pd.read_excel(file)
         
+        # 🌟 防御 1：自动处理 MetDNA 中常见的同名化合物（加后缀去重）
+        def make_unique(names):
+            seen = set()
+            res = []
+            for n in names:
+                base = str(n).strip()
+                new_n = base
+                i = 1
+                while new_n in seen:
+                    new_n = f"{base}_{i}"
+                    i += 1
+                seen.add(new_n)
+                res.append(new_n)
+            return res
+
         if 'Sample' in df.columns and 'Metabolite' in df.columns:
+            # Long format 处理
+            df['Metabolite'] = make_unique(df['Metabolite'].values)
             df_wide = df.pivot_table(index='Sample', columns='Metabolite', values='Value').reset_index()
             df_wide.rename(columns={'Sample': 'SampleID'}, inplace=True)
             df_wide['Group'] = 'Unknown'
             df_wide['Source_Files'] = unique_name
+            
+            # 🌟 防御 2：强制数值转换，防止文本 'NA' 破坏矩阵
+            for c in df_wide.columns:
+                if c not in ['SampleID', 'Group', 'Source_Files']:
+                    df_wide[c] = pd.to_numeric(df_wide[c], errors='coerce')
+                    
             meta = pd.DataFrame({'Original_Name': df_wide.columns[2:], 'Clean_Name': df_wide.columns[2:], 'Is_Annotated': True}, index=df_wide.columns[2:])
             return df_wide, meta, None
         else:
-            sample_cols = [c for c in df.columns if c not in ['name', 'mz', 'rt', 'adduct', 'Formula', 'KEGG', 'HMDB']]
-            df_t = df[sample_cols].set_index(sample_cols[0]).T.reset_index()
+            # Wide format 处理 (MetDNA 默认格式)
+            id_col = df.columns[0]
+            df[id_col] = make_unique(df[id_col].values) # 防止同名列名崩溃
+            
+            sample_cols = [c for c in df.columns if c not in [id_col, 'name', 'mz', 'rt', 'adduct', 'Formula', 'KEGG', 'HMDB']]
+            df_t = df.set_index(id_col)[sample_cols].T.reset_index()
             df_t.columns.name = None
             df_t.rename(columns={'index': 'SampleID'}, inplace=True)
             df_t['Group'] = 'Unknown'
             df_t['Source_Files'] = unique_name
             
-            meta_idx = df[sample_cols[0]].values
+            # 🌟 防御 2：强制数值转换，防止矩阵被判为 Object 而被过滤
+            for c in df_t.columns:
+                if c not in ['SampleID', 'Group', 'Source_Files']:
+                    df_t[c] = pd.to_numeric(df_t[c], errors='coerce')
+            
+            meta_idx = df[id_col].values
             meta = pd.DataFrame(index=meta_idx)
-            meta['Original_Name'] = meta_idx
+            
+            kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
+            if kegg_col is not None:
+                kegg_vals = df[kegg_col].fillna('').astype(str).values
+                meta['Original_Name'] = [f"{n} | {k}" if k.strip() and k.lower() != 'nan' else str(n) for n, k in zip(meta_idx, kegg_vals)]
+            else:
+                meta['Original_Name'] = meta_idx
+                
             meta['Clean_Name'] = meta_idx
             meta['Is_Annotated'] = True 
-            if 'KEGG' in df.columns:
-                meta['Is_Annotated'] = df['KEGG'].notna() & (df['KEGG'] != '')
+            if kegg_col is not None:
+                kegg_mask = df[kegg_col].astype(str).str.strip().str.lower()
+                meta['Is_Annotated'] = (kegg_mask != '') & (kegg_mask != 'nan') & (kegg_mask != 'none')
             return df_t, meta, None
     except Exception as e:
         return None, None, str(e)
@@ -44,12 +84,21 @@ def parse_metdna_file(file, unique_name, file_type='csv'):
 def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_regex=r'-(P|N|POS|NEG|HILIC-P|HILIC-N)-'):
     try:
         all_dfs = []
+        kegg_mapping = {} 
+        
         for file in file_list:
             file.seek(0)
             if file.name.endswith('.csv'): df = pd.read_csv(file)
             else: df = pd.read_excel(file)
             
             comp_col = df.columns[0] 
+            kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
+            if kegg_col:
+                for _, row in df.iterrows():
+                    n = str(row[comp_col]).strip()
+                    k = str(row[kegg_col]).strip()
+                    if k and k.lower() != 'nan': kegg_mapping[n] = k
+                    
             metric_cols = [c for c in df.columns if metric_suffix in str(c)]
             if not metric_cols:
                 continue 
@@ -84,8 +133,13 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
         df_t['Source_Files'] = 'Manual_Targeted_Merged'
         
         meta = pd.DataFrame(index=combined.index)
-        meta['Original_Name'] = combined.index
         meta['Clean_Name'] = combined.index
+        
+        orig_names = []
+        for name in combined.index:
+            if name in kegg_mapping: orig_names.append(f"{name} | {kegg_mapping[name]}")
+            else: orig_names.append(name)
+        meta['Original_Name'] = orig_names
         meta['Is_Annotated'] = True 
         
         return df_t, meta, None
@@ -170,11 +224,9 @@ def scale_data(df, features, method='pareto'):
 def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='pqn', do_log=True, scale_m='pareto'):
     features = [c for c in df.columns if c not in ['SampleID', group_col, 'Source_Files'] and pd.api.types.is_numeric_dtype(df[c])]
     
-    # 全局缺失率过滤
     miss_rates = df[features].isnull().mean()
     keep_feats = miss_rates[miss_rates <= miss_th].index.tolist()
     
-    # QC 专属缺失率过滤
     qc_mask = df[group_col].astype(str).str.contains('QC', case=False, na=False) | df['SampleID'].astype(str).str.contains('QC', case=False, na=False)
     if qc_mask.any():
         qc_miss_rates = df.loc[qc_mask, keep_feats].isnull().mean()
@@ -191,7 +243,6 @@ def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='p
         
     df_proc = scale_data(df_proc, keep_feats, method=scale_m)
     
-    # 剔除零方差特征
     variances = df_proc[keep_feats].var()
     keep_feats = variances[variances > 1e-10].index.tolist()
     df_proc = df_proc[['SampleID', group_col] + keep_feats]
@@ -199,7 +250,7 @@ def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='p
     return df_proc, keep_feats
 
 # ==========================================
-# 3. OPLS-DA 算法核心 (🌟 彻底修复数组嵌套维度的 Bug)
+# 3. OPLS-DA 算法核心 
 # ==========================================
 class OPLS_DA:
     def __init__(self, n_components=1):
@@ -239,16 +290,11 @@ class OPLS_DA:
         s = np.zeros(h)
         for a in range(h):
             t_a = t[:, a]
-            
-            # 🌟 核心防线：不管 q 是一维、二维还是包裹了几层，强制提纯为单一的 float 标量！
             q_a = float(q[0, a]) if q.ndim > 1 else float(q[a])
-            
-            # 使用 float() 彻底将矩阵乘法结果转为 Python 纯数字
             s[a] = float(np.dot(t_a, t_a) * (q_a ** 2))
             
         total_s = float(np.sum(s))
-        if total_s == 0:
-            return vips
+        if total_s == 0: return vips
             
         for i in range(p):
             val = 0.0
@@ -260,7 +306,6 @@ class OPLS_DA:
             
             vip_val = float(p) * val / total_s
             vips[i] = np.sqrt(max(0.0, vip_val))
-            
         return vips
         
     def _calculate_p_corr(self):
@@ -294,7 +339,7 @@ class OPLS_DA:
         return np.array(corrs), np.array(r2s), np.array(q2s), original_r2, original_q2
 
 # ==========================================
-# 4. 极致背景校验的通路富集算法
+# 4. 极致背景校验的通路富集算法 (🌟 自动屏蔽重复后缀，确撞库成功)
 # ==========================================
 def run_pathway_enrichment(sig_metabolites, all_measured_metabolites, custom_db_source=None):
     if custom_db_source is not None:
@@ -306,8 +351,23 @@ def run_pathway_enrichment(sig_metabolites, all_measured_metabolites, custom_db_
     
     if 'Pathway' not in db.columns or 'Compounds' not in db.columns: return pd.DataFrame()
     
-    sig_set = set([str(x).lower().strip() for x in sig_metabolites])
-    bg_set = set([str(x).lower().strip() for x in all_measured_metabolites])
+    def _extract_terms(met_list):
+        terms = set()
+        for x in met_list:
+            parts = str(x).split('|')
+            for p in parts:
+                c = p.strip().lower()
+                if not c or c == 'nan': continue
+                # 🌟 核心修复：把自动生成的 _1, _2 等后缀去掉，否则会导致撞库失败！
+                c_clean = re.sub(r'_\d+$', '', c)
+                terms.add(c_clean)
+                terms.add(c) 
+                if re.match(r'^c\d{5}$', c):
+                    terms.add('cpd:' + c)
+        return terms
+        
+    sig_set = _extract_terms(sig_metabolites)
+    bg_set = _extract_terms(all_measured_metabolites)
     N = len(bg_set); K = len(sig_set)
     if N == 0 or K == 0: return pd.DataFrame()
     
@@ -318,6 +378,7 @@ def run_pathway_enrichment(sig_metabolites, all_measured_metabolites, custom_db_
         
         pw_comps = set([c.lower().strip() for c in comp_str.split(';')])
         M = len(pw_comps) 
+        
         hits = pw_comps.intersection(sig_set)
         k = len(hits)
         
