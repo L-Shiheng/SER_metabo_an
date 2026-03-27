@@ -95,18 +95,25 @@ with st.sidebar:
             serrf_ready = True
         else: st.warning("⚠️ 需上传 Info 表")
 
-    st.markdown("#### 4. 通路数据库")
-    custom_pathway_file = st.file_uploader("手动上传通路库 (可选)", type=["csv", "gmt"], key="pathway_db")
+    # 🌟 彻底重构：自动调用 API 获取物种特异性库
+    st.markdown("#### 4. 在线通路引擎 (自动调用 KEGG API)")
+    species = st.selectbox("选择物种 (强烈影响富集显著性)", ["Human (人类 - 推荐)", "Mouse (小鼠)", "Rat (大鼠)", "General (所有物种)"], index=0)
+    species_code = {"Human (人类 - 推荐)": "hsa", "Mouse (小鼠)": "mmu", "Rat (大鼠)": "rno", "General (所有物种)": "map"}[species]
+    db_filename = f"kegg_{species_code}.csv"
     
-    if st.button("🔄 在线同步最新 KEGG 官方库", use_container_width=True):
-        with st.spinner("正在连接日本 KEGG REST API 服务器，这可能需要 1-2 分钟，请稍候..."):
+    custom_pathway_file = st.file_uploader("手动上传库 (覆盖在线库)", type=["csv", "gmt"], key="pathway_db")
+    
+    # 只要本地没有文件，或者用户主动点击，系统都会瞬间从日本服务器拉最新数据！
+    if st.button(f"🔄 强制同步 {species_code} 最新通路库", use_container_width=True) or not os.path.exists(db_filename):
+        with st.spinner(f"正在连接 KEGG API 拉取 {species} 最新专属通路库..."):
             try:
-                pw_res = requests.get("http://rest.kegg.jp/list/pathway/map")
+                pw_res = requests.get(f"http://rest.kegg.jp/list/pathway/{species_code}")
                 pw_dict = {}
                 for line in pw_res.text.strip().split('\n'):
                     if line:
                         parts = line.split('\t')
-                        pw_dict[parts[0]] = parts[1]
+                        pw_id_num = re.sub(r'^[a-z]+', '', parts[0].replace('path:', ''))
+                        pw_dict[pw_id_num] = parts[1]
                 
                 link_res = requests.get("http://rest.kegg.jp/link/cpd/pathway")
                 pw_cpd_map = {}
@@ -114,20 +121,20 @@ with st.sidebar:
                     if line:
                         parts = line.split('\t')
                         if parts[0].startswith('path:map'):
-                            pw = parts[0].replace('path:', '')
+                            pw_num = parts[0].replace('path:map', '')
                             cpd = parts[1].replace('cpd:', '')
-                            if pw not in pw_cpd_map:
-                                pw_cpd_map[pw] = []
-                            pw_cpd_map[pw].append(cpd)
+                            if pw_num not in pw_cpd_map:
+                                pw_cpd_map[pw_num] = []
+                            pw_cpd_map[pw_num].append(cpd)
                 
                 data = []
-                for pw, cpds in pw_cpd_map.items():
-                    if pw in pw_dict:
-                        data.append({'Pathway': pw_dict[pw], 'Compounds': ';'.join(cpds)})
-                pd.DataFrame(data).to_csv("kegg_pathways.csv", index=False)
-                st.success("✅ 本地 KEGG 数据库已成功更新至官方最新版！")
+                for pw_num, name in pw_dict.items():
+                    if pw_num in pw_cpd_map:
+                        data.append({'Pathway': name, 'Compounds': ';'.join(pw_cpd_map[pw_num])})
+                pd.DataFrame(data).to_csv(db_filename, index=False)
+                st.toast(f"✅ {species} 库同步成功！")
             except Exception as e:
-                st.error(f"❌ 网络请求失败，请检查网络或稍后再试。错误: {str(e)}")
+                st.error(f"❌ 网络请求失败: {str(e)}")
     
     st.markdown("#### 5. 上传代谢组学数据")
     data_source = st.radio("选择数据格式:", ["MetDNA 原始结果", "手动 MRM 靶向宽表"], index=0)
@@ -446,6 +453,7 @@ if submit_button:
                     except Exception as e:
                         st.warning(f"由于数据极端分布或特征高度共线性，列线图模型无法收敛。错误详情：{str(e)}")
 
+        # 🌟 接入官方 API 和修正版背景计算的通路富集
         with tabs[8]:
             st.markdown("### 🕸️ KEGG 代谢通路富集")
             c1, c2 = st.columns([1, 6])
@@ -455,9 +463,9 @@ if submit_button:
                 if not sig_mets_fullnames: st.info("⚠️ 无显著差异标志物，无法进行通路富集。")
                 else:
                     with st.spinner("正在映射数据库..."):
-                        db_source = custom_pathway_file if custom_pathway_file else "kegg_pathways.csv"
+                        db_source = custom_pathway_file if custom_pathway_file else db_filename
                         pathway_df = run_pathway_enrichment(sig_mets_fullnames, all_mets_fullnames, custom_db_source=db_source)
-                        if pathway_df.empty: st.warning("未能匹配到通路。")
+                        if pathway_df.empty: st.warning("未能匹配到通路，请确保已点击侧边栏的同步库按钮，并选择了正确的物种。")
                         else:
                             plot_pw_df = pathway_df[pathway_df['Hits'] > 0].head(pw_show_num)
                             fig_pathway = px.scatter(
