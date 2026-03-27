@@ -7,6 +7,7 @@ import datetime
 import re
 import io
 import base64
+import requests
 import plotly.express as px
 import plotly.graph_objects as go
 import seaborn as sns
@@ -94,10 +95,42 @@ with st.sidebar:
             serrf_ready = True
         else: st.warning("⚠️ 需上传 Info 表")
 
+    # 🌟 恢复：在线同步 KEGG 与自定义通路数据库模块
     st.markdown("#### 4. 通路数据库")
     custom_pathway_file = st.file_uploader("手动上传通路库 (可选)", type=["csv", "gmt"], key="pathway_db")
     
-    # 🌟 核心：双引擎数据上传源选择
+    if st.button("🔄 在线同步最新 KEGG 官方库", use_container_width=True):
+        with st.spinner("正在连接日本 KEGG REST API 服务器，这可能需要 1-2 分钟，请稍候..."):
+            try:
+                pw_res = requests.get("http://rest.kegg.jp/list/pathway/map")
+                pw_dict = {}
+                for line in pw_res.text.strip().split('\n'):
+                    if line:
+                        parts = line.split('\t')
+                        pw_dict[parts[0]] = parts[1]
+                
+                link_res = requests.get("http://rest.kegg.jp/link/cpd/pathway")
+                pw_cpd_map = {}
+                for line in link_res.text.strip().split('\n'):
+                    if line:
+                        parts = line.split('\t')
+                        if parts[0].startswith('path:map'):
+                            pw = parts[0].replace('path:', '')
+                            cpd = parts[1].replace('cpd:', '')
+                            if pw not in pw_cpd_map:
+                                pw_cpd_map[pw] = []
+                            pw_cpd_map[pw].append(cpd)
+                
+                data = []
+                for pw, cpds in pw_cpd_map.items():
+                    if pw in pw_dict:
+                        data.append({'Pathway': pw_dict[pw], 'Compounds': ';'.join(cpds)})
+                pd.DataFrame(data).to_csv("kegg_pathways.csv", index=False)
+                st.success("✅ 本地 KEGG 数据库已成功更新至官方最新版！")
+            except Exception as e:
+                st.error(f"❌ 网络请求失败，请检查网络或稍后再试。错误: {str(e)}")
+    
+    # 🌟 双引擎数据上传源选择
     st.markdown("#### 5. 上传代谢组学数据")
     data_source = st.radio("选择数据格式:", ["MetDNA 原始结果", "手动 MRM 靶向宽表"], index=0)
     
