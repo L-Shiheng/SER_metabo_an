@@ -28,7 +28,7 @@ try:
     from data_preprocessing import (
         data_cleaning_pipeline, parse_metdna_file, parse_manual_targeted_files, 
         merge_multiple_dfs, align_sample_info, OPLS_DA, 
-        run_pathway_enrichment, build_kegg_dictionary
+        run_pathway_enrichment, run_kegg_pathway_enrichment, build_kegg_dictionary
     )
     from stats_utils import run_pairwise_statistics
     from plot_utils import update_layout_square, get_ellipse_coordinates, plot_nomogram
@@ -456,7 +456,7 @@ if submit_button:
                         st.warning(f"由于数据极端分布或特征高度共线性，列线图模型无法收敛。错误详情：{str(e)}")
 
         with tabs[8]:
-            st.markdown("### 🕸️ 代谢通路富集 (万能自适应引擎)")
+            st.markdown("### 🕸️ 代谢通路富集 (双轨制引擎)")
             c1, c2 = st.columns([1, 6])
             with c2:
                 sig_mets_fullnames = stats_df[stats_df['Is_Biomarker']]['Search_Name'].tolist()
@@ -464,12 +464,19 @@ if submit_button:
                 
                 if not sig_mets_fullnames: st.info("⚠️ 无显著差异标志物，无法进行通路富集。")
                 else:
-                    with st.spinner("正在映射数据库并进行自动背景裁剪..."):
-                        db_source = custom_pathway_file if custom_pathway_file else db_filename
-                        pathway_df = run_pathway_enrichment(sig_mets_fullnames, all_mets_fullnames, custom_db_source=db_source)
-                            
-                        if pathway_df.empty: st.warning("未能匹配到通路，请检查是否选择了正确的物种库。")
+                    with st.spinner("正在映射数据库..."):
+                        if data_source == "手动 MRM 靶向宽表":
+                            db_source = custom_pathway_file if custom_pathway_file else db_filename
+                            pathway_df = run_kegg_pathway_enrichment(sig_mets_fullnames, all_mets_fullnames, custom_db_source=db_source)
                         else:
+                            db_source = custom_pathway_file if custom_pathway_file else None
+                            pathway_df = run_pathway_enrichment(sig_mets_fullnames, all_mets_fullnames, custom_db_source=db_source)
+                            
+                        if pathway_df.empty: st.warning("未能匹配到通路，请检查是否上传了正确的参考库，或选择正确的物种。")
+                        else:
+                            if '-Log10_P' not in pathway_df.columns:
+                                pathway_df['-Log10_P'] = -np.log10(pathway_df['P_Value'].astype(float).clip(lower=1e-10))
+                                
                             plot_pw_df = pathway_df[pathway_df['Hits'] > 0].head(pw_show_num)
                             fig_pathway = px.scatter(
                                 plot_pw_df, x='Enrichment_Factor', y='-Log10_P', size='Hits', color='P_Value',
@@ -495,8 +502,13 @@ if submit_button:
                 if sig_pws.empty: st.info("当前组别对比下没有 P < 0.05 的显著通路，无法绘制网络。")
                 else:
                     G = nx.Graph()
-                    fc_dict = dict(zip(out_df['Name'], out_df['Log2_FC']))
-                    vip_dict = dict(zip(out_df['Name'], out_df['VIP']))
+                    
+                    # 🌟 修复名称匹配 Bug：使用与 Hit_Metabolites 完全一致的解析逻辑作为主键
+                    robust_keys = out_df['Search_Name'].apply(lambda x: str(x).split(';')[0].strip())
+                    fc_dict = dict(zip(robust_keys, out_df['Log2_FC']))
+                    vip_dict = dict(zip(robust_keys, out_df['VIP']))
+                    disp_name_dict = dict(zip(robust_keys, out_df['Name']))
+                    
                     for _, row in sig_pws.iterrows():
                         pw_name = row['Pathway']
                         G.add_node(pw_name, node_type='pathway', size=max(15, -np.log10(row['P_Value']) * 10))
@@ -504,7 +516,7 @@ if submit_button:
                         if pd.notna(hits_str) and str(hits_str).strip() != "":
                             for hit in [m.strip() for m in hits_str.split(',')]:
                                 if hit in fc_dict:
-                                    G.add_node(hit, node_type='metabolite', size=max(10, vip_dict.get(hit, 1.0) * 8), fc=fc_dict[hit])
+                                    G.add_node(hit, node_type='metabolite', size=max(10, vip_dict.get(hit, 1.0) * 8), fc=fc_dict[hit], disp_name=disp_name_dict.get(hit, hit))
                                     G.add_edge(pw_name, hit)
 
                     if len(G.nodes) > 0:
@@ -522,16 +534,17 @@ if submit_button:
                             node_info = G.nodes[node]
                             if node_info['node_type'] == 'pathway':
                                 node_color.append('#FFD700'); node_size.append(node_info['size']); node_symbol.append('square')
-                                node_text.append(f"<b>[Pathway]</b> {node}")
+                                node_text.append(f"<b>[Pathway]</b><br>{node}")
                             else:
                                 fc = node_info['fc']
+                                disp_name = node_info.get('disp_name', node).split(' | ')[0]
                                 node_color.append('#CD0000' if fc > 0 else '#00008B')
                                 node_size.append(node_info['size']); node_symbol.append('circle')
-                                node_text.append(f"<b>{node}</b><br>Log2FC: {fc:.2f}")
+                                node_text.append(f"<b>{disp_name}</b><br>Log2FC: {fc:.2f}")
 
                         node_trace = go.Scatter(
                             x=node_x, y=node_y, mode='markers+text',
-                            hoverinfo='text', text=[n if G.nodes[n]['node_type']=='pathway' else '' for n in G.nodes()], 
+                            hoverinfo='text', text=[G.nodes[n].get('disp_name', n).split(' | ')[0] if G.nodes[n]['node_type']=='metabolite' else '' for n in G.nodes()], 
                             textposition="top center", hovertext=node_text,
                             marker=dict(symbol=node_symbol, showscale=False, color=node_color, size=node_size, line_width=1, line_color='black')
                         )
@@ -544,6 +557,8 @@ if submit_button:
                             width=900, height=700, plot_bgcolor='white'
                         )
                         st.plotly_chart(fig_network)
+                    else:
+                        st.warning("⚠️ 没有找到通路和代谢物之间的有效映射关联，无法绘图。")
 
         with tabs[10]:
             st.markdown("### 📄 报告生成中心")
