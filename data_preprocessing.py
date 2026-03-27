@@ -7,48 +7,9 @@ from sklearn.cross_decomposition import PLSRegression
 from scipy import stats
 import statsmodels.stats.multitest
 
-# ==========================================
-# 0. 超级大字典构建引擎
-# ==========================================
-def build_kegg_dictionary(dict_files):
-    kegg_mapping = {}
-    if not dict_files: return kegg_mapping
-    for file in dict_files:
-        try:
-            file.seek(0)
-            if file.name.endswith('.csv'):
-                try: df = pd.read_csv(file, engine='pyarrow')
-                except: file.seek(0); df = pd.read_csv(file, low_memory=False)
-            else: df = pd.read_excel(file)
-            
-            target_cols = ['name', 'metabolite', '化合物名称', 'peak_name']
-            name_col = None
-            df_cols_lower = [str(c).lower() for c in df.columns]
-            for tc in target_cols:
-                if tc in df_cols_lower:
-                    name_col = df.columns[df_cols_lower.index(tc)]
-                    break
-            if not name_col: name_col = df.columns[0]
-            
-            kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
-            
-            if kegg_col:
-                for _, row in df.iterrows():
-                    k = str(row[kegg_col]).strip()
-                    if k and k.lower() not in ['nan', 'none', '']:
-                        k_clean = k.split(';')[0].strip() 
-                        names_str = str(row[name_col])
-                        
-                        for n_part in names_str.split(';'):
-                            n_clean = n_part.strip().lower()
-                            if n_clean and n_clean != 'nan':
-                                kegg_mapping[n_clean] = k_clean
-        except Exception: pass
-    return kegg_mapping
-
-# ==========================================
-# 1. 数据读取与解析模块
-# ==========================================
+# ==============================================================================
+# 【共用工具模块】
+# ==============================================================================
 def make_unique(series):
     seen = set(); result = []
     for item in series:
@@ -61,6 +22,25 @@ def make_unique(series):
         seen.add(new_item); result.append(new_item)
     return result
 
+def merge_multiple_dfs(parsed_results):
+    df_list = [r[0] for r in parsed_results]
+    meta_list = [r[1] for r in parsed_results]
+    merged_df = pd.concat(df_list, axis=0, ignore_index=True)
+    merged_df = merged_df.groupby('SampleID', as_index=False).first()
+    merged_meta = pd.concat(meta_list, axis=0)
+    merged_meta = merged_meta[~merged_meta.index.duplicated(keep='first')]
+    return merged_df, merged_meta, None
+
+def align_sample_info(df, info_df, sample_col_name='SampleName'):
+    df['SampleID_Clean'] = df['SampleID'].astype(str).apply(lambda x: re.sub(r'[^a-zA-Z0-9]', '', x.lower()))
+    info_df['InfoID_Clean'] = info_df[sample_col_name].astype(str).apply(lambda x: re.sub(r'[^a-zA-Z0-9]', '', x.lower()))
+    merged = pd.merge(df, info_df, left_on='SampleID_Clean', right_on='InfoID_Clean', how='left')
+    merged.drop(columns=['SampleID_Clean', 'InfoID_Clean'], inplace=True, errors='ignore')
+    return merged
+
+# ==============================================================================
+# 【流水线 A：MetDNA 原表专属解析器】 (恢复最初始、最稳定的逻辑，绝不干预列名)
+# ==============================================================================
 def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     try:
         if file_type == 'csv':
@@ -90,21 +70,21 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     rt_str = df['rt'].map('{:.2f}'.format).astype(str) if 'rt' in df.columns else ""
     unannotated_ids = "m/z" + mz_str + "_RT" + rt_str + "_" + clean_tag
     final_ids = np.where(mask_annotated, clean_names + "_" + clean_tag, unannotated_ids)
+    final_ids = make_unique(final_ids)
 
+    # 提取原始 KEGG 备用，但不再强行修改列名
     kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
     if kegg_col is not None:
         kegg_vals = df[kegg_col].fillna('').astype(str).values
-        final_ids_with_kegg = [f"{n} | {k}" if str(k).strip() and str(k).lower() not in ['nan', 'none', ''] else str(n) for n, k in zip(final_ids, kegg_vals)]
+        orig_names = [f"{n} | {k}" if str(k).strip() and str(k).lower() not in ['nan', 'none', ''] else str(n) for n, k in zip(df['name'], kegg_vals)]
     else:
-        final_ids_with_kegg = final_ids
-        
-    final_ids_with_kegg = make_unique(final_ids_with_kegg)
+        orig_names = df['name']
 
     meta_df = pd.DataFrame({
-        "Original_Name": final_ids_with_kegg, 
+        "Original_Name": orig_names, 
         "Clean_Name": np.where(mask_annotated, clean_names, final_ids), 
         "Is_Annotated": mask_annotated
-    }, index=final_ids_with_kegg)
+    }, index=final_ids)
     
     df_data = df[sample_cols].copy()
     df_data.index = meta_df.index
@@ -118,12 +98,49 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     
     return df_transposed, meta_df, None
 
+
+# ==============================================================================
+# 【流水线 B：手动靶向表专属解析器】 (包含字典构建与强行缝合 KEGG ID 的逻辑)
+# ==============================================================================
+def build_kegg_dictionary(dict_files):
+    kegg_mapping = {}
+    if not dict_files: return kegg_mapping
+    for file in dict_files:
+        try:
+            file.seek(0)
+            if file.name.endswith('.csv'):
+                try: df = pd.read_csv(file, engine='pyarrow')
+                except: file.seek(0); df = pd.read_csv(file, low_memory=False)
+            else: df = pd.read_excel(file)
+            
+            target_cols = ['name', 'metabolite', '化合物名称', 'peak_name']
+            name_col = None
+            df_cols_lower = [str(c).lower() for c in df.columns]
+            for tc in target_cols:
+                if tc in df_cols_lower:
+                    name_col = df.columns[df_cols_lower.index(tc)]
+                    break
+            if not name_col: name_col = df.columns[0]
+            
+            kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
+            if kegg_col:
+                for _, row in df.iterrows():
+                    k = str(row[kegg_col]).strip()
+                    if k and k.lower() not in ['nan', 'none', '']:
+                        k_clean = k.split(';')[0].strip() 
+                        names_str = str(row[name_col])
+                        for n_part in names_str.split(';'):
+                            n_clean = n_part.strip().lower()
+                            if n_clean and n_clean != 'nan':
+                                kegg_mapping[n_clean] = k_clean
+        except Exception: pass
+    return kegg_mapping
+
 def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_regex=r'-(P|N|RP-P|RP-N|HILIC-P|HILIC-N|POS|NEG)-', external_kegg_dict=None):
     if external_kegg_dict is None: external_kegg_dict = {}
     try:
         all_dfs = []
         local_kegg_mapping = {} 
-        
         for file in file_list:
             file.seek(0)
             if file.name.endswith('.csv'): df = pd.read_csv(file)
@@ -150,9 +167,7 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
                 return c.replace('--', '-') 
                 
             sub_df.rename(columns={c: clean_col_name(c) for c in metric_cols}, inplace=True)
-            for c in sub_df.columns[1:]:
-                sub_df[c] = pd.to_numeric(sub_df[c], errors='coerce')
-                
+            for c in sub_df.columns[1:]: sub_df[c] = pd.to_numeric(sub_df[c], errors='coerce')
             sub_df['__mean_resp__'] = sub_df.iloc[:, 1:].mean(axis=1)
             all_dfs.append(sub_df)
             
@@ -161,14 +176,12 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
         combined = pd.concat(all_dfs, ignore_index=True)
         combined = combined.sort_values('__mean_resp__', ascending=False).drop_duplicates(subset=['__Compound__'])
         combined = combined.drop(columns=['__mean_resp__'])
-        
         combined.set_index('__Compound__', inplace=True)
         
         orig_names = []
         for n in combined.index:
             n_lower = str(n).strip().lower()
             mapped_kegg = None
-            
             if n_lower in local_kegg_mapping: mapped_kegg = local_kegg_mapping[n_lower]
             elif n_lower in external_kegg_dict: mapped_kegg = external_kegg_dict[n_lower]
             else:
@@ -177,12 +190,10 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
                     if n_part_clean in external_kegg_dict:
                         mapped_kegg = external_kegg_dict[n_part_clean]
                         break
-            
             if mapped_kegg: orig_names.append(f"{n} | {mapped_kegg}")
             else: orig_names.append(n)
                 
         combined.index = orig_names
-        
         df_t = combined.T
         df_t.index.name = 'SampleID'
         df_t = df_t.reset_index()
@@ -193,42 +204,22 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
         meta['Clean_Name'] = [str(n).split(' | ')[0] for n in combined.index]
         meta['Original_Name'] = combined.index
         meta['Is_Annotated'] = True 
-        
         return df_t, meta, None
-    except Exception as e:
-        return None, None, f"手动表格解析失败: {str(e)}"
+    except Exception as e: return None, None, f"手动表格解析失败: {str(e)}"
 
-def merge_multiple_dfs(parsed_results):
-    df_list = [r[0] for r in parsed_results]
-    meta_list = [r[1] for r in parsed_results]
-    merged_df = pd.concat(df_list, axis=0, ignore_index=True)
-    merged_df = merged_df.groupby('SampleID', as_index=False).first()
-    merged_meta = pd.concat(meta_list, axis=0)
-    merged_meta = merged_meta[~merged_meta.index.duplicated(keep='first')]
-    return merged_df, merged_meta, None
-
-def align_sample_info(df, info_df, sample_col_name='SampleName'):
-    df['SampleID_Clean'] = df['SampleID'].astype(str).apply(lambda x: re.sub(r'[^a-zA-Z0-9]', '', x.lower()))
-    info_df['InfoID_Clean'] = info_df[sample_col_name].astype(str).apply(lambda x: re.sub(r'[^a-zA-Z0-9]', '', x.lower()))
-    merged = pd.merge(df, info_df, left_on='SampleID_Clean', right_on='InfoID_Clean', how='left')
-    merged.drop(columns=['SampleID_Clean', 'InfoID_Clean'], inplace=True, errors='ignore')
-    return merged
-
-# ==========================================
-# 2. 数据清洗与预处理核心流水线
-# ==========================================
+# ==============================================================================
+# 【核心流水线：预处理与降噪】
+# ==============================================================================
 def impute_missing_values(df, features, method='knn'):
     df_imp = df.copy()
     df_imp[features] = df_imp[features].replace(0.0, np.nan)
     X = df_imp[features].values
     n_neighbors = min(5, max(1, len(X) - 1))
-    
     with np.errstate(all='ignore'):
         if method == 'knn': X_imp = KNNImputer(n_neighbors=n_neighbors).fit_transform(X)
         elif method == 'min': X_imp = np.where(np.isnan(X), np.nanmin(X, axis=0) * 0.5, X)
         elif method == 'mean': X_imp = np.where(np.isnan(X), np.nanmean(X, axis=0), X)
         else: X_imp = np.nan_to_num(X, nan=0.0)
-    
     X_imp = np.nan_to_num(X_imp, nan=0.0, posinf=0.0, neginf=0.0)
     df_imp[features] = X_imp
     return df_imp
@@ -251,7 +242,6 @@ def normalize_data(df, features, method='pqn'):
         s[s == 0] = 1.0
         X_norm = X / s
     else: X_norm = X
-    
     df_norm = df.copy()
     df_norm[features] = np.nan_to_num(X_norm, nan=0.0, posinf=0.0, neginf=0.0)
     return df_norm
@@ -269,17 +259,14 @@ def scale_data(df, features, method='pareto'):
         std[std == 0] = 1.0
         X_scaled = (X - mean) / std
     else: X_scaled = X
-    
     df_scaled = df.copy()
     df_scaled[features] = np.nan_to_num(X_scaled, nan=0.0, posinf=0.0, neginf=0.0)
     return df_scaled
 
 def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='pqn', do_log=True, scale_m='pareto'):
     features = [c for c in df.columns if c not in ['SampleID', group_col, 'Source_Files'] and pd.api.types.is_numeric_dtype(df[c])]
-    
     miss_rates = df[features].isnull().mean()
     keep_feats = miss_rates[miss_rates <= miss_th].index.tolist()
-    
     qc_mask = df[group_col].astype(str).str.contains('QC', case=False, na=False) | df['SampleID'].astype(str).str.contains('QC', case=False, na=False)
     if qc_mask.any():
         qc_miss_rates = df.loc[qc_mask, keep_feats].isnull().mean()
@@ -295,60 +282,48 @@ def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='p
         df_proc[keep_feats] = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
         
     df_proc = scale_data(df_proc, keep_feats, method=scale_m)
-    
     variances = df_proc[keep_feats].var()
     keep_feats = variances[variances > 1e-10].index.tolist()
     df_proc = df_proc[['SampleID', group_col] + keep_feats]
-    
     return df_proc, keep_feats
 
-# ==========================================
-# 3. OPLS-DA 算法核心
-# ==========================================
+# ==============================================================================
+# 【统计分析：OPLS-DA 与通路富集引擎】
+# ==============================================================================
 class OPLS_DA:
     def __init__(self, n_components=1):
         self.n_components = n_components
-    
     def _clean_matrix(self, matrix):
         mat = np.array(matrix, dtype=np.float64)
         return np.nan_to_num(mat, nan=0.0, posinf=0.0, neginf=0.0)
-
     def fit(self, X, y):
         self.X_ = self._clean_matrix(X)
         self.y_ = self._clean_matrix(y)
-        
         self.pls = PLSRegression(n_components=self.n_components, scale=False)
         self.pls.fit(self.X_, self.y_)
-        
         self.t = self.pls.x_scores_[:, 0]
         self.w = self.pls.x_weights_[:, 0]
         self.p = np.dot(self.X_.T, self.t) / (np.dot(self.t.T, self.t) + 1e-8)
-        
         w_ortho = self.p - (np.dot(self.w.T, self.p) / (np.dot(self.w.T, self.w) + 1e-8)) * self.w
         w_ortho_norm = np.linalg.norm(w_ortho)
         w_ortho = w_ortho / w_ortho_norm if w_ortho_norm > 0 else w_ortho
         self.t_ortho = np.dot(self.X_, w_ortho)
-        
         self.vip = self._calculate_vip()
         self.p_corr = self._calculate_p_corr()
         return self
-        
     def _calculate_vip(self):
         t = np.asarray(self.pls.x_scores_, dtype=float)
         w = np.asarray(self.pls.x_weights_, dtype=float)
         q = np.asarray(self.pls.y_loadings_, dtype=float)
         p, h = w.shape
-        
         vips = np.zeros(p)
         s = np.zeros(h)
         for a in range(h):
             t_a = t[:, a]
             q_a = float(q[0, a]) if q.ndim > 1 else float(q[a])
             s[a] = float(np.dot(t_a, t_a) * (q_a ** 2))
-            
         total_s = float(np.sum(s))
         if total_s == 0: return vips
-            
         for i in range(p):
             val = 0.0
             for a in range(h):
@@ -356,11 +331,9 @@ class OPLS_DA:
                 if norm_w > 0:
                     weight_a = (float(w[i, a]) / norm_w) ** 2
                     val += float(s[a]) * weight_a
-            
             vip_val = float(p) * val / total_s
             vips[i] = np.sqrt(max(0.0, vip_val))
         return vips
-        
     def _calculate_p_corr(self):
         p_corr = np.zeros(self.X_.shape[1])
         t_var = np.var(self.t)
@@ -369,16 +342,13 @@ class OPLS_DA:
             x_i = self.X_[:, i]
             p_corr[i] = np.cov(x_i, self.t)[0, 1] / (np.std(x_i) * np.std(self.t) + 1e-8)
         return p_corr
-        
     def permutation_test(self, X, y, n_permutations=100):
         X_clean = self._clean_matrix(X)
         y_clean = self._clean_matrix(y)
-        
         corrs = []; r2s = []; q2s = []
         original_r2 = self.pls.score(X_clean, y_clean)
         y_pred = self.pls.predict(X_clean)
         original_q2 = 1 - np.sum((y_clean - y_pred.flatten())**2) / (np.sum((y_clean - np.mean(y_clean))**2) + 1e-8)
-        
         for _ in range(n_permutations):
             y_perm = np.random.permutation(y_clean)
             corrs.append(np.abs(np.corrcoef(y_clean, y_perm)[0, 1]))
@@ -388,12 +358,8 @@ class OPLS_DA:
             y_pred_perm = pls_perm.predict(X_clean)
             q2 = 1 - np.sum((y_perm - y_pred_perm.flatten())**2) / (np.sum((y_perm - np.mean(y_perm))**2) + 1e-8)
             q2s.append(q2)
-            
         return np.array(corrs), np.array(r2s), np.array(q2s), original_r2, original_q2
 
-# ==========================================
-# 4. 极致严谨的通路富集算法 (🌟 实验测定背景裁剪法)
-# ==========================================
 def run_pathway_enrichment(sig_metabolites, all_measured_metabolites, custom_db_source=None):
     if custom_db_source is not None:
         try:
@@ -404,7 +370,7 @@ def run_pathway_enrichment(sig_metabolites, all_measured_metabolites, custom_db_
     
     if 'Pathway' not in db.columns or 'Compounds' not in db.columns: return pd.DataFrame()
     
-    # 🌟 严谨提取器：只提取真正的 KEGG ID (以 c 开头加 5 位数字)，杜绝未注释的名字污染统计背景！
+    # 稳健 ID 提取器，全面兼容双轨制的数据格式
     def _extract_kegg_ids(met_list, return_map=False):
         kegg_set = set()
         kegg_name_map = {}
@@ -422,12 +388,10 @@ def run_pathway_enrichment(sig_metabolites, all_measured_metabolites, custom_db_
     bg_set, bg_map = _extract_kegg_ids(all_measured_metabolites, return_map=True)
     sig_set = _extract_kegg_ids(sig_metabolites)
     
-    # 确保显著标志物一定是背景的子集
     sig_set = sig_set.intersection(bg_set)
     
-    # 🌟 N: 实验真实测定的全集总数 (彻底摒弃 20000 的大基数)
+    # 实验测定背景动态裁剪算法
     N = len(bg_set)
-    # K_drawn: 抽出来的显著标志物总数
     K_drawn = len(sig_set)
     
     if N == 0 or K_drawn == 0: return pd.DataFrame()
@@ -438,31 +402,24 @@ def run_pathway_enrichment(sig_metabolites, all_measured_metabolites, custom_db_
         comp_str = str(row['Compounds'])
         if comp_str == 'nan': continue
         
-        # 官方通路的原始构成
         pw_raw_comps = set([c.lower().strip() for c in comp_str.split(';')])
-        
-        # 🌟 核心裁剪：这条通路中，只有被您的质谱仪测到的物质才算作有效大小！
         pw_detectable_comps = pw_raw_comps.intersection(bg_set)
         M = len(pw_detectable_comps)
         
-        # 如果这条通路上没有任何物质被测到，直接跳过，绝不凑数
         if M == 0: continue
             
         hits = pw_detectable_comps.intersection(sig_set)
         k = len(hits)
         
         if k > 0:
-            # sf(命中数-1, 背景总人口N, 靶向通路有效人口M, 抽出显著总数K_drawn)
             p_val = stats.hypergeom.sf(k - 1, N, M, K_drawn)
             expected = (K_drawn * M) / N
             enrichment_factor = k / expected if expected > 0 else 0
-            
-            # 将命中的 KEGG ID 翻译回用户友好的原始名字
             hit_names = [bg_map[hit] for hit in hits]
             
             results.append({
                 'Pathway': pw, 
-                'Total_in_Pathway': M, # 导出表中，您将看到这个数值大幅缩小，完全匹配实验真实情况！
+                'Total_in_Pathway': M, 
                 'Hits': k,
                 'P_Value': p_val, 
                 'Enrichment_Factor': enrichment_factor,
