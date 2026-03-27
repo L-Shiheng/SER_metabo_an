@@ -8,7 +8,7 @@ from scipy import stats
 import statsmodels.stats.multitest
 
 # ==========================================
-# 0. 超级大字典构建引擎 (🌟 增强了抗干扰与大小写兼容)
+# 0. 超级大字典构建引擎 (🌟 修复了列匹配优先级与别名裂变)
 # ==========================================
 def build_kegg_dictionary(dict_files):
     """提取 MetDNA 文件中的名称与 KEGG ID，构建抗干扰的超级全局字典"""
@@ -22,22 +22,31 @@ def build_kegg_dictionary(dict_files):
                 except: file.seek(0); df = pd.read_csv(file, low_memory=False)
             else: df = pd.read_excel(file)
             
-            # 智能嗅探名字列和 KEGG 列
-            name_col = next((c for c in df.columns if str(c).lower() in ['name', 'metabolite', 'peak_name', '化合物名称']), df.columns[0])
+            # 🌟 修复点 1：严格的列名优先级，绝不让 peak_name 抢占 name！
+            target_cols = ['name', 'metabolite', '化合物名称', 'peak_name']
+            name_col = None
+            df_cols_lower = [str(c).lower() for c in df.columns]
+            for tc in target_cols:
+                if tc in df_cols_lower:
+                    name_col = df.columns[df_cols_lower.index(tc)]
+                    break
+            if not name_col: name_col = df.columns[0]
+            
             kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
             
             if kegg_col:
                 for _, row in df.iterrows():
-                    n = str(row[name_col]).strip()
                     k = str(row[kegg_col]).strip()
-                    if n and n.lower() != 'nan' and k and k.lower() != 'nan':
-                        # 只要第一个精准的 KEGG ID
-                        k_clean = k.split(';')[0].strip()
-                        # 全小写映射，极大增加匹配率
-                        kegg_mapping[n.lower()] = k_clean
-                        # 分号前的干净名字映射
-                        clean_n = n.split(';')[0].strip().lower()
-                        kegg_mapping[clean_n] = k_clean
+                    # 如果 KEGG 不为空
+                    if k and k.lower() not in ['nan', 'none', '']:
+                        k_clean = k.split(';')[0].strip() # 只取第一个 KEGG ID
+                        names_str = str(row[name_col])
+                        
+                        # 🌟 修复点 2：将 "A; B; C" 裂变成三个映射，全面覆盖
+                        for n_part in names_str.split(';'):
+                            n_clean = n_part.strip().lower()
+                            if n_clean and n_clean != 'nan':
+                                kegg_mapping[n_clean] = k_clean
         except Exception: pass
     return kegg_mapping
 
@@ -86,11 +95,10 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     unannotated_ids = "m/z" + mz_str + "_RT" + rt_str + "_" + clean_tag
     final_ids = np.where(mask_annotated, clean_names + "_" + clean_tag, unannotated_ids)
 
-    # 🌟 强行将 KEGG ID 焊死在列名上，确保导出可见
     kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
     if kegg_col is not None:
         kegg_vals = df[kegg_col].fillna('').astype(str).values
-        final_ids_with_kegg = [f"{n} | {k}" if str(k).strip() and str(k).lower() != 'nan' else str(n) for n, k in zip(final_ids, kegg_vals)]
+        final_ids_with_kegg = [f"{n} | {k}" if str(k).strip() and str(k).lower() not in ['nan', 'none', ''] else str(n) for n, k in zip(final_ids, kegg_vals)]
     else:
         final_ids_with_kegg = final_ids
         
@@ -131,7 +139,8 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
                 for _, row in df.iterrows():
                     n = str(row[comp_col]).strip()
                     k = str(row[kegg_col]).strip()
-                    if k and k.lower() != 'nan': local_kegg_mapping[n.lower()] = k
+                    if k and k.lower() not in ['nan', 'none', '']: 
+                        local_kegg_mapping[n.lower()] = k
                     
             metric_cols = [c for c in df.columns if metric_suffix in str(c)]
             if not metric_cols: continue 
@@ -159,21 +168,31 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
         
         combined.set_index('__Compound__', inplace=True)
         
-        # 🌟 核心：查字典，并将查到的 KEGG ID 强行焊死在列名里！
+        # 🌟 查字典核心逻辑：只要匹配上，强制拼接到列名里
         orig_names = []
         for n in combined.index:
             n_lower = str(n).strip().lower()
+            mapped_kegg = None
+            
+            # 1. 优先查本地表 (如果有)
             if n_lower in local_kegg_mapping:
-                orig_names.append(f"{n} | {local_kegg_mapping[n_lower]}")
+                mapped_kegg = local_kegg_mapping[n_lower]
+            # 2. 查 MetDNA 外部字典全名
             elif n_lower in external_kegg_dict:
-                orig_names.append(f"{n} | {external_kegg_dict[n_lower]}")
+                mapped_kegg = external_kegg_dict[n_lower]
             else:
-                n_split = n_lower.split(';')[0].strip()
-                if n_split in external_kegg_dict:
-                    orig_names.append(f"{n} | {external_kegg_dict[n_split]}")
-                else:
-                    orig_names.append(n)
-                    
+                # 3. 如果名字里有分号(如 A;B)，挨个拆开查！只要命中一个就成功
+                for n_part in n_lower.split(';'):
+                    n_part_clean = n_part.strip()
+                    if n_part_clean in external_kegg_dict:
+                        mapped_kegg = external_kegg_dict[n_part_clean]
+                        break
+            
+            if mapped_kegg:
+                orig_names.append(f"{n} | {mapped_kegg}")
+            else:
+                orig_names.append(n)
+                
         # 用焊上了 KEGG 的名字替换掉原来的名字
         combined.index = orig_names
         
