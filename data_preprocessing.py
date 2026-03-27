@@ -8,6 +8,36 @@ from scipy import stats
 import statsmodels.stats.multitest
 
 # ==========================================
+# 0. 超级大字典构建引擎 (NEW!)
+# ==========================================
+def build_kegg_dictionary(dict_files):
+    """提取 4 个 MetDNA 文件中的名称与 KEGG ID，构建超级全局字典"""
+    kegg_mapping = {}
+    if not dict_files: return kegg_mapping
+    for file in dict_files:
+        try:
+            file.seek(0)
+            if file.name.endswith('.csv'):
+                try: df = pd.read_csv(file, engine='pyarrow')
+                except: file.seek(0); df = pd.read_csv(file)
+            else: df = pd.read_excel(file)
+            
+            name_col = 'name' if 'name' in df.columns else df.columns[0]
+            kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
+            
+            if kegg_col:
+                for _, row in df.iterrows():
+                    n = str(row[name_col]).strip()
+                    k = str(row[kegg_col]).strip()
+                    if n and k and k.lower() != 'nan':
+                        # 同时存入全名和截断名，确保 100% 匹配命中率
+                        clean_n = n.split(';')[0].strip()
+                        kegg_mapping[n] = k
+                        kegg_mapping[clean_n] = k
+        except Exception: pass # 字典解析出错静默跳过，不影响主流程
+    return kegg_mapping
+
+# ==========================================
 # 1. 数据读取与解析模块
 # ==========================================
 def make_unique(series):
@@ -23,7 +53,6 @@ def make_unique(series):
     return result
 
 def parse_metdna_file(file_buffer, file_name, file_type='csv'):
-    """保留您原始极度稳定的 MetDNA 解析逻辑"""
     try:
         if file_type == 'csv':
             try: df = pd.read_csv(file_buffer, engine='pyarrow')
@@ -54,7 +83,6 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     final_ids = np.where(mask_annotated, clean_names + "_" + clean_tag, unannotated_ids)
     final_ids = make_unique(final_ids)
 
-    # 自动抓取 KEGG ID
     kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
     if kegg_col is not None:
         kegg_vals = df[kegg_col].fillna('').astype(str).values
@@ -71,7 +99,6 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     df_data.index = meta_df.index
     df_transposed = df_data.T
     
-    # 防御降维：强制全转数字
     df_transposed = df_transposed.apply(pd.to_numeric, errors='coerce')
     df_transposed.reset_index(inplace=True)
     df_transposed.rename(columns={'index': 'SampleID'}, inplace=True)
@@ -80,25 +107,25 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     
     return df_transposed, meta_df, None
 
-def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_regex=r'-(P|N|RP-P|RP-N|HILIC-P|HILIC-N|POS|NEG)-'):
-    """针对您的 4 个 MRM 文件定制的融合引擎"""
+# 🌟 开设外部字典接收接口
+def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_regex=r'-(P|N|RP-P|RP-N|HILIC-P|HILIC-N|POS|NEG)-', external_kegg_dict=None):
+    if external_kegg_dict is None: external_kegg_dict = {}
     try:
         all_dfs = []
-        kegg_mapping = {} 
+        local_kegg_mapping = {} 
         
         for file in file_list:
             file.seek(0)
             if file.name.endswith('.csv'): df = pd.read_csv(file)
             else: df = pd.read_excel(file)
             
-            comp_col = df.columns[0] # 默认第一列是化合物名称
-            # 抓取 KEGG 备用
+            comp_col = df.columns[0] 
             kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
             if kegg_col:
                 for _, row in df.iterrows():
                     n = str(row[comp_col]).strip()
                     k = str(row[kegg_col]).strip()
-                    if k and k.lower() != 'nan': kegg_mapping[n] = k
+                    if k and k.lower() != 'nan': local_kegg_mapping[n] = k
                     
             metric_cols = [c for c in df.columns if metric_suffix in str(c)]
             if not metric_cols: continue 
@@ -106,7 +133,6 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
             sub_df = df[[comp_col] + metric_cols].copy()
             sub_df.rename(columns={comp_col: '__Compound__'}, inplace=True)
             
-            # 清洗模式标识 (如 RP-P 等)
             def clean_col_name(c):
                 c = str(c).replace(metric_suffix, "").strip() 
                 c = re.sub(mode_regex, '-', c, flags=re.IGNORECASE) 
@@ -121,7 +147,6 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
             
         if not all_dfs: return None, None, "未找到指定的提取指标！"
             
-        # 多模式融合：取平均响应最高的记录 (金标准)
         combined = pd.concat(all_dfs, ignore_index=True)
         combined = combined.sort_values('__mean_resp__', ascending=False).drop_duplicates(subset=['__Compound__'])
         combined = combined.drop(columns=['__mean_resp__'])
@@ -135,7 +160,17 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
         
         meta = pd.DataFrame(index=combined.index)
         meta['Clean_Name'] = combined.index
-        orig_names = [f"{n} | {kegg_mapping[n]}" if n in kegg_mapping else n for n in combined.index]
+        
+        # 🌟 核心：双重字典查库机制！如果本地没写 KEGG，自动去外部大字典里查！
+        orig_names = []
+        for n in combined.index:
+            if n in local_kegg_mapping:
+                orig_names.append(f"{n} | {local_kegg_mapping[n]}")
+            elif n in external_kegg_dict:
+                orig_names.append(f"{n} | {external_kegg_dict[n]}")
+            else:
+                orig_names.append(n)
+                
         meta['Original_Name'] = orig_names
         meta['Is_Annotated'] = True 
         
@@ -160,14 +195,11 @@ def align_sample_info(df, info_df, sample_col_name='SampleName'):
     return merged
 
 # ==========================================
-# 2. 数据清洗与预处理核心流水线
+# 2. 数据清洗与预处理核心流水线 (保持完全不变)
 # ==========================================
 def impute_missing_values(df, features, method='knn'):
     df_imp = df.copy()
-    
-    # 🌟 修复用户手动填 0 的问题：把 0 视为空值，交给专业的算法去填补
     df_imp[features] = df_imp[features].replace(0.0, np.nan)
-    
     X = df_imp[features].values
     n_neighbors = min(5, max(1, len(X) - 1))
     
@@ -228,7 +260,6 @@ def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='p
     miss_rates = df[features].isnull().mean()
     keep_feats = miss_rates[miss_rates <= miss_th].index.tolist()
     
-    # 🌟 QC 缺失率严格过滤
     qc_mask = df[group_col].astype(str).str.contains('QC', case=False, na=False) | df['SampleID'].astype(str).str.contains('QC', case=False, na=False)
     if qc_mask.any():
         qc_miss_rates = df.loc[qc_mask, keep_feats].isnull().mean()
@@ -252,7 +283,7 @@ def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='p
     return df_proc, keep_feats
 
 # ==========================================
-# 3. OPLS-DA 算法核心 (🌟 纯数值运算，绝不报错)
+# 3. OPLS-DA 算法核心 (保持完全不变)
 # ==========================================
 class OPLS_DA:
     def __init__(self, n_components=1):
@@ -341,7 +372,7 @@ class OPLS_DA:
         return np.array(corrs), np.array(r2s), np.array(q2s), original_r2, original_q2
 
 # ==========================================
-# 4. 极致背景校验的通路富集算法 (支持双重验证)
+# 4. 极致背景校验的通路富集算法 (保持完全不变)
 # ==========================================
 def run_pathway_enrichment(sig_metabolites, all_measured_metabolites, custom_db_source=None):
     if custom_db_source is not None:
