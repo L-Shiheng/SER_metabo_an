@@ -95,7 +95,6 @@ with st.sidebar:
             serrf_ready = True
         else: st.warning("⚠️ 需上传 Info 表")
 
-    # 🌟 彻底重构：自动调用 API 获取物种特异性库
     st.markdown("#### 4. 在线通路引擎 (自动调用 KEGG API)")
     species = st.selectbox("选择物种 (强烈影响富集显著性)", ["Human (人类 - 推荐)", "Mouse (小鼠)", "Rat (大鼠)", "General (所有物种)"], index=0)
     species_code = {"Human (人类 - 推荐)": "hsa", "Mouse (小鼠)": "mmu", "Rat (大鼠)": "rno", "General (所有物种)": "map"}[species]
@@ -103,7 +102,6 @@ with st.sidebar:
     
     custom_pathway_file = st.file_uploader("手动上传库 (覆盖在线库)", type=["csv", "gmt"], key="pathway_db")
     
-    # 只要本地没有文件，或者用户主动点击，系统都会瞬间从日本服务器拉最新数据！
     if st.button(f"🔄 强制同步 {species_code} 最新通路库", use_container_width=True) or not os.path.exists(db_filename):
         with st.spinner(f"正在连接 KEGG API 拉取 {species} 最新专属通路库..."):
             try:
@@ -170,7 +168,6 @@ if start_process:
     else:
         progress_bar = st.progress(0); status_text = st.empty()
         
-        # 🟢 分支一：手动靶向宽表
         if data_source == "手动 MRM 靶向宽表":
             with st.spinner("正在融合靶向数据并自动查阅 KEGG 字典桥接..."):
                 ext_dict = build_kegg_dictionary(dict_files) if dict_files else {}
@@ -198,7 +195,6 @@ if start_process:
                     st.success("✅ 数据融合完成，点击下方【运行全自动分析】按钮画图！")
                     st.rerun()
 
-        # 🟢 分支二：MetDNA 原始数据
         else:
             with st.spinner("正在处理 MetDNA 数据..."):
                 parsed_results = []; current_run_samples = set()
@@ -253,7 +249,7 @@ if st.session_state.data_loaded and st.session_state.raw_df is not None:
     raw_df = st.session_state.raw_df
     st.info(f"数据总览: {len(raw_df)} 样本 x {len(raw_df.columns)-3} 特征")
     csv_data = raw_df.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 导出清洗前合并数据 (所见即所得，包含 KEGG ID)", csv_data, f"Metabo_Raw_{datetime.datetime.now().strftime('%Y%m%d')}.csv", "text/csv")
+    st.download_button("📥 导出清洗前合并数据 (包含强绑定的 KEGG ID)", csv_data, f"Metabo_Raw_{datetime.datetime.now().strftime('%Y%m%d')}.csv", "text/csv")
     st.divider()
 
     with st.form(key='analysis_form'):
@@ -453,7 +449,6 @@ if submit_button:
                     except Exception as e:
                         st.warning(f"由于数据极端分布或特征高度共线性，列线图模型无法收敛。错误详情：{str(e)}")
 
-        # 🌟 接入官方 API 和修正版背景计算的通路富集
         with tabs[8]:
             st.markdown("### 🕸️ KEGG 代谢通路富集")
             c1, c2 = st.columns([1, 6])
@@ -467,6 +462,9 @@ if submit_button:
                         pathway_df = run_pathway_enrichment(sig_mets_fullnames, all_mets_fullnames, custom_db_source=db_source)
                         if pathway_df.empty: st.warning("未能匹配到通路，请确保已点击侧边栏的同步库按钮，并选择了正确的物种。")
                         else:
+                            # 🌟 核心修复点：为 Plotly 绘图计算并补充 -Log10(P) 坐标轴数据！
+                            pathway_df['-Log10_P'] = -np.log10(pathway_df['P_Value'].astype(float).clip(lower=1e-10))
+                            
                             plot_pw_df = pathway_df[pathway_df['Hits'] > 0].head(pw_show_num)
                             fig_pathway = px.scatter(
                                 plot_pw_df, x='Enrichment_Factor', y='-Log10_P', size='Hits', color='P_Value',
@@ -481,7 +479,7 @@ if submit_button:
                             )
                             fig_pathway.add_hline(y=-np.log10(0.05), line_dash="dash", line_color="gray")
                             st.plotly_chart(fig_pathway)
-                            st.dataframe(pathway_df.style.format({"P_Value":"{:.3e}", "FDR":"{:.3e}", "Enrichment_Factor":"{:.2f}"}).background_gradient(subset=['P_Value'], cmap="Reds_r", vmin=0, vmax=0.05), use_container_width=True)
+                            st.dataframe(pathway_df.drop(columns=['-Log10_P']).style.format({"P_Value":"{:.3e}", "FDR":"{:.3e}", "Enrichment_Factor":"{:.2f}"}).background_gradient(subset=['P_Value'], cmap="Reds_r", vmin=0, vmax=0.05), use_container_width=True)
 
         with tabs[9]:
             st.markdown("### 🔗 代谢重编程机制网络 (Pathway-Metabolite Network)")
