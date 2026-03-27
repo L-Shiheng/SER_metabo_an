@@ -135,24 +135,24 @@ with st.sidebar:
                 st.error(f"❌ 网络请求失败: {str(e)}")
     
     st.markdown("#### 5. 上传代谢组学数据")
-    data_source = st.radio("选择数据格式:", ["MetDNA 原始结果", "手动 MRM 靶向宽表"], index=0)
+    data_source = st.radio("选择数据源类型 (物理隔离双轨制):", ["MetDNA 原始结果", "手动 MRM 靶向宽表"], index=0)
     
     metric_suffix = " : 面积 "
     mode_regex = r'-(P|N|RP-P|RP-N|HILIC-P|HILIC-N|POS|NEG)-'
     dict_files = None
     
     if data_source == "手动 MRM 靶向宽表":
-        st.info("💡 系统将自动合并文件、智能过滤 0 值对齐样本名。")
+        st.info("💡 系统将调用手动宽表专属合并引擎。")
         c1, c2 = st.columns(2)
         metric_suffix = c1.text_input("提取指标", value=" : 面积 ")
         mode_regex = c2.text_input("模式清洗正则", value=mode_regex)
         feature_scope = "全部特征" 
         
-        st.markdown("##### 📚 关联 MetDNA 字典 (强推)")
-        st.caption("把对应的 MetDNA 原始表拖进此处，系统将自动抽提 KEGG ID 为您的手动表赋能！")
+        st.markdown("##### 📚 关联 MetDNA 字典 (仅手动表模式可用)")
         dict_files = st.file_uploader("上传 MetDNA 字典表 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="dict_files")
         
     else:
+        st.info("💡 系统将调用 MetDNA 纯净解析引擎。")
         feature_scope = st.radio("特征范围", ["仅已注释特征", "全部特征"], index=0)
         
     uploaded_files = st.file_uploader("上传主分析数据表 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
@@ -168,8 +168,9 @@ if start_process:
     else:
         progress_bar = st.progress(0); status_text = st.empty()
         
+        # 🟢 物理隔离流 A：手动靶向宽表
         if data_source == "手动 MRM 靶向宽表":
-            with st.spinner("正在融合靶向数据并自动查阅 KEGG 字典桥接..."):
+            with st.spinner("正在启动手动宽表融合引擎..."):
                 ext_dict = build_kegg_dictionary(dict_files) if dict_files else {}
                 if ext_dict: st.success(f"📚 成功构建后台字典：共提取到 {len(ext_dict)} 个独特代谢物的 KEGG 映射！")
                 
@@ -195,15 +196,19 @@ if start_process:
                     st.success("✅ 数据融合完成，点击下方【运行全自动分析】按钮画图！")
                     st.rerun()
 
+        # 🟢 物理隔离流 B：MetDNA 原始数据
         else:
-            with st.spinner("正在处理 MetDNA 数据..."):
+            with st.spinner("正在启动 MetDNA 原表解析引擎..."):
                 parsed_results = []; current_run_samples = set()
                 for i, file in enumerate(uploaded_files):
                     status_text.text(f"处理中: {file.name} ...")
                     try:
                         file_type = 'csv' if file.name.endswith('.csv') else 'excel'
                         unique_name = f"{os.path.splitext(file.name)[0]}_{i+1}{os.path.splitext(file.name)[1]}"
+                        
+                        # 调用纯净的 MetDNA 解析函数
                         df_t, meta, err = parse_metdna_file(file, unique_name, file_type=file_type)
+                        
                         if err: st.warning(f"{file.name}: {err}"); continue
                         
                         if excluded_samples:
@@ -239,7 +244,7 @@ if start_process:
                     if len(parsed_results) == 1: st.session_state.raw_df, st.session_state.feature_meta = parsed_results[0][0], parsed_results[0][1]
                     else: st.session_state.raw_df, st.session_state.feature_meta, _ = merge_multiple_dfs(parsed_results)
                     st.session_state.data_loaded = True
-                    st.success("✅ MetDNA 处理完成！")
+                    st.success("✅ MetDNA 纯净解析完成！")
                     st.rerun() 
 
 # ==========================================
@@ -462,7 +467,6 @@ if submit_button:
                         pathway_df = run_pathway_enrichment(sig_mets_fullnames, all_mets_fullnames, custom_db_source=db_source)
                         if pathway_df.empty: st.warning("未能匹配到通路，请确保已点击侧边栏的同步库按钮，并选择了正确的物种。")
                         else:
-                            # 🌟 核心修复点：为 Plotly 绘图计算并补充 -Log10(P) 坐标轴数据！
                             pathway_df['-Log10_P'] = -np.log10(pathway_df['P_Value'].astype(float).clip(lower=1e-10))
                             
                             plot_pw_df = pathway_df[pathway_df['Hits'] > 0].head(pw_show_num)
