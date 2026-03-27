@@ -25,7 +25,11 @@ plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'PingFang SC', '
 plt.rcParams['axes.unicode_minus'] = False
 
 try:
-    from data_preprocessing import data_cleaning_pipeline, parse_metdna_file, parse_manual_targeted_files, merge_multiple_dfs, align_sample_info, OPLS_DA, run_pathway_enrichment, build_kegg_dictionary
+    from data_preprocessing import (
+        data_cleaning_pipeline, parse_metdna_file, parse_manual_targeted_files, 
+        merge_multiple_dfs, align_sample_info, OPLS_DA, 
+        run_pathway_enrichment, run_kegg_pathway_enrichment, build_kegg_dictionary
+    )
     from stats_utils import run_pairwise_statistics
     from plot_utils import update_layout_square, get_ellipse_coordinates, plot_nomogram
     from report_generator import generate_offline_html, generate_ai_prompt
@@ -142,7 +146,7 @@ with st.sidebar:
     dict_files = None
     
     if data_source == "手动 MRM 靶向宽表":
-        st.info("💡 系统将调用手动宽表专属合并引擎。")
+        st.info("💡 系统将调用专属【宽表字典融合引擎】")
         c1, c2 = st.columns(2)
         metric_suffix = c1.text_input("提取指标", value=" : 面积 ")
         mode_regex = c2.text_input("模式清洗正则", value=mode_regex)
@@ -152,7 +156,7 @@ with st.sidebar:
         dict_files = st.file_uploader("上传 MetDNA 字典表 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="dict_files")
         
     else:
-        st.info("💡 系统将调用 MetDNA 纯净解析引擎。")
+        st.info("💡 系统将调用纯净的【MetDNA 原始解析引擎】")
         feature_scope = st.radio("特征范围", ["仅已注释特征", "全部特征"], index=0)
         
     uploaded_files = st.file_uploader("上传主分析数据表 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
@@ -160,7 +164,7 @@ with st.sidebar:
     start_process = st.container().button("📥 开始清洗并加载数据", use_container_width=True, type="primary")
 
 # ==========================================
-# 2. 数据处理运行
+# 2. 数据处理运行 (隔离路由)
 # ==========================================
 if start_process:
     st.session_state.qc_report = {}
@@ -193,10 +197,10 @@ if start_process:
                     st.session_state.raw_df = df_t
                     st.session_state.feature_meta = meta
                     st.session_state.data_loaded = True
-                    st.success("✅ 数据融合完成，点击下方【运行全自动分析】按钮画图！")
+                    st.success("✅ 手动靶向数据融合完成！")
                     st.rerun()
 
-        # 🟢 物理隔离流 B：MetDNA 原始数据
+        # 🟢 物理隔离流 B：MetDNA 原始数据 (100%调用您的原始代码)
         else:
             with st.spinner("正在启动 MetDNA 原表解析引擎..."):
                 parsed_results = []; current_run_samples = set()
@@ -206,46 +210,37 @@ if start_process:
                         file_type = 'csv' if file.name.endswith('.csv') else 'excel'
                         unique_name = f"{os.path.splitext(file.name)[0]}_{i+1}{os.path.splitext(file.name)[1]}"
                         
-                        # 调用纯净的 MetDNA 解析函数
                         df_t, meta, err = parse_metdna_file(file, unique_name, file_type=file_type)
-                        
                         if err: st.warning(f"{file.name}: {err}"); continue
-                        
-                        if excluded_samples:
-                            ex_fingerprints = set([re.sub(r'[^a-z0-9]', '', str(s).strip().lower()) for s in excluded_samples])
-                            df_t = df_t[~df_t['SampleID'].astype(str).apply(lambda s: re.sub(r'[^a-z0-9]', '', str(s).strip().lower())).isin(ex_fingerprints)]
-                        current_run_samples.update(df_t['SampleID'].astype(str).tolist())
-    
-                        if feature_scope.startswith("仅已注释"):
-                            annotated_ids = meta[meta['Is_Annotated'] == True].index
-                            df_t = df_t[['SampleID', 'Group', 'Source_Files'] + [c for c in df_t.columns if c in annotated_ids]]
-                            meta = meta.loc[meta.index.isin(df_t.columns)]
-                            
-                        info_aligned = None
-                        if info_df is not None:
-                            info_aligned = align_sample_info(df_t, info_df, sample_col_name=user_sample_col)
-                            if user_group_col and user_group_col in info_aligned.columns: df_t['Group'] = info_aligned[user_group_col].fillna(df_t['Group']).values
-                        
-                        if use_serrf and serrf_ready and info_aligned is not None:
-                            if info_aligned[run_order_col].notna().sum() > 0:
-                                corrected_data, serrf_stats = serrf_normalization(df_t.select_dtypes(include=[np.number]), info_aligned, run_order_col, sample_type_col, qc_label)
-                                if corrected_data is not None:
-                                    for c in corrected_data.columns: df_t[c] = corrected_data[c].values
-                                    st.session_state.qc_report[unique_name] = {"Status": "Success"}
-                                else: st.error(f"❌ {file.name}: SERRF失败")
-    
                         parsed_results.append((df_t, meta, unique_name))
-                        del df_t, meta, info_aligned; gc.collect()
                     except Exception as e: st.error(f"处理 {file.name} 失败: {str(e)}")
                     progress_bar.progress((i + 1) / len(uploaded_files))
     
                 if parsed_results:
-                    st.session_state.all_sample_ids = sorted(list(set(st.session_state.all_sample_ids) | current_run_samples))
-                    if len(parsed_results) == 1: st.session_state.raw_df, st.session_state.feature_meta = parsed_results[0][0], parsed_results[0][1]
-                    else: st.session_state.raw_df, st.session_state.feature_meta, _ = merge_multiple_dfs(parsed_results)
-                    st.session_state.data_loaded = True
-                    st.success("✅ MetDNA 纯净解析完成！")
-                    st.rerun() 
+                    raw_df, feature_meta, err = merge_multiple_dfs(parsed_results)
+                    if err:
+                        st.error(err)
+                    else:
+                        if excluded_samples:
+                            ex_fingerprints = set([re.sub(r'[^a-z0-9]', '', str(s).strip().lower()) for s in excluded_samples])
+                            raw_df = raw_df[~raw_df['SampleID'].astype(str).apply(lambda s: re.sub(r'[^a-z0-9]', '', str(s).strip().lower())).isin(ex_fingerprints)]
+                        
+                        if feature_scope.startswith("仅已注释"):
+                            annotated_ids = feature_meta[feature_meta['Is_Annotated'] == True].index
+                            keep_cols = ['SampleID', 'Group', 'Source_Files'] + [c for c in raw_df.columns if c in annotated_ids]
+                            raw_df = raw_df[keep_cols]
+                            feature_meta = feature_meta.loc[feature_meta.index.isin(raw_df.columns)]
+                            
+                        if info_df is not None:
+                            info_aligned = align_sample_info(raw_df, info_df, sample_col_name=user_sample_col)
+                            if user_group_col and user_group_col in info_aligned.columns: 
+                                raw_df['Group'] = info_aligned[user_group_col].fillna('Unknown').values
+                        
+                        st.session_state.raw_df = raw_df
+                        st.session_state.feature_meta = feature_meta
+                        st.session_state.data_loaded = True
+                        st.success("✅ MetDNA 纯净解析完成！")
+                        st.rerun()
 
 # ==========================================
 # 3. 统计与可视化展示区
@@ -254,7 +249,7 @@ if st.session_state.data_loaded and st.session_state.raw_df is not None:
     raw_df = st.session_state.raw_df
     st.info(f"数据总览: {len(raw_df)} 样本 x {len(raw_df.columns)-3} 特征")
     csv_data = raw_df.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 导出清洗前合并数据 (包含强绑定的 KEGG ID)", csv_data, f"Metabo_Raw_{datetime.datetime.now().strftime('%Y%m%d')}.csv", "text/csv")
+    st.download_button("📥 导出清洗前合并数据", csv_data, f"Metabo_Raw_{datetime.datetime.now().strftime('%Y%m%d')}.csv", "text/csv")
     st.divider()
 
     with st.form(key='analysis_form'):
@@ -265,11 +260,12 @@ if st.session_state.data_loaded and st.session_state.raw_df is not None:
         with st.expander("数据预处理配置 (点击展开)", expanded=False):
             c_p1, c_p2 = st.columns(2)
             miss_th = c_p1.slider("剔除缺失率 > X", 0.0, 1.0, 0.20)
-            impute_m = c_p2.selectbox("缺失值填充", ["knn", "min", "mean", "zero"], index=0)
+            # 这里的选项严格对齐您原版的要求
+            impute_m = c_p2.selectbox("缺失值填充", ["KNN", "min", "mean", "zero"], index=0)
             
             c_p3, c_p4 = st.columns(2)
-            norm_m = c_p3.selectbox("样本归一化", ["pqn", "median", "sum", "none"], index=0)
-            scale_m = c_p4.selectbox("特征缩放 (Scaling)", ["pareto", "auto", "none"], index=0)
+            norm_m = c_p3.selectbox("样本归一化", ["PQN", "Median", "Sum", "None"], index=0)
+            scale_m = c_p4.selectbox("特征缩放 (Scaling)", ["Pareto", "Auto", "None"], index=0)
             do_log = st.checkbox("Log2 对数转化 (强烈推荐)", value=True)
 
         with st.expander("🎨 可视化高级工具栏 (图表参数微调)", expanded=False):
@@ -307,7 +303,13 @@ if submit_button:
 
     with st.spinner("正在运行核心运算引擎与可视化构建..."):
         raw_df = st.session_state.raw_df; meta = st.session_state.feature_meta
-        df_proc, feats = data_cleaning_pipeline(raw_df, group_col, miss_th, impute_m, norm_m, do_log, scale_m)
+        
+        # 调用统一的清洗函数 (支持双轨数据格式)
+        df_proc, feats = data_cleaning_pipeline(
+            raw_df, group_col, missing_thresh=miss_th, 
+            impute_method=impute_m, norm_method=norm_m, 
+            log_transform=do_log, scale_method=scale_m
+        )
         df_sub = df_proc[df_proc[group_col].isin(sel_grps)].copy()
  
         stats_df = run_pairwise_statistics(df_sub, group_col, case, ctrl, feats)
@@ -325,7 +327,8 @@ if submit_button:
         y_binary = np.where(df_sub[group_col] == case, 1, -1)
         X_matrix = df_sub[feats].values
         
-        opls = OPLS_DA().fit(X_matrix, y_binary)
+        opls = OPLS_DA()
+        opls.fit(X_matrix, y_binary)
         corrs, r2_perm, q2_perm, R2Y, Q2 = opls.permutation_test(X_matrix, y_binary, n_permutations=100)
         m_q2, b_q2 = np.polyfit(corrs, q2_perm, 1) if len(corrs)>0 else (0,0)
         m_r2, b_r2 = np.polyfit(corrs, r2_perm, 1) if len(corrs)>0 else (0,0)
@@ -455,20 +458,28 @@ if submit_button:
                         st.warning(f"由于数据极端分布或特征高度共线性，列线图模型无法收敛。错误详情：{str(e)}")
 
         with tabs[8]:
-            st.markdown("### 🕸️ KEGG 代谢通路富集")
+            st.markdown("### 🕸️ 代谢通路富集 (双轨制引擎)")
             c1, c2 = st.columns([1, 6])
             with c2:
                 sig_mets_fullnames = stats_df[stats_df['Is_Biomarker']]['Search_Name'].tolist()
                 all_mets_fullnames = stats_df['Search_Name'].tolist()
+                
                 if not sig_mets_fullnames: st.info("⚠️ 无显著差异标志物，无法进行通路富集。")
                 else:
                     with st.spinner("正在映射数据库..."):
-                        db_source = custom_pathway_file if custom_pathway_file else db_filename
-                        pathway_df = run_pathway_enrichment(sig_mets_fullnames, all_mets_fullnames, custom_db_source=db_source)
-                        if pathway_df.empty: st.warning("未能匹配到通路，请确保已点击侧边栏的同步库按钮，并选择了正确的物种。")
+                        # 物理隔离的富集调用：手动表走 KEGG API，MetDNA 走经典本地库
+                        if data_source == "手动 MRM 靶向宽表":
+                            db_source = custom_pathway_file if custom_pathway_file else db_filename
+                            pathway_df = run_kegg_pathway_enrichment(sig_mets_fullnames, all_mets_fullnames, custom_db_source=db_source)
                         else:
-                            pathway_df['-Log10_P'] = -np.log10(pathway_df['P_Value'].astype(float).clip(lower=1e-10))
+                            db_source = custom_pathway_file if custom_pathway_file else None
+                            pathway_df = run_pathway_enrichment(sig_mets_fullnames, all_mets_fullnames, custom_db_source=db_source)
                             
+                        if pathway_df.empty: st.warning("未能匹配到通路，请检查是否上传了正确的参考库，或选择正确的物种。")
+                        else:
+                            if '-Log10_P' not in pathway_df.columns:
+                                pathway_df['-Log10_P'] = -np.log10(pathway_df['P_Value'].astype(float).clip(lower=1e-10))
+                                
                             plot_pw_df = pathway_df[pathway_df['Hits'] > 0].head(pw_show_num)
                             fig_pathway = px.scatter(
                                 plot_pw_df, x='Enrichment_Factor', y='-Log10_P', size='Hits', color='P_Value',
