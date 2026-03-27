@@ -8,7 +8,7 @@ from scipy import stats
 import statsmodels.stats.multitest
 
 # ==========================================
-# 0. 超级大字典构建引擎 
+# 0. 超级大字典构建引擎
 # ==========================================
 def build_kegg_dictionary(dict_files):
     kegg_mapping = {}
@@ -392,7 +392,7 @@ class OPLS_DA:
         return np.array(corrs), np.array(r2s), np.array(q2s), original_r2, original_q2
 
 # ==========================================
-# 4. 极致背景校验的通路富集算法 (🌟 全面对齐 MetaboAnalyst 算法)
+# 4. 极致严谨的通路富集算法 (🌟 实验测定背景裁剪法)
 # ==========================================
 def run_pathway_enrichment(sig_metabolites, all_measured_metabolites, custom_db_source=None):
     if custom_db_source is not None:
@@ -404,57 +404,69 @@ def run_pathway_enrichment(sig_metabolites, all_measured_metabolites, custom_db_
     
     if 'Pathway' not in db.columns or 'Compounds' not in db.columns: return pd.DataFrame()
     
-    def _extract_terms(met_list):
-        terms = set()
+    # 🌟 严谨提取器：只提取真正的 KEGG ID (以 c 开头加 5 位数字)，杜绝未注释的名字污染统计背景！
+    def _extract_kegg_ids(met_list, return_map=False):
+        kegg_set = set()
+        kegg_name_map = {}
         for x in met_list:
-            parts = str(x).split('|')
+            parts = [p.strip() for p in str(x).split('|')]
+            orig_name = parts[0]
             for p in parts:
-                c = p.strip().lower()
-                if not c or c == 'nan': continue
-                c_clean = re.sub(r'_\d+$', '', c)
-                terms.add(c_clean)
-        return terms
+                p_lower = p.lower()
+                if re.match(r'^c\d{5}$', p_lower):
+                    kegg_set.add(p_lower)
+                    kegg_name_map[p_lower] = orig_name
+        if return_map: return kegg_set, kegg_name_map
+        return kegg_set
         
-    sig_set = _extract_terms(sig_metabolites)
-    bg_set = _extract_terms(all_measured_metabolites)
+    bg_set, bg_map = _extract_kegg_ids(all_measured_metabolites, return_map=True)
+    sig_set = _extract_kegg_ids(sig_metabolites)
     
-    # 构建数据库宇宙全集
-    db_all_comps = set()
-    for _, row in db.iterrows():
-        comp_str = str(row['Compounds'])
-        if comp_str != 'nan':
-            for c in comp_str.split(';'):
-                db_all_comps.add(c.lower().strip())
-                
-    # 🌟 核心修正：严格按照映射到的真实 ID 数量计算背景，避免分母虚高
-    bg_mapped = bg_set.intersection(db_all_comps)
-    sig_mapped = sig_set.intersection(db_all_comps)
+    # 确保显著标志物一定是背景的子集
+    sig_set = sig_set.intersection(bg_set)
     
-    # 就像 MetaboAnalyst 一样，如果背景为空，则使用整个数据库的物种规模作为 N
-    N = len(bg_mapped) if len(bg_mapped) > 0 else len(db_all_comps)
-    K = len(sig_mapped) if len(bg_mapped) > 0 else len(sig_set.intersection(db_all_comps))
+    # 🌟 N: 实验真实测定的全集总数 (彻底摒弃 20000 的大基数)
+    N = len(bg_set)
+    # K_drawn: 抽出来的显著标志物总数
+    K_drawn = len(sig_set)
     
-    if N == 0 or K == 0: return pd.DataFrame()
+    if N == 0 or K_drawn == 0: return pd.DataFrame()
     
     results = []
     for _, row in db.iterrows():
-        pw = row['Pathway']; comp_str = str(row['Compounds'])
+        pw = row['Pathway']
+        comp_str = str(row['Compounds'])
         if comp_str == 'nan': continue
         
-        pw_comps = set([c.lower().strip() for c in comp_str.split(';')])
-        M = len(pw_comps) 
-        hits = pw_comps.intersection(sig_set)
+        # 官方通路的原始构成
+        pw_raw_comps = set([c.lower().strip() for c in comp_str.split(';')])
+        
+        # 🌟 核心裁剪：这条通路中，只有被您的质谱仪测到的物质才算作有效大小！
+        pw_detectable_comps = pw_raw_comps.intersection(bg_set)
+        M = len(pw_detectable_comps)
+        
+        # 如果这条通路上没有任何物质被测到，直接跳过，绝不凑数
+        if M == 0: continue
+            
+        hits = pw_detectable_comps.intersection(sig_set)
         k = len(hits)
         
         if k > 0:
-            # SciPy 参数对应: sf(k-1, 总人口N, 靶向总体M, 抽取数K)
-            p_val = stats.hypergeom.sf(k - 1, N, M, K)
-            expected = (K * M) / N
-            enrich_factor = k / expected if expected > 0 else 0
+            # sf(命中数-1, 背景总人口N, 靶向通路有效人口M, 抽出显著总数K_drawn)
+            p_val = stats.hypergeom.sf(k - 1, N, M, K_drawn)
+            expected = (K_drawn * M) / N
+            enrichment_factor = k / expected if expected > 0 else 0
+            
+            # 将命中的 KEGG ID 翻译回用户友好的原始名字
+            hit_names = [bg_map[hit] for hit in hits]
+            
             results.append({
-                'Pathway': pw, 'Total_in_Pathway': M, 'Hits': k,
-                'P_Value': p_val, 'Enrichment_Factor': enrich_factor,
-                'Hit_Metabolites': ", ".join(list(hits))
+                'Pathway': pw, 
+                'Total_in_Pathway': M, # 导出表中，您将看到这个数值大幅缩小，完全匹配实验真实情况！
+                'Hits': k,
+                'P_Value': p_val, 
+                'Enrichment_Factor': enrichment_factor,
+                'Hit_Metabolites': ", ".join(hit_names)
             })
             
     res_df = pd.DataFrame(results)
