@@ -137,21 +137,20 @@ with st.sidebar:
     dict_files = None
     
     if data_source == "手动 MRM 靶向宽表":
-        st.info("💡 系统将自动合并文件、提取面积、智能过滤 0 值并对齐样本名。")
+        st.info("💡 系统将自动合并文件、智能过滤 0 值对齐样本名。")
         c1, c2 = st.columns(2)
         metric_suffix = c1.text_input("提取指标", value=" : 面积 ")
         mode_regex = c2.text_input("模式清洗正则", value=mode_regex)
         feature_scope = "全部特征" 
         
-        # 🌟 超级字典接口：挂载 MetDNA 作为背景知识库
         st.markdown("##### 📚 关联 MetDNA 字典 (强推)")
-        st.caption("把对应的 MetDNA 原始结果表格拖进此处，系统将自动抽提 KEGG ID 为您的手动表赋能，彻底激活通路富集！")
-        dict_files = st.file_uploader("上传 MetDNA 字典表 (支持同时传多个)", type=["csv", "xlsx"], accept_multiple_files=True, key="dict_files")
+        st.caption("把对应的 MetDNA 原始表拖进此处，系统将自动抽提 KEGG ID 为您的手动表赋能！")
+        dict_files = st.file_uploader("上传 MetDNA 字典表 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="dict_files")
         
     else:
         feature_scope = st.radio("特征范围", ["仅已注释特征", "全部特征"], index=0)
         
-    uploaded_files = st.file_uploader("上传主分析数据表 (支持多文件合并)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
+    uploaded_files = st.file_uploader("上传主分析数据表 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
     st.markdown("---")
     start_process = st.container().button("📥 开始清洗并加载数据", use_container_width=True, type="primary")
 
@@ -164,15 +163,12 @@ if start_process:
     else:
         progress_bar = st.progress(0); status_text = st.empty()
         
-        # 🟢 分支一：手动靶向宽表 (携带超级字典)
+        # 🟢 分支一：手动靶向宽表
         if data_source == "手动 MRM 靶向宽表":
             with st.spinner("正在融合靶向数据并自动查阅 KEGG 字典桥接..."):
-                
-                # 1. 炼丹：提取超级字典
                 ext_dict = build_kegg_dictionary(dict_files) if dict_files else {}
-                if ext_dict: st.toast(f"✅ 成功从 MetDNA 中提取到 {len(ext_dict)} 个 KEGG ID 映射！")
+                if ext_dict: st.success(f"📚 成功构建后台字典：共提取到 {len(ext_dict)} 个独特代谢物的 KEGG 映射！")
                 
-                # 2. 解析主文件，传入手头的字典
                 df_t, meta, err = parse_manual_targeted_files(uploaded_files, metric_suffix, mode_regex, external_kegg_dict=ext_dict)
                 
                 if err: 
@@ -192,7 +188,7 @@ if start_process:
                     st.session_state.raw_df = df_t
                     st.session_state.feature_meta = meta
                     st.session_state.data_loaded = True
-                    st.success("✅ 手动靶向数据融合完成，并已成功关联后台词典！")
+                    st.success("✅ 数据融合完成，点击下方【运行全自动分析】按钮画图！")
                     st.rerun()
 
         # 🟢 分支二：MetDNA 原始数据
@@ -250,7 +246,7 @@ if st.session_state.data_loaded and st.session_state.raw_df is not None:
     raw_df = st.session_state.raw_df
     st.info(f"数据总览: {len(raw_df)} 样本 x {len(raw_df.columns)-3} 特征")
     csv_data = raw_df.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 导出清洗前合并数据", csv_data, f"Metabo_Raw_{datetime.datetime.now().strftime('%Y%m%d')}.csv", "text/csv")
+    st.download_button("📥 导出清洗前合并数据 (所见即所得，包含 KEGG ID)", csv_data, f"Metabo_Raw_{datetime.datetime.now().strftime('%Y%m%d')}.csv", "text/csv")
     st.divider()
 
     with st.form(key='analysis_form'):
