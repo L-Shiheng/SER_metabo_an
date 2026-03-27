@@ -94,12 +94,12 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     try:
         if file_type == 'csv':
             try: df = pd.read_csv(file_buffer, engine='pyarrow')
-            except: file_buffer.seek(0); df = pd.read_csv(file_buffer)
+            except: file_buffer.seek(0); df = pd.read_csv(file_buffer, low_memory=False)
         else: df = pd.read_excel(file_buffer)
     except Exception as e: return None, None, f"读取失败: {str(e)}"
 
     known_meta_cols = {'peak_name', 'mz', 'rt', 'id', 'id_zhulab', 'name', 'formula', 'confidence_level', 'smiles', 'inchikey', 'isotope', 'adduct', 'total_score', 'mz_error', 'rt_error_abs', 'rt_error_rela', 'ms2_score', 'iden_score', 'iden_type', 'peak_group_id', 'base_peak', 'num_peaks', 'cons_formula_pred', 'id_kegg', 'id_hmdb', 'id_metacyc', 'stereo_isomer_id', 'stereo_isomer_name'}
-    potential_cols = [c for c in df.columns if c not in known_meta_cols]
+    potential_cols = [c for c in df.columns if str(c).lower() not in known_meta_cols]
     sample_cols = []
     if potential_cols:
         subset = df[potential_cols].head(5)
@@ -122,7 +122,22 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     final_ids = np.where(mask_annotated, clean_names + "_" + clean_tag, unannotated_ids)
     final_ids = make_unique(final_ids)
 
-    meta_df = pd.DataFrame({"Metabolite_ID": final_ids, "Original_Name": df['name'], "Clean_Name": np.where(mask_annotated, clean_names, final_ids), "Confidence_Level": df['confidence_level'], "Is_Annotated": mask_annotated, "Source_File": clean_tag})
+    # 🌟 核心修复点：强制恢复 MetDNA 的 KEGG ID 提取逻辑
+    kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
+    if kegg_col is not None:
+        kegg_vals = df[kegg_col].fillna('').astype(str).values
+        orig_names = [f"{n} | {k}" if str(k).strip() and str(k).lower() not in ['nan', 'none', ''] else str(n) for n, k in zip(df['name'], kegg_vals)]
+    else:
+        orig_names = df['name']
+
+    meta_df = pd.DataFrame({
+        "Metabolite_ID": final_ids, 
+        "Original_Name": orig_names, 
+        "Clean_Name": np.where(mask_annotated, clean_names, final_ids), 
+        "Confidence_Level": df['confidence_level'], 
+        "Is_Annotated": mask_annotated, 
+        "Source_File": clean_tag
+    })
     meta_df.set_index('Metabolite_ID', inplace=True)
     
     df_data = df[sample_cols].copy()
@@ -134,6 +149,111 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     df_transposed['Group'] = df_transposed['SampleID'].astype(str).str.extract(r'([^\d]+)')[0].str.strip('._-').fillna("Unknown")
     
     return df_transposed, meta_df, None
+
+def build_kegg_dictionary(dict_files):
+    kegg_mapping = {}
+    if not dict_files: return kegg_mapping
+    for file in dict_files:
+        try:
+            file.seek(0)
+            if file.name.endswith('.csv'):
+                try: df = pd.read_csv(file, engine='pyarrow')
+                except: file.seek(0); df = pd.read_csv(file, low_memory=False)
+            else: df = pd.read_excel(file)
+            
+            target_cols = ['name', 'metabolite', '化合物名称', 'peak_name']
+            name_col = None
+            df_cols_lower = [str(c).lower() for c in df.columns]
+            for tc in target_cols:
+                if tc in df_cols_lower:
+                    name_col = df.columns[df_cols_lower.index(tc)]
+                    break
+            if not name_col: name_col = df.columns[0]
+            
+            kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
+            if kegg_col:
+                for _, row in df.iterrows():
+                    k = str(row[kegg_col]).strip()
+                    if k and k.lower() not in ['nan', 'none', '']:
+                        k_clean = k.split(';')[0].strip() 
+                        names_str = str(row[name_col])
+                        for n_part in names_str.split(';'):
+                            n_clean = n_part.strip().lower()
+                            if n_clean and n_clean != 'nan':
+                                kegg_mapping[n_clean] = k_clean
+        except Exception: pass
+    return kegg_mapping
+
+def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_regex=r'-(P|N|RP-P|RP-N|HILIC-P|HILIC-N|POS|NEG)-', external_kegg_dict=None):
+    if external_kegg_dict is None: external_kegg_dict = {}
+    try:
+        all_dfs = []
+        local_kegg_mapping = {} 
+        for file in file_list:
+            file.seek(0)
+            if file.name.endswith('.csv'): df = pd.read_csv(file)
+            else: df = pd.read_excel(file)
+            
+            comp_col = df.columns[0] 
+            kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
+            if kegg_col:
+                for _, row in df.iterrows():
+                    n = str(row[comp_col]).strip()
+                    k = str(row[kegg_col]).strip()
+                    if k and k.lower() not in ['nan', 'none', '']: 
+                        local_kegg_mapping[n.lower()] = k
+                    
+            metric_cols = [c for c in df.columns if metric_suffix in str(c)]
+            if not metric_cols: continue 
+                
+            sub_df = df[[comp_col] + metric_cols].copy()
+            sub_df.rename(columns={comp_col: '__Compound__'}, inplace=True)
+            
+            def clean_col_name(c):
+                c = str(c).replace(metric_suffix, "").strip() 
+                c = re.sub(mode_regex, '-', c, flags=re.IGNORECASE) 
+                return c.replace('--', '-') 
+                
+            sub_df.rename(columns={c: clean_col_name(c) for c in metric_cols}, inplace=True)
+            for c in sub_df.columns[1:]: sub_df[c] = pd.to_numeric(sub_df[c], errors='coerce')
+            sub_df['__mean_resp__'] = sub_df.iloc[:, 1:].mean(axis=1)
+            all_dfs.append(sub_df)
+            
+        if not all_dfs: return None, None, "未找到指定的提取指标！"
+            
+        combined = pd.concat(all_dfs, ignore_index=True)
+        combined = combined.sort_values('__mean_resp__', ascending=False).drop_duplicates(subset=['__Compound__'])
+        combined = combined.drop(columns=['__mean_resp__'])
+        combined.set_index('__Compound__', inplace=True)
+        
+        orig_names = []
+        for n in combined.index:
+            n_lower = str(n).strip().lower()
+            mapped_kegg = None
+            if n_lower in local_kegg_mapping: mapped_kegg = local_kegg_mapping[n_lower]
+            elif n_lower in external_kegg_dict: mapped_kegg = external_kegg_dict[n_lower]
+            else:
+                for n_part in n_lower.split(';'):
+                    n_part_clean = n_part.strip()
+                    if n_part_clean in external_kegg_dict:
+                        mapped_kegg = external_kegg_dict[n_part_clean]
+                        break
+            if mapped_kegg: orig_names.append(f"{n} | {mapped_kegg}")
+            else: orig_names.append(n)
+                
+        combined.index = orig_names
+        df_t = combined.T
+        df_t.index.name = 'SampleID'
+        df_t = df_t.reset_index()
+        df_t['Group'] = 'Unknown'
+        df_t['Source_Files'] = 'Manual_Targeted_Merged'
+        
+        meta = pd.DataFrame(index=combined.index)
+        meta['Clean_Name'] = [str(n).split(' | ')[0] for n in combined.index]
+        meta['Original_Name'] = combined.index
+        meta['Is_Annotated'] = True 
+        return df_t, meta, None
+    except Exception as e: return None, None, f"手动表格解析失败: {str(e)}"
 
 def merge_multiple_dfs(results_list):
     if not results_list: return None, None, "无数据"
@@ -216,231 +336,13 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
     data_df = data_df.loc[:, data_df.var() > 1e-9]
     return pd.concat([meta_df, data_df], axis=1), data_df.columns.tolist()
 
-# ====================
-# 通路富集分析核心引擎 (极致对标 MetaboAnalyst 的严谨模式)
-# ====================
+# ==============================================================================
+# 🌟 全能通路富集引擎 (Universal Enrichment Engine)
+# ==============================================================================
 def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_source=None):
-    raw_pathways = {}
-    
-    def clean_met_name(name):
-        return re.sub(r'[^a-z0-9]', '', str(name).lower())
-
-    if custom_db_source is not None:
-        try:
-            if hasattr(custom_db_source, 'name'):
-                fname = custom_db_source.name
-                if fname.endswith('.gmt'):
-                    content = custom_db_source.getvalue().decode("utf-8")
-                    for line in content.strip().split('\n'):
-                        parts = line.split('\t')
-                        if len(parts) >= 3: raw_pathways[parts[0]] = parts[2:]
-                elif fname.endswith('.csv'):
-                    df_db = pd.read_csv(custom_db_source)
-                    if 'Pathway' in df_db.columns and 'Metabolite' in df_db.columns:
-                        raw_pathways = df_db.groupby('Pathway')['Metabolite'].apply(lambda x: list(x.dropna().astype(str))).to_dict()
-                    else:
-                        for _, row in df_db.iterrows():
-                            vals = row.dropna().astype(str).tolist()
-                            if len(vals) > 1: raw_pathways[vals[0]] = vals[1:]
-            elif isinstance(custom_db_source, str) and os.path.exists(custom_db_source):
-                if custom_db_source.endswith('.gmt'):
-                    with open(custom_db_source, 'r', encoding='utf-8') as f:
-                        for line in f:
-                            parts = line.strip().split('\t')
-                            if len(parts) >= 3: raw_pathways[parts[0]] = parts[2:]
-                elif custom_db_source.endswith('.csv'):
-                    df_db = pd.read_csv(custom_db_source)
-                    if 'Pathway' in df_db.columns and 'Metabolite' in df_db.columns:
-                        raw_pathways = df_db.groupby('Pathway')['Metabolite'].apply(lambda x: list(x.dropna().astype(str))).to_dict()
-                    else:
-                        for _, row in df_db.iterrows():
-                            vals = row.dropna().astype(str).tolist()
-                            if len(vals) > 1: raw_pathways[vals[0]] = vals[1:]
-        except Exception as e:
-            print(f"外部数据库加载异常: {e}")
-
-    if not raw_pathways:
-        return pd.DataFrame() 
-
-    processed_pathways = {}
-    all_db_mets = set() 
-    for pw, mets in raw_pathways.items():
-        cleaned_mets = [clean_met_name(m) for m in mets]
-        processed_pathways[pw] = set(cleaned_mets)
-        all_db_mets.update(cleaned_mets)
-
-    def build_synonym_to_feature_map(met_list_with_semicolons):
-        syn2feat = {}
-        for full_name in met_list_with_semicolons:
-            if pd.isna(full_name) or str(full_name).strip() == "": continue
-            parts = str(full_name).split(';')
-            feature_name = parts[0].strip() 
-            for p in parts:
-                cleaned = clean_met_name(p)
-                if cleaned: syn2feat[cleaned] = feature_name
-        return syn2feat
-
-    sig_syn2feat = build_synonym_to_feature_map(sig_metabolites)
-    
-    mapped_sig_features = set()
-    for raw_name, feat_name in sig_syn2feat.items():
-        if raw_name in all_db_mets:
-            mapped_sig_features.add(feat_name)
-            
-    n = len(mapped_sig_features)
-    if n == 0: 
-        return pd.DataFrame()
-
-    N = len(all_db_mets)
-    
-    results = []
-    
-    for pathway_name, pw_set in processed_pathways.items():
-        K = len(pw_set)
-        if K == 0: continue
-            
-        k_features = set([sig_syn2feat[m] for m in pw_set if m in sig_syn2feat])
-        k = len(k_features)
-        
-        if k > 0:
-            expected = (K / N) * n
-            enrichment_factor = k / expected if expected > 0 else 0
-            
-            p_val = hypergeom.sf(k - 1, N, K, n)
-            
-            results.append({
-                "Pathway": pathway_name,
-                "Total_in_Pathway": K,
-                "Hits": k,
-                "Hit_Metabolites": ", ".join(list(k_features)), 
-                "Enrichment_Factor": enrichment_factor,
-                "P_Value": p_val
-            })
-            
-    res_df = pd.DataFrame(results)
-    if not res_df.empty:
-        from statsmodels.stats.multitest import multipletests
-        try:
-            _, fdr, _, _ = multipletests(res_df['P_Value'], method='fdr_bh')
-            res_df['FDR'] = fdr
-        except: res_df['FDR'] = res_df['P_Value']
-        res_df['-Log10_P'] = -np.log10(res_df['P_Value'].astype(float) + 1e-300)
-        res_df = res_df.sort_values("P_Value")
-        
-    return res_df
-
-
-# ==============================================================================
-# 【物理隔离流 B：手动靶向宽表专属解析器与 KEGG API 引擎】
-# ==============================================================================
-def build_kegg_dictionary(dict_files):
-    kegg_mapping = {}
-    if not dict_files: return kegg_mapping
-    for file in dict_files:
-        try:
-            file.seek(0)
-            if file.name.endswith('.csv'):
-                try: df = pd.read_csv(file, engine='pyarrow')
-                except: file.seek(0); df = pd.read_csv(file, low_memory=False)
-            else: df = pd.read_excel(file)
-            
-            target_cols = ['name', 'metabolite', '化合物名称', 'peak_name']
-            name_col = None
-            df_cols_lower = [str(c).lower() for c in df.columns]
-            for tc in target_cols:
-                if tc in df_cols_lower:
-                    name_col = df.columns[df_cols_lower.index(tc)]
-                    break
-            if not name_col: name_col = df.columns[0]
-            
-            kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
-            
-            if kegg_col:
-                for _, row in df.iterrows():
-                    k = str(row[kegg_col]).strip()
-                    if k and k.lower() not in ['nan', 'none', '']:
-                        k_clean = k.split(';')[0].strip() 
-                        names_str = str(row[name_col])
-                        
-                        for n_part in names_str.split(';'):
-                            n_clean = n_part.strip().lower()
-                            if n_clean and n_clean != 'nan':
-                                kegg_mapping[n_clean] = k_clean
-        except Exception: pass
-    return kegg_mapping
-
-def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_regex=r'-(P|N|RP-P|RP-N|HILIC-P|HILIC-N|POS|NEG)-', external_kegg_dict=None):
-    if external_kegg_dict is None: external_kegg_dict = {}
-    try:
-        all_dfs = []
-        local_kegg_mapping = {} 
-        for file in file_list:
-            file.seek(0)
-            if file.name.endswith('.csv'): df = pd.read_csv(file)
-            else: df = pd.read_excel(file)
-            
-            comp_col = df.columns[0] 
-            kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
-            if kegg_col:
-                for _, row in df.iterrows():
-                    n = str(row[comp_col]).strip()
-                    k = str(row[kegg_col]).strip()
-                    if k and k.lower() not in ['nan', 'none', '']: 
-                        local_kegg_mapping[n.lower()] = k
-                    
-            metric_cols = [c for c in df.columns if metric_suffix in str(c)]
-            if not metric_cols: continue 
-                
-            sub_df = df[[comp_col] + metric_cols].copy()
-            sub_df.rename(columns={comp_col: '__Compound__'}, inplace=True)
-            
-            def clean_col_name(c):
-                c = str(c).replace(metric_suffix, "").strip() 
-                c = re.sub(mode_regex, '-', c, flags=re.IGNORECASE) 
-                return c.replace('--', '-') 
-                
-            sub_df.rename(columns={c: clean_col_name(c) for c in metric_cols}, inplace=True)
-            for c in sub_df.columns[1:]: sub_df[c] = pd.to_numeric(sub_df[c], errors='coerce')
-            sub_df['__mean_resp__'] = sub_df.iloc[:, 1:].mean(axis=1)
-            all_dfs.append(sub_df)
-            
-        if not all_dfs: return None, None, "未找到指定的提取指标！"
-            
-        combined = pd.concat(all_dfs, ignore_index=True)
-        combined = combined.sort_values('__mean_resp__', ascending=False).drop_duplicates(subset=['__Compound__'])
-        combined = combined.drop(columns=['__mean_resp__'])
-        combined.set_index('__Compound__', inplace=True)
-        
-        orig_names = []
-        for n in combined.index:
-            n_lower = str(n).strip().lower()
-            mapped_kegg = None
-            if n_lower in local_kegg_mapping: mapped_kegg = local_kegg_mapping[n_lower]
-            elif n_lower in external_kegg_dict: mapped_kegg = external_kegg_dict[n_lower]
-            else:
-                for n_part in n_lower.split(';'):
-                    n_part_clean = n_part.strip()
-                    if n_part_clean in external_kegg_dict:
-                        mapped_kegg = external_kegg_dict[n_part_clean]
-                        break
-            if mapped_kegg: orig_names.append(f"{n} | {mapped_kegg}")
-            else: orig_names.append(n)
-                
-        combined.index = orig_names
-        df_t = combined.T
-        df_t.index.name = 'SampleID'
-        df_t = df_t.reset_index()
-        df_t['Group'] = 'Unknown'
-        df_t['Source_Files'] = 'Manual_Targeted_Merged'
-        
-        meta = pd.DataFrame(index=combined.index)
-        meta['Clean_Name'] = [str(n).split(' | ')[0] for n in combined.index]
-        meta['Original_Name'] = combined.index
-        meta['Is_Annotated'] = True 
-        return df_t, meta, None
-    except Exception as e: return None, None, f"手动表格解析失败: {str(e)}"
-
-def run_kegg_pathway_enrichment(sig_metabolites, all_measured_metabolites, custom_db_source=None):
+    """
+    不管您的 DB 是名字还是 KEGG ID，不管用户输入的是名字还是 ID，全部通吃！
+    """
     if custom_db_source is not None:
         try:
             if hasattr(custom_db_source, 'name'): db = pd.read_csv(custom_db_source)
@@ -451,56 +353,79 @@ def run_kegg_pathway_enrichment(sig_metabolites, all_measured_metabolites, custo
     
     if 'Pathway' not in db.columns or 'Compounds' not in db.columns: return pd.DataFrame()
     
-    def _extract_kegg_ids(met_list, return_map=False):
-        kegg_set = set()
-        kegg_name_map = {}
-        for x in met_list:
-            parts = [p.strip() for p in str(x).split('|')]
-            orig_name = parts[0]
-            for p in parts:
-                p_lower = p.lower()
-                if re.match(r'^c\d{5}$', p_lower):
-                    kegg_set.add(p_lower)
-                    kegg_name_map[p_lower] = orig_name
-        if return_map: return kegg_set, kegg_name_map
-        return kegg_set
+    # 工具函数：将一切乱七八糟的命名、别名、ID，统一剥离出“纯净特征池”
+    def get_synonyms(full_name):
+        syns = set()
+        for p in str(full_name).split('|'):
+            for sub_p in p.split(';'):
+                clean_p = re.sub(r'[^a-z0-9]', '', sub_p.lower())
+                if clean_p: syns.add(clean_p)
+        return syns
+
+    # 1. 映射背景代谢物 (背景池构建)
+    bg_syns_list = []
+    for name in background_metabolites:
+        bg_syns_list.append((name, get_synonyms(name)))
         
-    bg_set, bg_map = _extract_kegg_ids(all_measured_metabolites, return_map=True)
-    sig_set = _extract_kegg_ids(sig_metabolites)
-    sig_set = sig_set.intersection(bg_set)
+    sig_names = set(sig_metabolites)
     
-    N = len(bg_set)
-    K_drawn = len(sig_set)
+    # 2. 从提供的数据库 (无论是 KEGG 还是 SMPDB) 提取整个宇宙
+    all_db_comps = set()
+    for _, row in db.iterrows():
+        if pd.notna(row['Compounds']):
+            for c in str(row['Compounds']).split(';'):
+                clean_c = re.sub(r'[^a-z0-9]', '', c.lower())
+                if clean_c: all_db_comps.add(clean_c)
+                
+    # 3. 交集对撞，找出现实测到的“真实背景”
+    mapped_bg_names = set()
+    mapped_bg_syns = set()
+    for orig_name, syns in bg_syns_list:
+        intersect = syns.intersection(all_db_comps)
+        if intersect:
+            mapped_bg_names.add(orig_name)
+            mapped_bg_syns.update(intersect)
+            
+    mapped_sig_names = mapped_bg_names.intersection(sig_names)
+    
+    # N: 完全符合金标准的“有效背景数”
+    N = len(mapped_bg_names)
+    K_drawn = len(mapped_sig_names)
+    
     if N == 0 or K_drawn == 0: return pd.DataFrame()
     
+    # 4. 执行统计计算
     results = []
     for _, row in db.iterrows():
         pw = row['Pathway']
-        comp_str = str(row['Compounds'])
-        if comp_str == 'nan': continue
+        if pd.isna(row['Compounds']): continue
         
-        pw_raw_comps = set([c.lower().strip() for c in comp_str.split(';')])
-        pw_detectable_comps = pw_raw_comps.intersection(bg_set)
-        M = len(pw_detectable_comps)
+        # M: 该通路内能在质谱上测到的“有效物质数”
+        pw_comps = set([re.sub(r'[^a-z0-9]', '', str(c).lower()) for c in str(row['Compounds']).split(';')])
+        pw_detectable = pw_comps.intersection(mapped_bg_syns)
+        M = len(pw_detectable)
         
         if M == 0: continue
-            
-        hits = pw_detectable_comps.intersection(sig_set)
-        k = len(hits)
         
+        # k: 命中的显著物质数
+        hits_orig_names = set()
+        for orig_name in mapped_sig_names:
+            syns = next(s for n, s in bg_syns_list if n == orig_name)
+            if syns.intersection(pw_detectable):
+                hits_orig_names.add(orig_name)
+                
+        k = len(hits_orig_names)
         if k > 0:
             p_val = hypergeom.sf(k - 1, N, M, K_drawn)
             expected = (K_drawn * M) / N
-            enrichment_factor = k / expected if expected > 0 else 0
-            hit_names = [bg_map[hit] for hit in hits]
-            
+            enrich_factor = k / expected if expected > 0 else 0
             results.append({
                 'Pathway': pw, 
                 'Total_in_Pathway': M, 
                 'Hits': k,
                 'P_Value': p_val, 
-                'Enrichment_Factor': enrichment_factor,
-                'Hit_Metabolites': ", ".join(hit_names)
+                'Enrichment_Factor': enrich_factor,
+                'Hit_Metabolites': ", ".join(list(hits_orig_names))
             })
             
     res_df = pd.DataFrame(results)
@@ -510,6 +435,8 @@ def run_kegg_pathway_enrichment(sig_metabolites, all_measured_metabolites, custo
             _, fdr, _, _ = multipletests(res_df['P_Value'], method='fdr_bh')
             res_df['FDR'] = fdr
         except: res_df['FDR'] = res_df['P_Value']
+        # 为 Plotly 绘图直接预备好 -Log10_P 列
         res_df['-Log10_P'] = -np.log10(res_df['P_Value'].astype(float) + 1e-300)
         res_df = res_df.sort_values('P_Value')
+        
     return res_df
