@@ -25,10 +25,23 @@ plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'PingFang SC', '
 plt.rcParams['axes.unicode_minus'] = False
 
 try:
-    # 🌟 拍扁成单行，彻底杜绝多行括号引起的复制隐藏字符语法报错！
-    from data_preprocessing import data_cleaning_pipeline, parse_metdna_file, parse_manual_targeted_files, merge_multiple_dfs, align_sample_info, OPLS_DA, run_pathway_enrichment, build_kegg_dictionary
+    # 🌟 绝对防弹版导入：利用括号和垂直排版，免疫一切超长代码换行导致的 SyntaxError
+    from data_preprocessing import (
+        data_cleaning_pipeline, 
+        parse_metdna_file, 
+        parse_manual_targeted_files, 
+        merge_multiple_dfs, 
+        align_sample_info, 
+        OPLS_DA, 
+        run_pathway_enrichment, 
+        build_kegg_dictionary
+    )
     from stats_utils import run_pairwise_statistics
-    from plot_utils import update_layout_square, get_ellipse_coordinates, plot_nomogram
+    from plot_utils import (
+        update_layout_square, 
+        get_ellipse_coordinates, 
+        plot_nomogram
+    )
     from report_generator import generate_offline_html, generate_ai_prompt
 except ImportError as e:
     st.error(f"❌ 严重错误：未找到依赖文件。请确保同目录下有所需的 .py 文件。详情: {e}")
