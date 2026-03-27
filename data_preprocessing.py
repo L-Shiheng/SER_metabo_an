@@ -8,10 +8,9 @@ from scipy import stats
 import statsmodels.stats.multitest
 
 # ==========================================
-# 0. 超级大字典构建引擎 (🌟 修复了列匹配优先级与别名裂变)
+# 0. 超级大字典构建引擎 
 # ==========================================
 def build_kegg_dictionary(dict_files):
-    """提取 MetDNA 文件中的名称与 KEGG ID，构建抗干扰的超级全局字典"""
     kegg_mapping = {}
     if not dict_files: return kegg_mapping
     for file in dict_files:
@@ -22,7 +21,6 @@ def build_kegg_dictionary(dict_files):
                 except: file.seek(0); df = pd.read_csv(file, low_memory=False)
             else: df = pd.read_excel(file)
             
-            # 🌟 修复点 1：严格的列名优先级，绝不让 peak_name 抢占 name！
             target_cols = ['name', 'metabolite', '化合物名称', 'peak_name']
             name_col = None
             df_cols_lower = [str(c).lower() for c in df.columns]
@@ -37,12 +35,10 @@ def build_kegg_dictionary(dict_files):
             if kegg_col:
                 for _, row in df.iterrows():
                     k = str(row[kegg_col]).strip()
-                    # 如果 KEGG 不为空
                     if k and k.lower() not in ['nan', 'none', '']:
-                        k_clean = k.split(';')[0].strip() # 只取第一个 KEGG ID
+                        k_clean = k.split(';')[0].strip() 
                         names_str = str(row[name_col])
                         
-                        # 🌟 修复点 2：将 "A; B; C" 裂变成三个映射，全面覆盖
                         for n_part in names_str.split(';'):
                             n_clean = n_part.strip().lower()
                             if n_clean and n_clean != 'nan':
@@ -168,32 +164,23 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
         
         combined.set_index('__Compound__', inplace=True)
         
-        # 🌟 查字典核心逻辑：只要匹配上，强制拼接到列名里
         orig_names = []
         for n in combined.index:
             n_lower = str(n).strip().lower()
             mapped_kegg = None
             
-            # 1. 优先查本地表 (如果有)
-            if n_lower in local_kegg_mapping:
-                mapped_kegg = local_kegg_mapping[n_lower]
-            # 2. 查 MetDNA 外部字典全名
-            elif n_lower in external_kegg_dict:
-                mapped_kegg = external_kegg_dict[n_lower]
+            if n_lower in local_kegg_mapping: mapped_kegg = local_kegg_mapping[n_lower]
+            elif n_lower in external_kegg_dict: mapped_kegg = external_kegg_dict[n_lower]
             else:
-                # 3. 如果名字里有分号(如 A;B)，挨个拆开查！只要命中一个就成功
                 for n_part in n_lower.split(';'):
                     n_part_clean = n_part.strip()
                     if n_part_clean in external_kegg_dict:
                         mapped_kegg = external_kegg_dict[n_part_clean]
                         break
             
-            if mapped_kegg:
-                orig_names.append(f"{n} | {mapped_kegg}")
-            else:
-                orig_names.append(n)
+            if mapped_kegg: orig_names.append(f"{n} | {mapped_kegg}")
+            else: orig_names.append(n)
                 
-        # 用焊上了 KEGG 的名字替换掉原来的名字
         combined.index = orig_names
         
         df_t = combined.T
@@ -405,7 +392,7 @@ class OPLS_DA:
         return np.array(corrs), np.array(r2s), np.array(q2s), original_r2, original_q2
 
 # ==========================================
-# 4. 极致背景校验的通路富集算法
+# 4. 极致背景校验的通路富集算法 (🌟 全面对齐 MetaboAnalyst 算法)
 # ==========================================
 def run_pathway_enrichment(sig_metabolites, all_measured_metabolites, custom_db_source=None):
     if custom_db_source is not None:
@@ -426,14 +413,27 @@ def run_pathway_enrichment(sig_metabolites, all_measured_metabolites, custom_db_
                 if not c or c == 'nan': continue
                 c_clean = re.sub(r'_\d+$', '', c)
                 terms.add(c_clean)
-                terms.add(c) 
-                if re.match(r'^c\d{5}$', c):
-                    terms.add('cpd:' + c)
         return terms
         
     sig_set = _extract_terms(sig_metabolites)
     bg_set = _extract_terms(all_measured_metabolites)
-    N = len(bg_set); K = len(sig_set)
+    
+    # 构建数据库宇宙全集
+    db_all_comps = set()
+    for _, row in db.iterrows():
+        comp_str = str(row['Compounds'])
+        if comp_str != 'nan':
+            for c in comp_str.split(';'):
+                db_all_comps.add(c.lower().strip())
+                
+    # 🌟 核心修正：严格按照映射到的真实 ID 数量计算背景，避免分母虚高
+    bg_mapped = bg_set.intersection(db_all_comps)
+    sig_mapped = sig_set.intersection(db_all_comps)
+    
+    # 就像 MetaboAnalyst 一样，如果背景为空，则使用整个数据库的物种规模作为 N
+    N = len(bg_mapped) if len(bg_mapped) > 0 else len(db_all_comps)
+    K = len(sig_mapped) if len(bg_mapped) > 0 else len(sig_set.intersection(db_all_comps))
+    
     if N == 0 or K == 0: return pd.DataFrame()
     
     results = []
@@ -447,6 +447,7 @@ def run_pathway_enrichment(sig_metabolites, all_measured_metabolites, custom_db_
         k = len(hits)
         
         if k > 0:
+            # SciPy 参数对应: sf(k-1, 总人口N, 靶向总体M, 抽取数K)
             p_val = stats.hypergeom.sf(k - 1, N, M, K)
             expected = (K * M) / N
             enrich_factor = k / expected if expected > 0 else 0
