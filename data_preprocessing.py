@@ -9,79 +9,75 @@ from sklearn.model_selection import cross_val_predict, KFold
 from sklearn.metrics import r2_score
 from scipy.stats import hypergeom
 
-# ====================\r
-# SIMCA: OPLS-DA 算法与置换检验\r
-# ====================\r
-class OPLS_DA:\r
-    def __init__(self):\r
-        self.t = None        \r
-        self.t_ortho = None  \r
-        self.p = None        \r
-        self.p_corr = None   \r
-        self.vip = None      \r
-        self.R2Y = 0\r
-        self.Q2 = 0\r
-\r
-    def fit(self, X, y):\r
-        X = np.array(X)\r
-        y = np.array(y).flatten()\r
-        \r
-        w = np.dot(X.T, y) / np.dot(y.T, y)\r
-        w /= np.linalg.norm(w)\r
-        t = np.dot(X, w) / np.dot(w.T, w)\r
-        p = np.dot(X.T, t) / np.dot(t.T, t)\r
-        \r
-        w_ortho = p - (np.dot(w.T, p) / np.dot(w.T, w)) * w\r
-        w_ortho /= np.linalg.norm(w_ortho)\r
-        t_ortho = np.dot(X, w_ortho) / np.dot(w_ortho.T, w_ortho)\r
-        \r
-        self.t = t.flatten()\r
-        self.t_ortho = t_ortho.flatten()\r
-        self.p = p.flatten()\r
-        \r
-        self.p_corr = np.array([np.corrcoef(X[:, i], self.t)[0, 1] for i in range(X.shape[1])])\r
-        w_norm = (w / np.linalg.norm(w)).flatten()\r
-        self.vip = np.sqrt(len(w_norm) * (w_norm ** 2))\r
-        return self\r
-\r
-    def evaluate(self, X, y, n_splits=7):\r
-        n_samples = len(y)\r
-        cv_splits = min(n_splits, n_samples)\r
-        if cv_splits < 2: return 0, 0\r
-            \r
-        pls = PLSRegression(n_components=1)\r
-        pls.fit(X, y)\r
-        y_pred_fit = pls.predict(X)\r
-        self.R2Y = r2_score(y, y_pred_fit)\r
-        \r
-        # 内部交叉验证已锁定种子 42\r
-        kf = KFold(n_splits=cv_splits, shuffle=True, random_state=42)\r
-        y_cv = cross_val_predict(pls, X, y, cv=kf)\r
-        self.Q2 = r2_score(y, y_cv)\r
-        return self.R2Y, self.Q2\r
-\r
-    def permutation_test(self, X, y, n_permutations=100):\r
-        # 🌟 修复点 1：锁定全局随机洗牌种子，确保 100 次打乱轨迹永久固定\r
-        np.random.seed(42)\r
-        \r
-        orig_R2Y, orig_Q2 = self.evaluate(X, y)\r
-        r2_perm, q2_perm, correlations = [], [], []\r
-        \r
-        pls = PLSRegression(n_components=1)\r
-        cv_splits = min(7, len(y))\r
-        # 🌟 修复点 2：锁定验证集分割种子\r
-        kf = KFold(n_splits=cv_splits, shuffle=True, random_state=42)\r
-        \r
-        for i in range(n_permutations):\r
-            y_shuffled = np.random.permutation(y)\r
-            corr = np.abs(np.corrcoef(y, y_shuffled)[0, 1])\r
-            correlations.append(corr)\r
-            \r
-            pls.fit(X, y_shuffled)\r
-            r2_perm.append(r2_score(y_shuffled, pls.predict(X)))\r
-            q2_perm.append(r2_score(y_shuffled, cross_val_predict(pls, X, y_shuffled, cv=kf)))\r
-            \r
-        return np.array(correlations), np.array(r2_perm), np.array(q2_perm), orig_R2Y, orig_Q2\r
+# ====================
+# SIMCA: OPLS-DA 算法与置换检验
+# ====================
+class OPLS_DA:
+    def __init__(self):
+        self.t = None        
+        self.t_ortho = None  
+        self.p = None        
+        self.p_corr = None   
+        self.vip = None      
+        self.R2Y = 0
+        self.Q2 = 0
+
+    def fit(self, X, y):
+        X = np.array(X)
+        y = np.array(y).flatten()
+        
+        w = np.dot(X.T, y) / np.dot(y.T, y)
+        w /= np.linalg.norm(w)
+        t = np.dot(X, w) / np.dot(w.T, w)
+        p = np.dot(X.T, t) / np.dot(t.T, t)
+        
+        w_ortho = p - (np.dot(w.T, p) / np.dot(w.T, w)) * w
+        w_ortho /= np.linalg.norm(w_ortho)
+        t_ortho = np.dot(X, w_ortho) / np.dot(w_ortho.T, w_ortho)
+        
+        self.t = t.flatten()
+        self.t_ortho = t_ortho.flatten()
+        self.p = p.flatten()
+        
+        self.p_corr = np.array([np.corrcoef(X[:, i], self.t)[0, 1] for i in range(X.shape[1])])
+        w_norm = (w / np.linalg.norm(w)).flatten()
+        self.vip = np.sqrt(len(w_norm) * (w_norm ** 2))
+        return self
+
+    def evaluate(self, X, y, n_splits=7):
+        n_samples = len(y)
+        cv_splits = min(n_splits, n_samples)
+        if cv_splits < 2: return 0, 0
+            
+        pls = PLSRegression(n_components=1)
+        pls.fit(X, y)
+        y_pred_fit = pls.predict(X)
+        self.R2Y = r2_score(y, y_pred_fit)
+        
+        kf = KFold(n_splits=cv_splits, shuffle=True, random_state=42)
+        y_cv = cross_val_predict(pls, X, y, cv=kf)
+        self.Q2 = r2_score(y, y_cv)
+        return self.R2Y, self.Q2
+
+    def permutation_test(self, X, y, n_permutations=100):
+        np.random.seed(42)
+        orig_R2Y, orig_Q2 = self.evaluate(X, y)
+        r2_perm, q2_perm, correlations = [], [], []
+        
+        pls = PLSRegression(n_components=1)
+        cv_splits = min(7, len(y))
+        kf = KFold(n_splits=cv_splits, shuffle=True, random_state=42)
+        
+        for i in range(n_permutations):
+            y_shuffled = np.random.permutation(y)
+            corr = np.abs(np.corrcoef(y, y_shuffled)[0, 1])
+            correlations.append(corr)
+            
+            pls.fit(X, y_shuffled)
+            r2_perm.append(r2_score(y_shuffled, pls.predict(X)))
+            q2_perm.append(r2_score(y_shuffled, cross_val_predict(pls, X, y_shuffled, cv=kf)))
+            
+        return np.array(correlations), np.array(r2_perm), np.array(q2_perm), orig_R2Y, orig_Q2
 
 # ====================
 # 数据解析与合并
@@ -127,7 +123,6 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     final_ids = np.where(mask_annotated, clean_names + "_" + clean_tag, unannotated_ids)
     final_ids = make_unique(final_ids)
 
-    # 🌟 核心修复点：强制恢复 MetDNA 的 KEGG ID 提取逻辑
     kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
     if kegg_col is not None:
         kegg_vals = df[kegg_col].fillna('').astype(str).values
@@ -155,6 +150,183 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     
     return df_transposed, meta_df, None
 
+def merge_multiple_dfs(results_list):
+    if not results_list: return None, None, "无数据"
+    best_features = {}; sample_source_map = {}
+    for file_idx, (df, meta, fname) in enumerate(results_list):
+        if 'SampleID' in df.columns and 'Source_Files' in df.columns:
+            current_tag = df['Source_Files'].iloc[0]
+            for sid in df['SampleID']:
+                if sid not in sample_source_map: sample_source_map[sid] = set()
+                sample_source_map[sid].add(current_tag)
+        numeric_df = df.select_dtypes(include=[np.number])
+        intensities = numeric_df.sum(axis=0)
+        for feat_id in numeric_df.columns:
+            try: clean_name = meta.loc[feat_id, 'Clean_Name']
+            except KeyError: continue
+            curr_score = intensities.get(feat_id, 0)
+            if clean_name not in best_features or curr_score > best_features[clean_name][2]:
+                best_features[clean_name] = (file_idx, feat_id, curr_score)
+    
+    files_features_to_keep = {i: [] for i in range(len(results_list))}
+    for c_name, (f_idx, f_id, score) in best_features.items(): files_features_to_keep[f_idx].append(f_id)
+        
+    dfs_to_concat = []; base_group_series = None
+    for i, (df, meta, fname) in enumerate(results_list):
+        if 'SampleID' in df.columns: df = df.set_index('SampleID')
+        cols_to_drop = [c for c in ['Group', 'Source_Files'] if c in df.columns]
+        if 'Group' in df.columns and base_group_series is None: base_group_series = df['Group']
+        df_clean = df.drop(columns=cols_to_drop, errors='ignore')
+        dfs_to_concat.append(df_clean[[c for c in files_features_to_keep[i] if c in df_clean.columns]])
+        
+    try: full_df = pd.concat(dfs_to_concat, axis=1, join='outer')
+    except Exception as e: return None, None, f"合并出错: {str(e)}"
+    
+    full_df.fillna(0, inplace=True)
+    if base_group_series is not None: full_df.insert(0, 'Group', base_group_series.reindex(full_df.index).fillna('Unknown'))
+    else: full_df.insert(0, 'Group', 'Unknown')
+    full_df.reset_index(inplace=True)
+    full_df.rename(columns={'index': 'SampleID'}, inplace=True)
+    full_df['Source_Files'] = full_df['SampleID'].apply(lambda sid: "; ".join(sorted(list(sample_source_map.get(sid, set())))))
+    
+    final_ids = [fid for f_list in files_features_to_keep.values() for fid in f_list]
+    merged_meta = pd.concat([res[1] for res in results_list]).loc[final_ids]
+    return full_df, merged_meta, None
+
+def align_sample_info(data_df, info_df, sample_col_name=None):
+    target_col = sample_col_name if sample_col_name and sample_col_name in info_df.columns else info_df.columns[0]
+    info_map = {re.sub(r'[^a-zA-Z0-9]', '', str(r[target_col])).lower(): r for _, r in info_df.iterrows()}
+    aligned_data = [info_map.get(re.sub(r'[^a-zA-Z0-9]', '', str(sid)).lower(), pd.Series([np.nan]*len(info_df.columns), index=info_df.columns)) for sid in data_df['SampleID']]
+    aligned_df = pd.DataFrame(aligned_data)
+    aligned_df.index = data_df.index 
+    return aligned_df
+
+def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min', norm_method='None', log_transform=True, scale_method='Pareto'):
+    numeric_cols = [c for c in df.select_dtypes(include=[np.number]).columns if c not in [group_col, 'SampleID', 'Source_Files']]
+    meta_cols = [c for c in df.columns if c not in numeric_cols]
+    data_df = df[numeric_cols].copy()
+    meta_df = df[meta_cols].copy()
+    
+    data_df = data_df[data_df.isnull().mean()[data_df.isnull().mean() <= missing_thresh].index]
+    
+    if data_df.isnull().sum().sum() > 0:
+        if impute_method == 'min': data_df = data_df.fillna(data_df.min() * 0.5)
+        elif impute_method == 'mean': data_df = data_df.fillna(data_df.mean())
+        elif impute_method == 'KNN': data_df = pd.DataFrame(KNNImputer(n_neighbors=5).fit_transform(data_df), columns=data_df.columns, index=data_df.index)
+        else: data_df = data_df.fillna(0)
+
+    if norm_method == 'Sum': data_df = data_df.div(data_df.sum(axis=1), axis=0) * data_df.sum(axis=1).mean()
+    elif norm_method == 'Median': data_df = data_df.div(data_df.median(axis=1), axis=0) * data_df.median(axis=1).mean()
+    elif norm_method == 'PQN':
+        ref = data_df.median(axis=0); ref[ref <= 0] = 1e-6
+        data_df = data_df.div(data_df.div(ref, axis=1).median(axis=1), axis=0)
+
+    if log_transform: data_df = np.log2(data_df + 1) if (data_df <= 0).any().any() else np.log2(data_df)
+
+    if scale_method != 'None':
+        mean = data_df.mean(); std = data_df.std()
+        if scale_method == 'Auto': data_df = (data_df - mean) / std
+        elif scale_method == 'Pareto': data_df = (data_df - mean) / np.sqrt(std)
+
+    data_df = data_df.loc[:, data_df.var() > 1e-9]
+    return pd.concat([meta_df, data_df], axis=1), data_df.columns.tolist()
+
+# ==============================================================================
+# 🌟 全能通路富集引擎 (Universal Enrichment Engine)
+# ==============================================================================
+def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_source=None):
+    if custom_db_source is not None:
+        try:
+            if hasattr(custom_db_source, 'name'): db = pd.read_csv(custom_db_source)
+            elif isinstance(custom_db_source, str) and os.path.exists(custom_db_source): db = pd.read_csv(custom_db_source)
+            else: return pd.DataFrame()
+        except: return pd.DataFrame()
+    else: return pd.DataFrame()
+    
+    if 'Pathway' not in db.columns or 'Compounds' not in db.columns: return pd.DataFrame()
+    
+    def get_synonyms(full_name):
+        syns = set()
+        for p in str(full_name).split('|'):
+            for sub_p in p.split(';'):
+                clean_p = re.sub(r'[^a-z0-9]', '', sub_p.lower())
+                if clean_p: syns.add(clean_p)
+        return syns
+
+    bg_syns_list = []
+    for name in background_metabolites:
+        bg_syns_list.append((name, get_synonyms(name)))
+        
+    sig_names = set(sig_metabolites)
+    
+    all_db_comps = set()
+    for _, row in db.iterrows():
+        if pd.notna(row['Compounds']):
+            for c in str(row['Compounds']).split(';'):
+                clean_c = re.sub(r'[^a-z0-9]', '', c.lower())
+                if clean_c: all_db_comps.add(clean_c)
+                
+    mapped_bg_names = set()
+    mapped_bg_syns = set()
+    for orig_name, syns in bg_syns_list:
+        intersect = syns.intersection(all_db_comps)
+        if intersect:
+            mapped_bg_names.add(orig_name)
+            mapped_bg_syns.update(intersect)
+            
+    mapped_sig_names = mapped_bg_names.intersection(sig_names)
+    
+    N = len(mapped_bg_names)
+    K_drawn = len(mapped_sig_names)
+    
+    if N == 0 or K_drawn == 0: return pd.DataFrame()
+    
+    results = []
+    for _, row in db.iterrows():
+        pw = row['Pathway']
+        if pd.isna(row['Compounds']): continue
+        
+        pw_comps = set([re.sub(r'[^a-z0-9]', '', str(c).lower()) for c in str(row['Compounds']).split(';')])
+        pw_detectable = pw_comps.intersection(mapped_bg_syns)
+        M = len(pw_detectable)
+        
+        if M == 0: continue
+        
+        hits_orig_names = set()
+        for orig_name in mapped_sig_names:
+            syns = next(s for n, s in bg_syns_list if n == orig_name)
+            if syns.intersection(pw_detectable):
+                hits_orig_names.add(orig_name)
+                
+        k = len(hits_orig_names)
+        if k > 0:
+            p_val = hypergeom.sf(k - 1, N, M, K_drawn)
+            expected = (K_drawn * M) / N
+            enrich_factor = k / expected if expected > 0 else 0
+            results.append({
+                'Pathway': pw, 
+                'Total_in_Pathway': M, 
+                'Hits': k,
+                'P_Value': p_val, 
+                'Enrichment_Factor': enrich_factor,
+                'Hit_Metabolites': ", ".join(list(hits_orig_names))
+            })
+            
+    res_df = pd.DataFrame(results)
+    if not res_df.empty:
+        try:
+            from statsmodels.stats.multitest import multipletests
+            _, fdr, _, _ = multipletests(res_df['P_Value'], method='fdr_bh')
+            res_df['FDR'] = fdr
+        except: res_df['FDR'] = res_df['P_Value']
+        res_df['-Log10_P'] = -np.log10(res_df['P_Value'].astype(float) + 1e-300)
+        res_df = res_df.sort_values('P_Value')
+        
+    return res_df
+
+# ==============================================================================
+# 【物理隔离流 B：手动靶向宽表专属解析器与 KEGG API 引擎】
+# ==============================================================================
 def build_kegg_dictionary(dict_files):
     kegg_mapping = {}
     if not dict_files: return kegg_mapping
@@ -259,189 +431,3 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
         meta['Is_Annotated'] = True 
         return df_t, meta, None
     except Exception as e: return None, None, f"手动表格解析失败: {str(e)}"
-
-def merge_multiple_dfs(results_list):
-    if not results_list: return None, None, "无数据"
-    best_features = {}; sample_source_map = {}
-    for file_idx, (df, meta, fname) in enumerate(results_list):
-        if 'SampleID' in df.columns and 'Source_Files' in df.columns:
-            current_tag = df['Source_Files'].iloc[0]
-            for sid in df['SampleID']:
-                if sid not in sample_source_map: sample_source_map[sid] = set()
-                sample_source_map[sid].add(current_tag)
-        numeric_df = df.select_dtypes(include=[np.number])
-        intensities = numeric_df.sum(axis=0)
-        for feat_id in numeric_df.columns:
-            try: clean_name = meta.loc[feat_id, 'Clean_Name']
-            except KeyError: continue
-            curr_score = intensities.get(feat_id, 0)
-            if clean_name not in best_features or curr_score > best_features[clean_name][2]:
-                best_features[clean_name] = (file_idx, feat_id, curr_score)
-    
-    files_features_to_keep = {i: [] for i in range(len(results_list))}
-    for c_name, (f_idx, f_id, score) in best_features.items(): files_features_to_keep[f_idx].append(f_id)
-        
-    dfs_to_concat = []; base_group_series = None
-    for i, (df, meta, fname) in enumerate(results_list):
-        if 'SampleID' in df.columns: df = df.set_index('SampleID')
-        cols_to_drop = [c for c in ['Group', 'Source_Files'] if c in df.columns]
-        if 'Group' in df.columns and base_group_series is None: base_group_series = df['Group']
-        df_clean = df.drop(columns=cols_to_drop, errors='ignore')
-        dfs_to_concat.append(df_clean[[c for c in files_features_to_keep[i] if c in df_clean.columns]])
-        
-    try: full_df = pd.concat(dfs_to_concat, axis=1, join='outer')
-    except Exception as e: return None, None, f"合并出错: {str(e)}"
-    
-    full_df.fillna(0, inplace=True)
-    if base_group_series is not None: full_df.insert(0, 'Group', base_group_series.reindex(full_df.index).fillna('Unknown'))
-    else: full_df.insert(0, 'Group', 'Unknown')
-    full_df.reset_index(inplace=True)
-    full_df.rename(columns={'index': 'SampleID'}, inplace=True)
-    full_df['Source_Files'] = full_df['SampleID'].apply(lambda sid: "; ".join(sorted(list(sample_source_map.get(sid, set())))))
-    
-    final_ids = [fid for f_list in files_features_to_keep.values() for fid in f_list]
-    merged_meta = pd.concat([res[1] for res in results_list]).loc[final_ids]
-    return full_df, merged_meta, None
-
-def align_sample_info(data_df, info_df, sample_col_name=None):
-    target_col = sample_col_name if sample_col_name and sample_col_name in info_df.columns else info_df.columns[0]
-    info_map = {re.sub(r'[^a-zA-Z0-9]', '', str(r[target_col])).lower(): r for _, r in info_df.iterrows()}
-    aligned_data = [info_map.get(re.sub(r'[^a-zA-Z0-9]', '', str(sid)).lower(), pd.Series([np.nan]*len(info_df.columns), index=info_df.columns)) for sid in data_df['SampleID']]
-    aligned_df = pd.DataFrame(aligned_data)
-    aligned_df.index = data_df.index 
-    return aligned_df
-
-def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min', norm_method='None', log_transform=True, scale_method='Pareto'):
-    numeric_cols = [c for c in df.select_dtypes(include=[np.number]).columns if c not in [group_col, 'SampleID', 'Source_Files']]
-    meta_cols = [c for c in df.columns if c not in numeric_cols]
-    data_df = df[numeric_cols].copy()
-    meta_df = df[meta_cols].copy()
-    
-    data_df = data_df[data_df.isnull().mean()[data_df.isnull().mean() <= missing_thresh].index]
-    
-    if data_df.isnull().sum().sum() > 0:
-        if impute_method == 'min': data_df = data_df.fillna(data_df.min() * 0.5)
-        elif impute_method == 'mean': data_df = data_df.fillna(data_df.mean())
-        elif impute_method == 'KNN': data_df = pd.DataFrame(KNNImputer(n_neighbors=5).fit_transform(data_df), columns=data_df.columns, index=data_df.index)
-        else: data_df = data_df.fillna(0)
-
-    if norm_method == 'Sum': data_df = data_df.div(data_df.sum(axis=1), axis=0) * data_df.sum(axis=1).mean()
-    elif norm_method == 'Median': data_df = data_df.div(data_df.median(axis=1), axis=0) * data_df.median(axis=1).mean()
-    elif norm_method == 'PQN':
-        ref = data_df.median(axis=0); ref[ref <= 0] = 1e-6
-        data_df = data_df.div(data_df.div(ref, axis=1).median(axis=1), axis=0)
-
-    if log_transform: data_df = np.log2(data_df + 1) if (data_df <= 0).any().any() else np.log2(data_df)
-
-    if scale_method != 'None':
-        mean = data_df.mean(); std = data_df.std()
-        if scale_method == 'Auto': data_df = (data_df - mean) / std
-        elif scale_method == 'Pareto': data_df = (data_df - mean) / np.sqrt(std)
-
-    data_df = data_df.loc[:, data_df.var() > 1e-9]
-    return pd.concat([meta_df, data_df], axis=1), data_df.columns.tolist()
-
-# ==============================================================================
-# 🌟 全能通路富集引擎 (Universal Enrichment Engine)
-# ==============================================================================
-def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_source=None):
-    """
-    不管您的 DB 是名字还是 KEGG ID，不管用户输入的是名字还是 ID，全部通吃！
-    """
-    if custom_db_source is not None:
-        try:
-            if hasattr(custom_db_source, 'name'): db = pd.read_csv(custom_db_source)
-            elif isinstance(custom_db_source, str) and os.path.exists(custom_db_source): db = pd.read_csv(custom_db_source)
-            else: return pd.DataFrame()
-        except: return pd.DataFrame()
-    else: return pd.DataFrame()
-    
-    if 'Pathway' not in db.columns or 'Compounds' not in db.columns: return pd.DataFrame()
-    
-    # 工具函数：将一切乱七八糟的命名、别名、ID，统一剥离出“纯净特征池”
-    def get_synonyms(full_name):
-        syns = set()
-        for p in str(full_name).split('|'):
-            for sub_p in p.split(';'):
-                clean_p = re.sub(r'[^a-z0-9]', '', sub_p.lower())
-                if clean_p: syns.add(clean_p)
-        return syns
-
-    # 1. 映射背景代谢物 (背景池构建)
-    bg_syns_list = []
-    for name in background_metabolites:
-        bg_syns_list.append((name, get_synonyms(name)))
-        
-    sig_names = set(sig_metabolites)
-    
-    # 2. 从提供的数据库 (无论是 KEGG 还是 SMPDB) 提取整个宇宙
-    all_db_comps = set()
-    for _, row in db.iterrows():
-        if pd.notna(row['Compounds']):
-            for c in str(row['Compounds']).split(';'):
-                clean_c = re.sub(r'[^a-z0-9]', '', c.lower())
-                if clean_c: all_db_comps.add(clean_c)
-                
-    # 3. 交集对撞，找出现实测到的“真实背景”
-    mapped_bg_names = set()
-    mapped_bg_syns = set()
-    for orig_name, syns in bg_syns_list:
-        intersect = syns.intersection(all_db_comps)
-        if intersect:
-            mapped_bg_names.add(orig_name)
-            mapped_bg_syns.update(intersect)
-            
-    mapped_sig_names = mapped_bg_names.intersection(sig_names)
-    
-    # N: 完全符合金标准的“有效背景数”
-    N = len(mapped_bg_names)
-    K_drawn = len(mapped_sig_names)
-    
-    if N == 0 or K_drawn == 0: return pd.DataFrame()
-    
-    # 4. 执行统计计算
-    results = []
-    for _, row in db.iterrows():
-        pw = row['Pathway']
-        if pd.isna(row['Compounds']): continue
-        
-        # M: 该通路内能在质谱上测到的“有效物质数”
-        pw_comps = set([re.sub(r'[^a-z0-9]', '', str(c).lower()) for c in str(row['Compounds']).split(';')])
-        pw_detectable = pw_comps.intersection(mapped_bg_syns)
-        M = len(pw_detectable)
-        
-        if M == 0: continue
-        
-        # k: 命中的显著物质数
-        hits_orig_names = set()
-        for orig_name in mapped_sig_names:
-            syns = next(s for n, s in bg_syns_list if n == orig_name)
-            if syns.intersection(pw_detectable):
-                hits_orig_names.add(orig_name)
-                
-        k = len(hits_orig_names)
-        if k > 0:
-            p_val = hypergeom.sf(k - 1, N, M, K_drawn)
-            expected = (K_drawn * M) / N
-            enrich_factor = k / expected if expected > 0 else 0
-            results.append({
-                'Pathway': pw, 
-                'Total_in_Pathway': M, 
-                'Hits': k,
-                'P_Value': p_val, 
-                'Enrichment_Factor': enrich_factor,
-                'Hit_Metabolites': ", ".join(list(hits_orig_names))
-            })
-            
-    res_df = pd.DataFrame(results)
-    if not res_df.empty:
-        try:
-            from statsmodels.stats.multitest import multipletests
-            _, fdr, _, _ = multipletests(res_df['P_Value'], method='fdr_bh')
-            res_df['FDR'] = fdr
-        except: res_df['FDR'] = res_df['P_Value']
-        # 为 Plotly 绘图直接预备好 -Log10_P 列
-        res_df['-Log10_P'] = -np.log10(res_df['P_Value'].astype(float) + 1e-300)
-        res_df = res_df.sort_values('P_Value')
-        
-    return res_df
