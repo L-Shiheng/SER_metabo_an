@@ -25,7 +25,6 @@ plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'PingFang SC', '
 plt.rcParams['axes.unicode_minus'] = False
 
 try:
-    # 🌟 绝对防弹版导入：利用括号和垂直排版，免疫一切超长代码换行导致的 SyntaxError
     from data_preprocessing import (
         data_cleaning_pipeline, 
         parse_metdna_file, 
@@ -178,6 +177,10 @@ with st.sidebar:
 # ==========================================
 if start_process:
     st.session_state.qc_report = {}
+    # 清空上次分析的缓存，防止数据重叠
+    if 'analysis_res' in st.session_state:
+        del st.session_state['analysis_res']
+        
     if not uploaded_files: st.error("请先上传数据文件！")
     else:
         progress_bar = st.progress(0); status_text = st.empty()
@@ -295,21 +298,18 @@ if st.session_state.data_loaded and st.session_state.raw_df is not None:
 
 if not st.session_state.data_loaded:
     st.title("🧬 MetaboAnalyst Pro (SIMCA Edition)"); st.info("👈 请在左侧面板上传并处理数据"); st.stop()
-if not submit_button:
-    st.title("✅ 数据准备就绪"); st.dataframe(st.session_state.raw_df.head(50)); st.stop()
 
 # ==========================================
-# 4. 执行分析计算与绘图
+# 4. 执行核心分析计算 (锁定后台保险箱)
 # ==========================================
 if submit_button:
-    if len(sel_grps) != 2: st.error("⚠️ OPLS-DA 必须且只能选择 2 个组进行对比！"); st.stop()
-    
-    pathway_df = pd.DataFrame() 
-    hm_base64 = ""
-    fig_opls = fig_perm = fig_splot = fig_vip = fig_pca = fig_vol = fig_pathway = fig_network = fig_nomogram = None
+    if len(sel_grps) != 2: 
+        st.error("⚠️ OPLS-DA 必须且只能选择 2 个组进行对比！")
+        st.stop()
 
-    with st.spinner("正在运行核心运算引擎与可视化构建..."):
-        raw_df = st.session_state.raw_df; meta = st.session_state.feature_meta
+    with st.spinner("正在运行核心运算引擎与可视化构建，请稍候..."):
+        raw_df = st.session_state.raw_df
+        meta = st.session_state.feature_meta
         
         df_proc, feats = data_cleaning_pipeline(
             raw_df, group_col, missing_thresh=miss_th, 
@@ -345,239 +345,257 @@ if submit_button:
         stats_df['Is_Biomarker'] = (stats_df['VIP'] > 1.0) & (stats_df['P_Value'] < p_th) & (stats_df['Log2_FC'].abs() > fc_th)
         out_df = stats_df[stats_df['Is_Biomarker']].sort_values('VIP', ascending=False)
 
-        st.title("📊 综合代谢组学分析报告")
-        st.markdown(f"**对比**: {case} vs {ctrl} &nbsp;&nbsp;|&nbsp;&nbsp; **模型**: R²Y = `{R2Y:.3f}` &nbsp;&nbsp;|&nbsp;&nbsp; Q² = `{Q2:.3f}`")
-        if b_q2 < 0.05 and Q2 > 0.5: st.success(f"✅ OPLS-DA 模型优秀且未过拟合！ (Q²截距: {b_q2:.3f})")
-        else: st.warning(f"⚠️ 模型可能过拟合，或组间差异不大 (Q²截距: {b_q2:.3f})")
+        # 🎯 预先生成所有图表
+        opls_score_df = pd.DataFrame({'t1 (Predictive)': opls.t, 't_ortho (Orthogonal)': opls.t_ortho, 'Group': df_sub[group_col].values})
+        fig_opls = px.scatter(opls_score_df, x='t1 (Predictive)', y='t_ortho (Orthogonal)', color='Group', symbol='Group', color_discrete_sequence=GROUP_COLORS)
+        for i, g in enumerate(list(sel_grps)):
+            sub_grp = opls_score_df[opls_score_df['Group']==g]
+            if len(sub_grp)>=3:
+                el_x, el_y = get_ellipse_coordinates(sub_grp['t1 (Predictive)'], sub_grp['t_ortho (Orthogonal)'])
+                if el_x is not None: fig_opls.add_trace(go.Scatter(x=el_x, y=el_y, mode='lines', line=dict(color=GROUP_COLORS[i%len(GROUP_COLORS)], width=2, dash='dash'), showlegend=False, hoverinfo='skip'))
+        fig_opls.update_traces(marker=dict(size=14, line=dict(width=1, color='black'), opacity=0.9))
+        fig_opls.add_hline(y=0, line_dash="dash", line_color="gray"); fig_opls.add_vline(x=0, line_dash="dash", line_color="gray")
+        fig_opls = update_layout_square(fig_opls, "OPLS-DA Score Plot", "t [1]", "to [1]")
 
-        tabs = st.tabs(["🎯 OPLS-DA", "🔄 置换检验", "🧬 S-Plot", "📊 VIP", "🌐 PCA", "🌋 火山/热图", "📑 清单", "📏 列线图", "🕸️ 通路富集", "🔗 机制网络图", "📄 导出报告与AI助手"])
-        
-        with tabs[0]:
-            c1, c2 = st.columns([1, 4])
-            with c2:
-                opls_score_df = pd.DataFrame({'t1 (Predictive)': opls.t, 't_ortho (Orthogonal)': opls.t_ortho, 'Group': df_sub[group_col].values})
-                fig_opls = px.scatter(opls_score_df, x='t1 (Predictive)', y='t_ortho (Orthogonal)', color='Group', symbol='Group', color_discrete_sequence=GROUP_COLORS)
-                for i, g in enumerate(list(sel_grps)):
-                    sub = opls_score_df[opls_score_df['Group']==g]
-                    if len(sub)>=3:
-                        el_x, el_y = get_ellipse_coordinates(sub['t1 (Predictive)'], sub['t_ortho (Orthogonal)'])
-                        if el_x is not None: fig_opls.add_trace(go.Scatter(x=el_x, y=el_y, mode='lines', line=dict(color=GROUP_COLORS[i%len(GROUP_COLORS)], width=2, dash='dash'), showlegend=False, hoverinfo='skip'))
-                fig_opls.update_traces(marker=dict(size=14, line=dict(width=1, color='black'), opacity=0.9))
-                fig_opls.add_hline(y=0, line_dash="dash", line_color="gray"); fig_opls.add_vline(x=0, line_dash="dash", line_color="gray")
-                fig_opls = update_layout_square(fig_opls, "OPLS-DA Score Plot", "t [1]", "to [1]")
-                st.plotly_chart(fig_opls)
+        fig_perm = go.Figure()
+        fig_perm.add_trace(go.Scatter(x=corrs, y=r2_perm, mode='markers', name='R2', marker=dict(color='green', symbol='circle-open', size=8)))
+        fig_perm.add_trace(go.Scatter(x=corrs, y=q2_perm, mode='markers', name='Q2', marker=dict(color='blue', symbol='square-open', size=8)))
+        fig_perm.add_trace(go.Scatter(x=[1], y=[R2Y], mode='markers', name='Original R2', marker=dict(color='green', symbol='circle', size=12)))
+        fig_perm.add_trace(go.Scatter(x=[1], y=[Q2], mode='markers', name='Original Q2', marker=dict(color='blue', symbol='square', size=12)))
+        x_line = np.array([0, 1])
+        fig_perm.add_trace(go.Scatter(x=x_line, y=m_r2*x_line + b_r2, mode='lines', name=f'R2 Line (Int: {b_r2:.2f})', line=dict(color='green', dash='dash')))
+        fig_perm.add_trace(go.Scatter(x=x_line, y=m_q2*x_line + b_q2, mode='lines', name=f'Q2 Line (Int: {b_q2:.2f})', line=dict(color='blue', dash='dash')))
+        fig_perm.update_layout(template="simple_white", width=600, height=600, title={'text': "Permutation Test (n=100)", 'y':0.95, 'x':0.5, 'xanchor': 'center'}, xaxis_title="Correlation", yaxis_title="R2 / Q2")
 
-        with tabs[1]:
-            c1, c2 = st.columns([1, 4])
-            with c2:
-                fig_perm = go.Figure()
-                fig_perm.add_trace(go.Scatter(x=corrs, y=r2_perm, mode='markers', name='R2', marker=dict(color='green', symbol='circle-open', size=8)))
-                fig_perm.add_trace(go.Scatter(x=corrs, y=q2_perm, mode='markers', name='Q2', marker=dict(color='blue', symbol='square-open', size=8)))
-                fig_perm.add_trace(go.Scatter(x=[1], y=[R2Y], mode='markers', name='Original R2', marker=dict(color='green', symbol='circle', size=12)))
-                fig_perm.add_trace(go.Scatter(x=[1], y=[Q2], mode='markers', name='Original Q2', marker=dict(color='blue', symbol='square', size=12)))
-                x_line = np.array([0, 1])
-                fig_perm.add_trace(go.Scatter(x=x_line, y=m_r2*x_line + b_r2, mode='lines', name=f'R2 Line (Int: {b_r2:.2f})', line=dict(color='green', dash='dash')))
-                fig_perm.add_trace(go.Scatter(x=x_line, y=m_q2*x_line + b_q2, mode='lines', name=f'Q2 Line (Int: {b_q2:.2f})', line=dict(color='blue', dash='dash')))
-                fig_perm.update_layout(template="simple_white", width=600, height=600, title={'text': "Permutation Test (n=100)", 'y':0.95, 'x':0.5, 'xanchor': 'center'}, xaxis_title="Correlation", yaxis_title="R2 / Q2")
-                st.plotly_chart(fig_perm)
+        splot_df = stats_df.copy()
+        splot_df['Color'] = np.where(splot_df['Is_Biomarker'], 'VIP>1 & P<0.05', 'NS')
+        fig_splot = px.scatter(splot_df, x='Log2_FC', y='p_corr', color='Color', hover_data=['Name', 'VIP'], color_discrete_map={'VIP>1 & P<0.05': '#CD0000', 'NS': '#E0E0E0'})
+        fig_splot.add_hline(y=0.5, line_dash="dash", line_color="gray"); fig_splot.add_hline(y=-0.5, line_dash="dash", line_color="gray")
+        fig_splot = update_layout_square(fig_splot, "S-Plot", "Log2 Fold Change", "p(corr)")
 
-        with tabs[2]:
-            c1, c2 = st.columns([1, 4])
-            with c2:
-                splot_df = stats_df.copy()
-                splot_df['Color'] = np.where(splot_df['Is_Biomarker'], 'VIP>1 & P<0.05', 'NS')
-                fig_splot = px.scatter(splot_df, x='Log2_FC', y='p_corr', color='Color', hover_data=['Name', 'VIP'], color_discrete_map={'VIP>1 & P<0.05': '#CD0000', 'NS': '#E0E0E0'})
-                fig_splot.add_hline(y=0.5, line_dash="dash", line_color="gray"); fig_splot.add_hline(y=-0.5, line_dash="dash", line_color="gray")
-                fig_splot = update_layout_square(fig_splot, "S-Plot", "Log2 Fold Change", "p(corr)")
-                st.plotly_chart(fig_splot)
+        top_vip_df = stats_df.sort_values('VIP', ascending=True).tail(vip_show_num)
+        fig_vip = px.bar(top_vip_df, x="VIP", y="Name", orientation='h', color="VIP", color_continuous_scale="RdBu_r")
+        fig_vip.add_vline(x=1.0, line_dash="dash", line_color="black")
+        fig_vip.update_layout(template="simple_white", width=800, height=700, title={'text': f"Top {vip_show_num} VIP Scores", 'x':0.5, 'xanchor': 'center'}, coloraxis_showscale=False)
 
-        with tabs[3]:
-            c1, c2 = st.columns([1, 6])
-            with c2:
-                top_vip_df = stats_df.sort_values('VIP', ascending=True).tail(vip_show_num)
-                fig_vip = px.bar(top_vip_df, x="VIP", y="Name", orientation='h', color="VIP", color_continuous_scale="RdBu_r")
-                fig_vip.add_vline(x=1.0, line_dash="dash", line_color="black")
-                fig_vip.update_layout(template="simple_white", width=800, height=700, title={'text': f"Top {vip_show_num} VIP Scores", 'x':0.5, 'xanchor': 'center'}, coloraxis_showscale=False)
-                st.plotly_chart(fig_vip)
+        fig_pca = None
+        if len(df_sub) >= 3:
+            X_scaled = StandardScaler().fit_transform(df_sub[feats])
+            pca = PCA(n_components=2).fit(X_scaled); pcs = pca.transform(X_scaled); var = pca.explained_variance_ratio_
+            pca_df = pd.DataFrame({'PC1': pcs[:,0], 'PC2': pcs[:,1], 'Group': df_sub[group_col].values, 'SampleID': df_sub['SampleID']})
+            fig_pca = px.scatter(pca_df, x='PC1', y='PC2', color='Group', symbol='Group', hover_data=['SampleID'], color_discrete_sequence=GROUP_COLORS)
+            el_x, el_y = get_ellipse_coordinates(pca_df['PC1'], pca_df['PC2'])
+            if el_x is not None: fig_pca.add_trace(go.Scatter(x=el_x, y=el_y, mode='lines', line=dict(color='black', width=1, dash='dot'), name='95% Hotelling T2'))
+            fig_pca.update_traces(marker=dict(size=14, line=dict(width=1, color='black'), opacity=0.9))
+            fig_pca = update_layout_square(fig_pca, "PCA (QC Check)", f"PC1 ({var[0]:.1%})", f"PC2 ({var[1]:.1%})")
 
-        with tabs[4]:
-            c1, c2 = st.columns([1, 4])
-            with c2:
-                if len(df_sub)<3: st.warning("样本不足")
-                else:
-                    X_scaled = StandardScaler().fit_transform(df_sub[feats])
-                    pca = PCA(n_components=2).fit(X_scaled); pcs = pca.transform(X_scaled); var = pca.explained_variance_ratio_
-                    pca_df = pd.DataFrame({'PC1': pcs[:,0], 'PC2': pcs[:,1], 'Group': df_sub[group_col].values, 'SampleID': df_sub['SampleID']})
-                    fig_pca = px.scatter(pca_df, x='PC1', y='PC2', color='Group', symbol='Group', hover_data=['SampleID'], color_discrete_sequence=GROUP_COLORS)
-                    el_x, el_y = get_ellipse_coordinates(pca_df['PC1'], pca_df['PC2'])
-                    if el_x is not None: fig_pca.add_trace(go.Scatter(x=el_x, y=el_y, mode='lines', line=dict(color='black', width=1, dash='dot'), name='95% Hotelling T2'))
-                    fig_pca.update_traces(marker=dict(size=14, line=dict(width=1, color='black'), opacity=0.9))
-                    fig_pca = update_layout_square(fig_pca, "PCA (QC Check)", f"PC1 ({var[0]:.1%})", f"PC2 ({var[1]:.1%})")
-                    st.plotly_chart(fig_pca)
+        fig_vol = px.scatter(stats_df, x="Log2_FC", y="-Log10_P", color="Sig", color_discrete_map=COLOR_PALETTE, hover_data=['Name', 'VIP'])
+        fig_vol.add_hline(y=-np.log10(p_th), line_dash="dash", line_color="gray")
+        fig_vol.add_vline(x=fc_th, line_dash="dash", line_color="gray"); fig_vol.add_vline(x=-fc_th, line_dash="dash", line_color="gray")
+        fig_vol = update_layout_square(fig_vol, "Volcano Plot", "Log2 Fold Change", "-Log10(P-value)")
 
-        with tabs[5]:
-            c1, c2 = st.columns(2)
-            with c1:
-                fig_vol = px.scatter(stats_df, x="Log2_FC", y="-Log10_P", color="Sig", color_discrete_map=COLOR_PALETTE, hover_data=['Name', 'VIP'])
-                fig_vol.add_hline(y=-np.log10(p_th), line_dash="dash", line_color="gray")
-                fig_vol.add_vline(x=fc_th, line_dash="dash", line_color="gray"); fig_vol.add_vline(x=-fc_th, line_dash="dash", line_color="gray")
-                fig_vol = update_layout_square(fig_vol, "Volcano Plot", "Log2 Fold Change", "-Log10(P-value)")
-                st.plotly_chart(fig_vol, use_container_width=True)
-            with c2:
-                sig_mets = out_df['Metabolite'].tolist()
-                if not sig_mets: st.info("无满足要求的差异代谢物")
-                else:
-                    hm_feats = out_df.head(50)['Metabolite'].tolist()
-                    hm_data = df_sub.set_index(group_col)[hm_feats].T
-                    hm_data.index = [meta.loc[f, 'Clean_Name'] if (meta is not None and f in meta.index) else f for f in hm_data.index]
-                    lut = {g: GROUP_COLORS[i%len(GROUP_COLORS)] for i, g in enumerate(df_sub[group_col].unique())}; col_colors = df_sub[group_col].map(lut)
-                    try:
-                        g = sns.clustermap(hm_data.astype(float), z_score=0, cmap="vlag", center=0, col_colors=col_colors, figsize=(8, 8))
-                        g.ax_heatmap.set_xlabel(""); g.ax_heatmap.set_ylabel("")
-                        st.pyplot(g.fig)
-                        buf = io.BytesIO(); g.savefig(buf, format='png', bbox_inches='tight'); buf.seek(0); hm_base64 = base64.b64encode(buf.read()).decode('utf-8')
-                    except Exception as e: st.warning(f"热图生成失败: {e}")
+        hm_fig, hm_base64 = None, ""
+        sig_mets = out_df['Metabolite'].tolist()
+        if sig_mets:
+            hm_feats = out_df.head(50)['Metabolite'].tolist()
+            hm_data = df_sub.set_index(group_col)[hm_feats].T
+            hm_data.index = [meta.loc[f, 'Clean_Name'] if (meta is not None and f in meta.index) else f for f in hm_data.index]
+            lut = {g: GROUP_COLORS[i%len(GROUP_COLORS)] for i, g in enumerate(df_sub[group_col].unique())}
+            col_colors = df_sub[group_col].map(lut)
+            try:
+                g = sns.clustermap(hm_data.astype(float), z_score=0, cmap="vlag", center=0, col_colors=col_colors, figsize=(8, 8))
+                g.ax_heatmap.set_xlabel(""); g.ax_heatmap.set_ylabel("")
+                hm_fig = g.fig
+                buf = io.BytesIO(); g.savefig(buf, format='png', bbox_inches='tight'); buf.seek(0); hm_base64 = base64.b64encode(buf.read()).decode('utf-8')
+            except Exception as e: pass
 
-        with tabs[6]:
-            st.markdown("### 🏆 生物标志物清单")
-            disp_cols = ['Name', 'Log2_FC', 'P_Value', 'FDR', 'VIP', 'p_corr']
-            st.dataframe(out_df[disp_cols].style.format({"Log2_FC":"{:.2f}", "P_Value":"{:.3e}", "FDR":"{:.3e}", "VIP":"{:.2f}", "p_corr":"{:.2f}"}).background_gradient(subset=['VIP'], cmap="Reds"), use_container_width=True)
+        fig_nomogram = None
+        if len(out_df) >= 2:
+            top_n = min(nomo_num, len(out_df))
+            nomo_feats = out_df.head(top_n)['Metabolite'].tolist()
+            nomo_names = out_df.head(top_n)['Name'].tolist()
+            try:
+                fig_nomogram = plot_nomogram(df_sub, nomo_feats, nomo_names, group_col, case)
+            except: pass
 
-        with tabs[7]:
-            st.markdown("### 📏 临床诊断列线图 (Diagnostic Nomogram)")
-            st.caption(f"基于 Logistic 回归模型构建的列线图。系统自动提取 Top {nomo_num} 差异标志物构建风险预测模型。")
-            if len(out_df) < 2:
-                st.warning("⚠️ 显著差异代谢物不足 2 个，无法构建列线图回归模型。")
-            else:
-                c1, c2 = st.columns([1, 6])
-                with c2:
-                    top_n = min(nomo_num, len(out_df))
-                    nomo_feats = out_df.head(top_n)['Metabolite'].tolist()
-                    nomo_names = out_df.head(top_n)['Name'].tolist()
-                    try:
-                        fig_nomogram = plot_nomogram(df_sub, nomo_feats, nomo_names, group_col, case)
-                        if fig_nomogram is not None:
-                            st.plotly_chart(fig_nomogram)
-                        else:
-                            st.error("构建列线图失败，请检查样本的组别分布。")
-                    except Exception as e:
-                        st.warning(f"由于数据极端分布或特征高度共线性，列线图模型无法收敛。错误详情：{str(e)}")
-
-        with tabs[8]:
-            st.markdown("### 🕸️ 代谢通路富集 (万能自适应引擎)")
-            c1, c2 = st.columns([1, 6])
-            with c2:
-                sig_mets_fullnames = stats_df[stats_df['Is_Biomarker']]['Search_Name'].tolist()
-                all_mets_fullnames = stats_df['Search_Name'].tolist()
-                
-                if not sig_mets_fullnames: st.info("⚠️ 无显著差异标志物，无法进行通路富集。")
-                else:
-                    with st.spinner("正在映射数据库并进行自动背景裁剪..."):
-                        db_source = custom_pathway_file if custom_pathway_file else db_filename
-                        pathway_df = run_pathway_enrichment(sig_mets_fullnames, all_mets_fullnames, custom_db_source=db_source)
-                            
-                        if pathway_df.empty: st.warning("未能匹配到通路，请检查是否选择了正确的物种库。")
-                        else:
-                            if '-Log10_P' not in pathway_df.columns:
-                                pathway_df['-Log10_P'] = -np.log10(pathway_df['P_Value'].astype(float).clip(lower=1e-10))
-                                
-                            plot_pw_df = pathway_df[pathway_df['Hits'] > 0].head(pw_show_num)
-                            fig_pathway = px.scatter(
-                                plot_pw_df, x='Enrichment_Factor', y='-Log10_P', size='Hits', color='P_Value',
-                                hover_name='Pathway', hover_data={'Hit_Metabolites': True, 'P_Value': ':.4f', 'Enrichment_Factor': ':.2f'},
-                                color_continuous_scale='Reds_r', size_max=40
-                            )
-                            fig_pathway.update_traces(marker=dict(line=dict(width=1, color='black'), opacity=0.6))
-                            fig_pathway.update_layout(
-                                template="simple_white", width=800, height=600,
-                                title={'text': "Pathway Enrichment Bubble Plot", 'y':0.95, 'x':0.5, 'xanchor': 'center'},
-                                xaxis_title="Enrichment Factor", yaxis_title="-Log10(P-value)", coloraxis_colorbar=dict(title="P-value")
-                            )
-                            fig_pathway.add_hline(y=-np.log10(0.05), line_dash="dash", line_color="gray")
-                            st.plotly_chart(fig_pathway)
-                            st.dataframe(pathway_df.drop(columns=['-Log10_P']).style.format({"P_Value":"{:.3e}", "FDR":"{:.3e}", "Enrichment_Factor":"{:.2f}"}).background_gradient(subset=['P_Value'], cmap="Reds_r", vmin=0, vmax=0.05), use_container_width=True)
-
-        with tabs[9]:
-            st.markdown("### 🔗 代谢重编程机制网络 (Pathway-Metabolite Network)")
-            st.caption("展示显著富集通路（P < 0.05）与核心标志物的相互关联。")
-            if pathway_df.empty or out_df.empty: st.info("需要产生显著通路和差异代谢物才能构建网络。")
-            else:
-                sig_pws = pathway_df[pathway_df['P_Value'] < 0.05].head(pw_show_num)
-                if sig_pws.empty: st.info("当前组别对比下没有 P < 0.05 的显著通路，无法绘制网络。")
-                else:
-                    G = nx.Graph()
-                    robust_keys = out_df['Search_Name'].apply(lambda x: str(x).split(';')[0].strip())
-                    fc_dict = dict(zip(robust_keys, out_df['Log2_FC']))
-                    vip_dict = dict(zip(robust_keys, out_df['VIP']))
-                    disp_name_dict = dict(zip(robust_keys, out_df['Name']))
-                    
-                    for _, row in sig_pws.iterrows():
-                        pw_name = row['Pathway']
-                        G.add_node(pw_name, node_type='pathway', size=max(15, -np.log10(row['P_Value']) * 10))
-                        hits_str = row['Hit_Metabolites']
-                        if pd.notna(hits_str) and str(hits_str).strip() != "":
-                            for hit in [m.strip() for m in hits_str.split(',')]:
-                                if hit in fc_dict:
-                                    G.add_node(hit, node_type='metabolite', size=max(10, vip_dict.get(hit, 1.0) * 8), fc=fc_dict[hit], disp_name=disp_name_dict.get(hit, hit))
-                                    G.add_edge(pw_name, hit)
-
-                    if len(G.nodes) > 0:
-                        pos = nx.spring_layout(G, k=0.7, iterations=50, seed=42)
-                        edge_x, edge_y = [], []
-                        for edge in G.edges():
-                            x0, y0 = pos[edge[0]]; x1, y1 = pos[edge[1]]
-                            edge_x.extend([x0, x1, None]); edge_y.extend([y0, y1, None])
-                        edge_trace = go.Scatter(x=edge_x, y=edge_y, line=dict(width=1, color='#888'), hoverinfo='none', mode='lines')
-                        
-                        node_x, node_y, node_text, node_color, node_size, node_symbol = [], [], [], [], [], []
-                        for node in G.nodes():
-                            x, y = pos[node]
-                            node_x.append(x); node_y.append(y)
-                            node_info = G.nodes[node]
-                            if node_info['node_type'] == 'pathway':
-                                node_color.append('#FFD700'); node_size.append(node_info['size']); node_symbol.append('square')
-                                node_text.append(f"<b>[Pathway]</b><br>{node}")
-                            else:
-                                fc = node_info['fc']
-                                disp_name = node_info.get('disp_name', node).split(' | ')[0]
-                                node_color.append('#CD0000' if fc > 0 else '#00008B')
-                                node_size.append(node_info['size']); node_symbol.append('circle')
-                                node_text.append(f"<b>{disp_name}</b><br>Log2FC: {fc:.2f}")
-
-                        node_trace = go.Scatter(
-                            x=node_x, y=node_y, mode='markers+text',
-                            hoverinfo='text', text=[G.nodes[n].get('disp_name', n).split(' | ')[0] if G.nodes[n]['node_type']=='metabolite' else '' for n in G.nodes()], 
-                            textposition="top center", hovertext=node_text,
-                            marker=dict(symbol=node_symbol, showscale=False, color=node_color, size=node_size, line_width=1, line_color='black')
-                        )
-                        fig_network = go.Figure(data=[edge_trace, node_trace])
-                        fig_network.update_layout(
-                            title={'text': "Metabolic Reprogramming Mechanism Network", 'y':0.95, 'x':0.5, 'xanchor': 'center'},
-                            showlegend=False, hovermode='closest', margin=dict(b=20,l=5,r=5,t=40),
-                            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                            width=900, height=700, plot_bgcolor='white'
-                        )
-                        st.plotly_chart(fig_network)
-                    else:
-                        st.warning("⚠️ 没有找到通路和代谢物之间的有效映射关联，无法绘图。")
-
-        with tabs[10]:
-            st.markdown("### 📄 报告生成中心")
-            c_rep1, c_rep2 = st.columns(2)
-            
-            with c_rep1:
-                st.markdown("#### 👨‍🔬 1. 完整可视化报告下载 (HTML)")
-                html_report = generate_offline_html(
-                    case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, Q2, b_q2,
-                    out_df, pathway_df, fig_opls, fig_perm, fig_splot, fig_vol, fig_pca, 
-                    hm_base64, fig_nomogram, fig_pathway, fig_network, 
-                    vip_show_num, pw_show_num, nomo_num
+        pathway_df = pd.DataFrame()
+        fig_pathway = None
+        sig_mets_fullnames = stats_df[stats_df['Is_Biomarker']]['Search_Name'].tolist()
+        all_mets_fullnames = stats_df['Search_Name'].tolist()
+        if sig_mets_fullnames:
+            db_source = custom_pathway_file if custom_pathway_file else db_filename
+            pathway_df = run_pathway_enrichment(sig_mets_fullnames, all_mets_fullnames, custom_db_source=db_source)
+            if not pathway_df.empty:
+                if '-Log10_P' not in pathway_df.columns:
+                    pathway_df['-Log10_P'] = -np.log10(pathway_df['P_Value'].astype(float).clip(lower=1e-10))
+                plot_pw_df = pathway_df[pathway_df['Hits'] > 0].head(pw_show_num)
+                fig_pathway = px.scatter(
+                    plot_pw_df, x='Enrichment_Factor', y='-Log10_P', size='Hits', color='P_Value',
+                    hover_name='Pathway', hover_data={'Hit_Metabolites': True, 'P_Value': ':.4f', 'Enrichment_Factor': ':.2f'},
+                    color_continuous_scale='Reds_r', size_max=40
                 )
-                st.download_button("📥 下载完整交互式网页报告 (.html)", html_report.encode('utf-8'), f"Metabolomics_Report_{case}_vs_{ctrl}.html", "text/html", type="primary")
+                fig_pathway.update_traces(marker=dict(line=dict(width=1, color='black'), opacity=0.6))
+                fig_pathway.update_layout(
+                    template="simple_white", width=800, height=600,
+                    title={'text': "Pathway Enrichment Bubble Plot", 'y':0.95, 'x':0.5, 'xanchor': 'center'},
+                    xaxis_title="Enrichment Factor", yaxis_title="-Log10(P-value)", coloraxis_colorbar=dict(title="P-value")
+                )
+                fig_pathway.add_hline(y=-np.log10(0.05), line_dash="dash", line_color="gray")
 
-            with c_rep2:
-                st.markdown("#### 🤖 2. AI 撰稿专属 Prompt")
-                prompt_md = generate_ai_prompt(case, ctrl, norm_m, scale_m, R2Y, Q2, b_q2, p_th, fc_th, out_df, pathway_df)
-                st.text_area("拷贝此文本发送给 AI:", value=prompt_md, height=250)
-                st.download_button("📥 下载 Prompt 文件 (.md)", prompt_md.encode('utf-8'), f"AI_Prompt_{case}_vs_{ctrl}.md", "text/markdown")
+        fig_network = None
+        if not pathway_df.empty and not out_df.empty:
+            sig_pws = pathway_df[pathway_df['P_Value'] < 0.05].head(pw_show_num)
+            if not sig_pws.empty:
+                G = nx.Graph()
+                robust_keys = out_df['Search_Name'].apply(lambda x: str(x).split(';')[0].strip())
+                fc_dict = dict(zip(robust_keys, out_df['Log2_FC']))
+                vip_dict = dict(zip(robust_keys, out_df['VIP']))
+                disp_name_dict = dict(zip(robust_keys, out_df['Name']))
+                for _, row in sig_pws.iterrows():
+                    pw_name = row['Pathway']
+                    G.add_node(pw_name, node_type='pathway', size=max(15, -np.log10(row['P_Value']) * 10))
+                    hits_str = row['Hit_Metabolites']
+                    if pd.notna(hits_str) and str(hits_str).strip() != "":
+                        for hit in [m.strip() for m in hits_str.split(',')]:
+                            if hit in fc_dict:
+                                G.add_node(hit, node_type='metabolite', size=max(10, vip_dict.get(hit, 1.0) * 8), fc=fc_dict[hit], disp_name=disp_name_dict.get(hit, hit))
+                                G.add_edge(pw_name, hit)
+                if len(G.nodes) > 0:
+                    pos = nx.spring_layout(G, k=0.7, iterations=50, seed=42)
+                    edge_x, edge_y = [], []
+                    for edge in G.edges():
+                        x0, y0 = pos[edge[0]]; x1, y1 = pos[edge[1]]
+                        edge_x.extend([x0, x1, None]); edge_y.extend([y0, y1, None])
+                    edge_trace = go.Scatter(x=edge_x, y=edge_y, line=dict(width=1, color='#888'), hoverinfo='none', mode='lines')
+                    node_x, node_y, node_text, node_color, node_size, node_symbol = [], [], [], [], [], []
+                    for node in G.nodes():
+                        x, y = pos[node]
+                        node_x.append(x); node_y.append(y)
+                        node_info = G.nodes[node]
+                        if node_info['node_type'] == 'pathway':
+                            node_color.append('#FFD700'); node_size.append(node_info['size']); node_symbol.append('square')
+                            node_text.append(f"<b>[Pathway]</b><br>{node}")
+                        else:
+                            fc = node_info['fc']
+                            disp_name = node_info.get('disp_name', node).split(' | ')[0]
+                            node_color.append('#CD0000' if fc > 0 else '#00008B')
+                            node_size.append(node_info['size']); node_symbol.append('circle')
+                            node_text.append(f"<b>{disp_name}</b><br>Log2FC: {fc:.2f}")
+                    node_trace = go.Scatter(
+                        x=node_x, y=node_y, mode='markers+text',
+                        hoverinfo='text', text=[G.nodes[n].get('disp_name', n).split(' | ')[0] if G.nodes[n]['node_type']=='metabolite' else '' for n in G.nodes()], 
+                        textposition="top center", hovertext=node_text,
+                        marker=dict(symbol=node_symbol, showscale=False, color=node_color, size=node_size, line_width=1, line_color='black')
+                    )
+                    fig_network = go.Figure(data=[edge_trace, node_trace])
+                    fig_network.update_layout(
+                        title={'text': "Metabolic Reprogramming Mechanism Network", 'y':0.95, 'x':0.5, 'xanchor': 'center'},
+                        showlegend=False, hovermode='closest', margin=dict(b=20,l=5,r=5,t=40),
+                        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                        width=900, height=700, plot_bgcolor='white'
+                    )
+
+        html_report = generate_offline_html(
+            case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, Q2, b_q2,
+            out_df, pathway_df, fig_opls, fig_perm, fig_splot, fig_vol, fig_pca, 
+            hm_base64, fig_nomogram, fig_pathway, fig_network, 
+            vip_show_num, pw_show_num, nomo_num
+        )
+        prompt_md = generate_ai_prompt(case, ctrl, norm_m, scale_m, R2Y, Q2, b_q2, p_th, fc_th, out_df, pathway_df)
+
+        # 📦 结果存入保险箱！
+        st.session_state['analysis_res'] = {
+            'case': case, 'ctrl': ctrl, 'R2Y': R2Y, 'Q2': Q2, 'b_q2': b_q2,
+            'fig_opls': fig_opls, 'fig_perm': fig_perm, 'fig_splot': fig_splot,
+            'fig_vip': fig_vip, 'fig_pca': fig_pca, 'fig_vol': fig_vol,
+            'hm_fig': hm_fig, 'out_df': out_df, 'pathway_df': pathway_df,
+            'fig_nomogram': fig_nomogram, 'fig_pathway': fig_pathway, 'fig_network': fig_network,
+            'html_report': html_report, 'prompt_md': prompt_md
+        }
+
+# ==========================================
+# 5. UI 展示层 (无论怎么点击下载，永远从保险箱中取数据呈现，绝不重置！)
+# ==========================================
+if 'analysis_res' in st.session_state:
+    res = st.session_state['analysis_res']
+    
+    st.title("📊 综合代谢组学分析报告")
+    st.markdown(f"**对比**: {res['case']} vs {res['ctrl']} &nbsp;&nbsp;|&nbsp;&nbsp; **模型**: R²Y = `{res['R2Y']:.3f}` &nbsp;&nbsp;|&nbsp;&nbsp; Q² = `{res['Q2']:.3f}`")
+    if res['b_q2'] < 0.05 and res['Q2'] > 0.5: st.success(f"✅ OPLS-DA 模型优秀且未过拟合！ (Q²截距: {res['b_q2']:.3f})")
+    else: st.warning(f"⚠️ 模型可能过拟合，或组间差异不大 (Q²截距: {res['b_q2']:.3f})")
+
+    tabs = st.tabs(["🎯 OPLS-DA", "🔄 置换检验", "🧬 S-Plot", "📊 VIP", "🌐 PCA", "🌋 火山/热图", "📑 清单", "📏 列线图", "🕸️ 通路富集", "🔗 机制网络图", "📄 导出报告与AI助手"])
+    
+    with tabs[0]:
+        c1, c2 = st.columns([1, 4])
+        with c2: st.plotly_chart(res['fig_opls'])
+        
+    with tabs[1]:
+        c1, c2 = st.columns([1, 4])
+        with c2: st.plotly_chart(res['fig_perm'])
+        
+    with tabs[2]:
+        c1, c2 = st.columns([1, 4])
+        with c2: st.plotly_chart(res['fig_splot'])
+        
+    with tabs[3]:
+        c1, c2 = st.columns([1, 6])
+        with c2: st.plotly_chart(res['fig_vip'])
+        
+    with tabs[4]:
+        c1, c2 = st.columns([1, 4])
+        with c2:
+            if res['fig_pca'] is not None: st.plotly_chart(res['fig_pca'])
+            else: st.warning("样本不足")
+            
+    with tabs[5]:
+        c1, c2 = st.columns(2)
+        with c1: st.plotly_chart(res['fig_vol'], use_container_width=True)
+        with c2:
+            if res['hm_fig'] is not None: st.pyplot(res['hm_fig'])
+            elif len(res['out_df']) == 0: st.info("无满足要求的差异代谢物")
+            else: st.warning("热图生成失败")
+            
+    with tabs[6]:
+        st.markdown("### 🏆 生物标志物清单")
+        disp_cols = ['Name', 'Log2_FC', 'P_Value', 'FDR', 'VIP', 'p_corr']
+        st.dataframe(res['out_df'][disp_cols].style.format({"Log2_FC":"{:.2f}", "P_Value":"{:.3e}", "FDR":"{:.3e}", "VIP":"{:.2f}", "p_corr":"{:.2f}"}).background_gradient(subset=['VIP'], cmap="Reds"), use_container_width=True)
+        
+    with tabs[7]:
+        st.markdown("### 📏 临床诊断列线图 (Diagnostic Nomogram)")
+        st.caption("基于 Logistic 回归模型构建的列线图。系统自动提取 Top 差异标志物构建风险预测模型。")
+        if len(res['out_df']) < 2: st.warning("⚠️ 显著差异代谢物不足 2 个，无法构建列线图回归模型。")
+        else:
+            c1, c2 = st.columns([1, 6])
+            with c2:
+                if res['fig_nomogram'] is not None: st.plotly_chart(res['fig_nomogram'])
+                else: st.error("构建列线图失败，请检查样本的组别分布。")
+                
+    with tabs[8]:
+        st.markdown("### 🕸️ 代谢通路富集 (万能自适应引擎)")
+        c1, c2 = st.columns([1, 6])
+        with c2:
+            if res['pathway_df'].empty: st.warning("未能匹配到通路，请检查是否选择了正确的物种库，或无显著差异标志物。")
+            else:
+                if res['fig_pathway'] is not None: st.plotly_chart(res['fig_pathway'])
+                st.dataframe(res['pathway_df'].drop(columns=['-Log10_P'], errors='ignore').style.format({"P_Value":"{:.3e}", "FDR":"{:.3e}", "Enrichment_Factor":"{:.2f}"}).background_gradient(subset=['P_Value'], cmap="Reds_r", vmin=0, vmax=0.05), use_container_width=True)
+                
+    with tabs[9]:
+        st.markdown("### 🔗 代谢重编程机制网络 (Pathway-Metabolite Network)")
+        st.caption("展示显著富集通路（P < 0.05）与核心标志物的相互关联。")
+        if res['pathway_df'].empty or res['out_df'].empty: st.info("需要产生显著通路和差异代谢物才能构建网络。")
+        else:
+            if res['fig_network'] is not None: st.plotly_chart(res['fig_network'])
+            else: st.warning("⚠️ 没有找到通路和代谢物之间的有效映射关联或无显著通路，无法绘图。")
+            
+    with tabs[10]:
+        st.markdown("### 📄 报告生成中心")
+        c_rep1, c_rep2 = st.columns(2)
+        with c_rep1:
+            st.markdown("#### 👨‍🔬 1. 完整可视化报告下载 (HTML)")
+            st.download_button("📥 下载完整交互式网页报告 (.html)", res['html_report'].encode('utf-8'), f"Metabolomics_Report_{res['case']}_vs_{res['ctrl']}.html", "text/html", type="primary")
+        with c_rep2:
+            st.markdown("#### 🤖 2. AI 撰稿专属 Prompt")
+            st.text_area("拷贝此文本发送给 AI:", value=res['prompt_md'], height=250)
+            st.download_button("📥 下载 Prompt 文件 (.md)", res['prompt_md'].encode('utf-8'), f"AI_Prompt_{res['case']}_vs_{res['ctrl']}.md", "text/markdown")
