@@ -25,7 +25,7 @@ plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'PingFang SC', '
 plt.rcParams['axes.unicode_minus'] = False
 
 try:
-    from data_preprocessing import data_cleaning_pipeline, parse_metdna_file, parse_manual_targeted_files, merge_multiple_dfs, align_sample_info, OPLS_DA, run_pathway_enrichment
+    from data_preprocessing import data_cleaning_pipeline, parse_metdna_file, parse_manual_targeted_files, merge_multiple_dfs, align_sample_info, OPLS_DA, run_pathway_enrichment, build_kegg_dictionary
     from stats_utils import run_pairwise_statistics
     from plot_utils import update_layout_square, get_ellipse_coordinates, plot_nomogram
     from report_generator import generate_offline_html, generate_ai_prompt
@@ -95,7 +95,6 @@ with st.sidebar:
             serrf_ready = True
         else: st.warning("⚠️ 需上传 Info 表")
 
-    # 🌟 恢复：在线同步 KEGG 与自定义通路数据库模块
     st.markdown("#### 4. 通路数据库")
     custom_pathway_file = st.file_uploader("手动上传通路库 (可选)", type=["csv", "gmt"], key="pathway_db")
     
@@ -130,12 +129,12 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"❌ 网络请求失败，请检查网络或稍后再试。错误: {str(e)}")
     
-    # 🌟 双引擎数据上传源选择
     st.markdown("#### 5. 上传代谢组学数据")
     data_source = st.radio("选择数据格式:", ["MetDNA 原始结果", "手动 MRM 靶向宽表"], index=0)
     
     metric_suffix = " : 面积 "
     mode_regex = r'-(P|N|RP-P|RP-N|HILIC-P|HILIC-N|POS|NEG)-'
+    dict_files = None
     
     if data_source == "手动 MRM 靶向宽表":
         st.info("💡 系统将自动合并文件、提取面积、智能过滤 0 值并对齐样本名。")
@@ -143,10 +142,16 @@ with st.sidebar:
         metric_suffix = c1.text_input("提取指标", value=" : 面积 ")
         mode_regex = c2.text_input("模式清洗正则", value=mode_regex)
         feature_scope = "全部特征" 
+        
+        # 🌟 超级字典接口：挂载 MetDNA 作为背景知识库
+        st.markdown("##### 📚 关联 MetDNA 字典 (强推)")
+        st.caption("把对应的 MetDNA 原始结果表格拖进此处，系统将自动抽提 KEGG ID 为您的手动表赋能，彻底激活通路富集！")
+        dict_files = st.file_uploader("上传 MetDNA 字典表 (支持同时传多个)", type=["csv", "xlsx"], accept_multiple_files=True, key="dict_files")
+        
     else:
         feature_scope = st.radio("特征范围", ["仅已注释特征", "全部特征"], index=0)
         
-    uploaded_files = st.file_uploader("支持多文件合并", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
+    uploaded_files = st.file_uploader("上传主分析数据表 (支持多文件合并)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
     st.markdown("---")
     start_process = st.container().button("📥 开始清洗并加载数据", use_container_width=True, type="primary")
 
@@ -159,10 +164,17 @@ if start_process:
     else:
         progress_bar = st.progress(0); status_text = st.empty()
         
-        # 🟢 分支一：手动靶向宽表
+        # 🟢 分支一：手动靶向宽表 (携带超级字典)
         if data_source == "手动 MRM 靶向宽表":
-            with st.spinner("正在融合并去重靶向数据 (取最高响应值)..."):
-                df_t, meta, err = parse_manual_targeted_files(uploaded_files, metric_suffix, mode_regex)
+            with st.spinner("正在融合靶向数据并自动查阅 KEGG 字典桥接..."):
+                
+                # 1. 炼丹：提取超级字典
+                ext_dict = build_kegg_dictionary(dict_files) if dict_files else {}
+                if ext_dict: st.toast(f"✅ 成功从 MetDNA 中提取到 {len(ext_dict)} 个 KEGG ID 映射！")
+                
+                # 2. 解析主文件，传入手头的字典
+                df_t, meta, err = parse_manual_targeted_files(uploaded_files, metric_suffix, mode_regex, external_kegg_dict=ext_dict)
+                
                 if err: 
                     st.error(err)
                 else:
@@ -180,7 +192,7 @@ if start_process:
                     st.session_state.raw_df = df_t
                     st.session_state.feature_meta = meta
                     st.session_state.data_loaded = True
-                    st.success("✅ 手动靶向数据清洗与融合完成！")
+                    st.success("✅ 手动靶向数据融合完成，并已成功关联后台词典！")
                     st.rerun()
 
         # 🟢 分支二：MetDNA 原始数据
