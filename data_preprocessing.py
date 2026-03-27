@@ -8,10 +8,10 @@ from scipy import stats
 import statsmodels.stats.multitest
 
 # ==========================================
-# 0. 超级大字典构建引擎 (NEW!)
+# 0. 超级大字典构建引擎 (🌟 增强了抗干扰与大小写兼容)
 # ==========================================
 def build_kegg_dictionary(dict_files):
-    """提取 4 个 MetDNA 文件中的名称与 KEGG ID，构建超级全局字典"""
+    """提取 MetDNA 文件中的名称与 KEGG ID，构建抗干扰的超级全局字典"""
     kegg_mapping = {}
     if not dict_files: return kegg_mapping
     for file in dict_files:
@@ -19,22 +19,26 @@ def build_kegg_dictionary(dict_files):
             file.seek(0)
             if file.name.endswith('.csv'):
                 try: df = pd.read_csv(file, engine='pyarrow')
-                except: file.seek(0); df = pd.read_csv(file)
+                except: file.seek(0); df = pd.read_csv(file, low_memory=False)
             else: df = pd.read_excel(file)
             
-            name_col = 'name' if 'name' in df.columns else df.columns[0]
+            # 智能嗅探名字列和 KEGG 列
+            name_col = next((c for c in df.columns if str(c).lower() in ['name', 'metabolite', 'peak_name', '化合物名称']), df.columns[0])
             kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
             
             if kegg_col:
                 for _, row in df.iterrows():
                     n = str(row[name_col]).strip()
                     k = str(row[kegg_col]).strip()
-                    if n and k and k.lower() != 'nan':
-                        # 同时存入全名和截断名，确保 100% 匹配命中率
-                        clean_n = n.split(';')[0].strip()
-                        kegg_mapping[n] = k
-                        kegg_mapping[clean_n] = k
-        except Exception: pass # 字典解析出错静默跳过，不影响主流程
+                    if n and n.lower() != 'nan' and k and k.lower() != 'nan':
+                        # 只要第一个精准的 KEGG ID
+                        k_clean = k.split(';')[0].strip()
+                        # 全小写映射，极大增加匹配率
+                        kegg_mapping[n.lower()] = k_clean
+                        # 分号前的干净名字映射
+                        clean_n = n.split(';')[0].strip().lower()
+                        kegg_mapping[clean_n] = k_clean
+        except Exception: pass
     return kegg_mapping
 
 # ==========================================
@@ -56,7 +60,7 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     try:
         if file_type == 'csv':
             try: df = pd.read_csv(file_buffer, engine='pyarrow')
-            except: file_buffer.seek(0); df = pd.read_csv(file_buffer)
+            except: file_buffer.seek(0); df = pd.read_csv(file_buffer, low_memory=False)
         else: df = pd.read_excel(file_buffer)
     except Exception as e: return None, None, f"读取失败: {str(e)}"
 
@@ -81,19 +85,22 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     rt_str = df['rt'].map('{:.2f}'.format).astype(str) if 'rt' in df.columns else ""
     unannotated_ids = "m/z" + mz_str + "_RT" + rt_str + "_" + clean_tag
     final_ids = np.where(mask_annotated, clean_names + "_" + clean_tag, unannotated_ids)
-    final_ids = make_unique(final_ids)
 
+    # 🌟 强行将 KEGG ID 焊死在列名上，确保导出可见
     kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
     if kegg_col is not None:
         kegg_vals = df[kegg_col].fillna('').astype(str).values
-        orig_names = [f"{n} | {k}" if str(k).strip() and str(k).lower() != 'nan' else str(n) for n, k in zip(df['name'], kegg_vals)]
-    else: orig_names = df['name']
+        final_ids_with_kegg = [f"{n} | {k}" if str(k).strip() and str(k).lower() != 'nan' else str(n) for n, k in zip(final_ids, kegg_vals)]
+    else:
+        final_ids_with_kegg = final_ids
+        
+    final_ids_with_kegg = make_unique(final_ids_with_kegg)
 
     meta_df = pd.DataFrame({
-        "Original_Name": orig_names, 
+        "Original_Name": final_ids_with_kegg, 
         "Clean_Name": np.where(mask_annotated, clean_names, final_ids), 
         "Is_Annotated": mask_annotated
-    }, index=final_ids)
+    }, index=final_ids_with_kegg)
     
     df_data = df[sample_cols].copy()
     df_data.index = meta_df.index
@@ -107,7 +114,6 @@ def parse_metdna_file(file_buffer, file_name, file_type='csv'):
     
     return df_transposed, meta_df, None
 
-# 🌟 开设外部字典接收接口
 def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_regex=r'-(P|N|RP-P|RP-N|HILIC-P|HILIC-N|POS|NEG)-', external_kegg_dict=None):
     if external_kegg_dict is None: external_kegg_dict = {}
     try:
@@ -125,7 +131,7 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
                 for _, row in df.iterrows():
                     n = str(row[comp_col]).strip()
                     k = str(row[kegg_col]).strip()
-                    if k and k.lower() != 'nan': local_kegg_mapping[n] = k
+                    if k and k.lower() != 'nan': local_kegg_mapping[n.lower()] = k
                     
             metric_cols = [c for c in df.columns if metric_suffix in str(c)]
             if not metric_cols: continue 
@@ -152,6 +158,25 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
         combined = combined.drop(columns=['__mean_resp__'])
         
         combined.set_index('__Compound__', inplace=True)
+        
+        # 🌟 核心：查字典，并将查到的 KEGG ID 强行焊死在列名里！
+        orig_names = []
+        for n in combined.index:
+            n_lower = str(n).strip().lower()
+            if n_lower in local_kegg_mapping:
+                orig_names.append(f"{n} | {local_kegg_mapping[n_lower]}")
+            elif n_lower in external_kegg_dict:
+                orig_names.append(f"{n} | {external_kegg_dict[n_lower]}")
+            else:
+                n_split = n_lower.split(';')[0].strip()
+                if n_split in external_kegg_dict:
+                    orig_names.append(f"{n} | {external_kegg_dict[n_split]}")
+                else:
+                    orig_names.append(n)
+                    
+        # 用焊上了 KEGG 的名字替换掉原来的名字
+        combined.index = orig_names
+        
         df_t = combined.T
         df_t.index.name = 'SampleID'
         df_t = df_t.reset_index()
@@ -159,19 +184,8 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
         df_t['Source_Files'] = 'Manual_Targeted_Merged'
         
         meta = pd.DataFrame(index=combined.index)
-        meta['Clean_Name'] = combined.index
-        
-        # 🌟 核心：双重字典查库机制！如果本地没写 KEGG，自动去外部大字典里查！
-        orig_names = []
-        for n in combined.index:
-            if n in local_kegg_mapping:
-                orig_names.append(f"{n} | {local_kegg_mapping[n]}")
-            elif n in external_kegg_dict:
-                orig_names.append(f"{n} | {external_kegg_dict[n]}")
-            else:
-                orig_names.append(n)
-                
-        meta['Original_Name'] = orig_names
+        meta['Clean_Name'] = [str(n).split(' | ')[0] for n in combined.index]
+        meta['Original_Name'] = combined.index
         meta['Is_Annotated'] = True 
         
         return df_t, meta, None
@@ -195,7 +209,7 @@ def align_sample_info(df, info_df, sample_col_name='SampleName'):
     return merged
 
 # ==========================================
-# 2. 数据清洗与预处理核心流水线 (保持完全不变)
+# 2. 数据清洗与预处理核心流水线
 # ==========================================
 def impute_missing_values(df, features, method='knn'):
     df_imp = df.copy()
@@ -283,7 +297,7 @@ def data_cleaning_pipeline(df, group_col, miss_th=0.2, impute_m='knn', norm_m='p
     return df_proc, keep_feats
 
 # ==========================================
-# 3. OPLS-DA 算法核心 (保持完全不变)
+# 3. OPLS-DA 算法核心
 # ==========================================
 class OPLS_DA:
     def __init__(self, n_components=1):
@@ -372,7 +386,7 @@ class OPLS_DA:
         return np.array(corrs), np.array(r2s), np.array(q2s), original_r2, original_q2
 
 # ==========================================
-# 4. 极致背景校验的通路富集算法 (保持完全不变)
+# 4. 极致背景校验的通路富集算法
 # ==========================================
 def run_pathway_enrichment(sig_metabolites, all_measured_metabolites, custom_db_source=None):
     if custom_db_source is not None:
