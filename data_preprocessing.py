@@ -9,74 +9,79 @@ from sklearn.model_selection import cross_val_predict, KFold
 from sklearn.metrics import r2_score
 from scipy.stats import hypergeom
 
-# ====================
-# SIMCA: OPLS-DA 算法与置换检验
-# ====================
-class OPLS_DA:
-    def __init__(self):
-        self.t = None        
-        self.t_ortho = None  
-        self.p = None        
-        self.p_corr = None   
-        self.vip = None      
-        self.R2Y = 0
-        self.Q2 = 0
-
-    def fit(self, X, y):
-        X = np.array(X)
-        y = np.array(y).flatten()
-        
-        w = np.dot(X.T, y) / np.dot(y.T, y)
-        w /= np.linalg.norm(w)
-        t = np.dot(X, w) / np.dot(w.T, w)
-        p = np.dot(X.T, t) / np.dot(t.T, t)
-        
-        w_ortho = p - (np.dot(w.T, p) / np.dot(w.T, w)) * w
-        w_ortho /= np.linalg.norm(w_ortho)
-        t_ortho = np.dot(X, w_ortho) / np.dot(w_ortho.T, w_ortho)
-        
-        self.t = t.flatten()
-        self.t_ortho = t_ortho.flatten()
-        self.p = p.flatten()
-        
-        self.p_corr = np.array([np.corrcoef(X[:, i], self.t)[0, 1] for i in range(X.shape[1])])
-        w_norm = (w / np.linalg.norm(w)).flatten()
-        self.vip = np.sqrt(len(w_norm) * (w_norm ** 2))
-        return self
-
-    def evaluate(self, X, y, n_splits=7):
-        n_samples = len(y)
-        cv_splits = min(n_splits, n_samples)
-        if cv_splits < 2: return 0, 0
-            
-        pls = PLSRegression(n_components=1)
-        pls.fit(X, y)
-        y_pred_fit = pls.predict(X)
-        self.R2Y = r2_score(y, y_pred_fit)
-        
-        kf = KFold(n_splits=cv_splits, shuffle=True, random_state=42)
-        y_cv = cross_val_predict(pls, X, y, cv=kf)
-        self.Q2 = r2_score(y, y_cv)
-        return self.R2Y, self.Q2
-
-    def permutation_test(self, X, y, n_permutations=100):
-        orig_R2Y, orig_Q2 = self.evaluate(X, y)
-        r2_perm, q2_perm, correlations = [], [], []
-        
-        pls = PLSRegression(n_components=1)
-        cv_splits = min(7, len(y))
-        kf = KFold(n_splits=cv_splits, shuffle=True)
-        
-        for i in range(n_permutations):
-            y_shuffled = np.random.permutation(y)
-            corr = np.abs(np.corrcoef(y, y_shuffled)[0, 1])
-            correlations.append(corr)
-            
-            pls.fit(X, y_shuffled)
-            r2_perm.append(r2_score(y_shuffled, pls.predict(X)))
-            q2_perm.append(r2_score(y_shuffled, cross_val_predict(pls, X, y_shuffled, cv=kf)))
-            
-        return np.array(correlations), np.array(r2_perm), np.array(q2_perm), orig_R2Y, orig_Q2
+# ====================\r
+# SIMCA: OPLS-DA 算法与置换检验\r
+# ====================\r
+class OPLS_DA:\r
+    def __init__(self):\r
+        self.t = None        \r
+        self.t_ortho = None  \r
+        self.p = None        \r
+        self.p_corr = None   \r
+        self.vip = None      \r
+        self.R2Y = 0\r
+        self.Q2 = 0\r
+\r
+    def fit(self, X, y):\r
+        X = np.array(X)\r
+        y = np.array(y).flatten()\r
+        \r
+        w = np.dot(X.T, y) / np.dot(y.T, y)\r
+        w /= np.linalg.norm(w)\r
+        t = np.dot(X, w) / np.dot(w.T, w)\r
+        p = np.dot(X.T, t) / np.dot(t.T, t)\r
+        \r
+        w_ortho = p - (np.dot(w.T, p) / np.dot(w.T, w)) * w\r
+        w_ortho /= np.linalg.norm(w_ortho)\r
+        t_ortho = np.dot(X, w_ortho) / np.dot(w_ortho.T, w_ortho)\r
+        \r
+        self.t = t.flatten()\r
+        self.t_ortho = t_ortho.flatten()\r
+        self.p = p.flatten()\r
+        \r
+        self.p_corr = np.array([np.corrcoef(X[:, i], self.t)[0, 1] for i in range(X.shape[1])])\r
+        w_norm = (w / np.linalg.norm(w)).flatten()\r
+        self.vip = np.sqrt(len(w_norm) * (w_norm ** 2))\r
+        return self\r
+\r
+    def evaluate(self, X, y, n_splits=7):\r
+        n_samples = len(y)\r
+        cv_splits = min(n_splits, n_samples)\r
+        if cv_splits < 2: return 0, 0\r
+            \r
+        pls = PLSRegression(n_components=1)\r
+        pls.fit(X, y)\r
+        y_pred_fit = pls.predict(X)\r
+        self.R2Y = r2_score(y, y_pred_fit)\r
+        \r
+        # 内部交叉验证已锁定种子 42\r
+        kf = KFold(n_splits=cv_splits, shuffle=True, random_state=42)\r
+        y_cv = cross_val_predict(pls, X, y, cv=kf)\r
+        self.Q2 = r2_score(y, y_cv)\r
+        return self.R2Y, self.Q2\r
+\r
+    def permutation_test(self, X, y, n_permutations=100):\r
+        # 🌟 修复点 1：锁定全局随机洗牌种子，确保 100 次打乱轨迹永久固定\r
+        np.random.seed(42)\r
+        \r
+        orig_R2Y, orig_Q2 = self.evaluate(X, y)\r
+        r2_perm, q2_perm, correlations = [], [], []\r
+        \r
+        pls = PLSRegression(n_components=1)\r
+        cv_splits = min(7, len(y))\r
+        # 🌟 修复点 2：锁定验证集分割种子\r
+        kf = KFold(n_splits=cv_splits, shuffle=True, random_state=42)\r
+        \r
+        for i in range(n_permutations):\r
+            y_shuffled = np.random.permutation(y)\r
+            corr = np.abs(np.corrcoef(y, y_shuffled)[0, 1])\r
+            correlations.append(corr)\r
+            \r
+            pls.fit(X, y_shuffled)\r
+            r2_perm.append(r2_score(y_shuffled, pls.predict(X)))\r
+            q2_perm.append(r2_score(y_shuffled, cross_val_predict(pls, X, y_shuffled, cv=kf)))\r
+            \r
+        return np.array(correlations), np.array(r2_perm), np.array(q2_perm), orig_R2Y, orig_Q2\r
 
 # ====================
 # 数据解析与合并
