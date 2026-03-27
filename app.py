@@ -28,7 +28,7 @@ try:
     from data_preprocessing import (
         data_cleaning_pipeline, parse_metdna_file, parse_manual_targeted_files, 
         merge_multiple_dfs, align_sample_info, OPLS_DA, 
-        run_pathway_enrichment, run_kegg_pathway_enrichment, build_kegg_dictionary
+        run_pathway_enrichment, build_kegg_dictionary
     )
     from stats_utils import run_pairwise_statistics
     from plot_utils import update_layout_square, get_ellipse_coordinates, plot_nomogram
@@ -200,7 +200,7 @@ if start_process:
                     st.success("✅ 手动靶向数据融合完成！")
                     st.rerun()
 
-        # 🟢 物理隔离流 B：MetDNA 原始数据 (100%调用您的原始代码)
+        # 🟢 物理隔离流 B：MetDNA 原始数据 (纯净流)
         else:
             with st.spinner("正在启动 MetDNA 原表解析引擎..."):
                 parsed_results = []; current_run_samples = set()
@@ -260,7 +260,6 @@ if st.session_state.data_loaded and st.session_state.raw_df is not None:
         with st.expander("数据预处理配置 (点击展开)", expanded=False):
             c_p1, c_p2 = st.columns(2)
             miss_th = c_p1.slider("剔除缺失率 > X", 0.0, 1.0, 0.20)
-            # 这里的选项严格对齐您原版的要求
             impute_m = c_p2.selectbox("缺失值填充", ["KNN", "min", "mean", "zero"], index=0)
             
             c_p3, c_p4 = st.columns(2)
@@ -304,7 +303,6 @@ if submit_button:
     with st.spinner("正在运行核心运算引擎与可视化构建..."):
         raw_df = st.session_state.raw_df; meta = st.session_state.feature_meta
         
-        # 调用统一的清洗函数 (支持双轨数据格式)
         df_proc, feats = data_cleaning_pipeline(
             raw_df, group_col, missing_thresh=miss_th, 
             impute_method=impute_m, norm_method=norm_m, 
@@ -458,7 +456,7 @@ if submit_button:
                         st.warning(f"由于数据极端分布或特征高度共线性，列线图模型无法收敛。错误详情：{str(e)}")
 
         with tabs[8]:
-            st.markdown("### 🕸️ 代谢通路富集 (双轨制引擎)")
+            st.markdown("### 🕸️ 代谢通路富集 (万能自适应引擎)")
             c1, c2 = st.columns([1, 6])
             with c2:
                 sig_mets_fullnames = stats_df[stats_df['Is_Biomarker']]['Search_Name'].tolist()
@@ -466,20 +464,12 @@ if submit_button:
                 
                 if not sig_mets_fullnames: st.info("⚠️ 无显著差异标志物，无法进行通路富集。")
                 else:
-                    with st.spinner("正在映射数据库..."):
-                        # 物理隔离的富集调用：手动表走 KEGG API，MetDNA 走经典本地库
-                        if data_source == "手动 MRM 靶向宽表":
-                            db_source = custom_pathway_file if custom_pathway_file else db_filename
-                            pathway_df = run_kegg_pathway_enrichment(sig_mets_fullnames, all_mets_fullnames, custom_db_source=db_source)
-                        else:
-                            db_source = custom_pathway_file if custom_pathway_file else None
-                            pathway_df = run_pathway_enrichment(sig_mets_fullnames, all_mets_fullnames, custom_db_source=db_source)
+                    with st.spinner("正在映射数据库并进行自动背景裁剪..."):
+                        db_source = custom_pathway_file if custom_pathway_file else db_filename
+                        pathway_df = run_pathway_enrichment(sig_mets_fullnames, all_mets_fullnames, custom_db_source=db_source)
                             
-                        if pathway_df.empty: st.warning("未能匹配到通路，请检查是否上传了正确的参考库，或选择正确的物种。")
+                        if pathway_df.empty: st.warning("未能匹配到通路，请检查是否选择了正确的物种库。")
                         else:
-                            if '-Log10_P' not in pathway_df.columns:
-                                pathway_df['-Log10_P'] = -np.log10(pathway_df['P_Value'].astype(float).clip(lower=1e-10))
-                                
                             plot_pw_df = pathway_df[pathway_df['Hits'] > 0].head(pw_show_num)
                             fig_pathway = px.scatter(
                                 plot_pw_df, x='Enrichment_Factor', y='-Log10_P', size='Hits', color='P_Value',
