@@ -20,7 +20,7 @@ from sklearn.preprocessing import StandardScaler
 # ==========================================
 # 0. 自定义模块导入与配置
 # ==========================================
-st.set_page_config(page_title="MetaboAnalyst Pro (SIMCA Edition)", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="MetaboAnalyst Pro", page_icon="🧬", layout="wide")
 
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'PingFang SC', 'Arial Unicode MS', 'sans-serif']
 plt.rcParams['axes.unicode_minus'] = False
