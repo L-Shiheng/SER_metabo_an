@@ -378,16 +378,45 @@ if submit_button:
         fig_vip.add_vline(x=1.0, line_dash="dash", line_color="black")
         fig_vip.update_layout(template="simple_white", width=800, height=700, title={'text': f"Top {vip_show_num} VIP Scores", 'x':0.5, 'xanchor': 'center'}, coloraxis_showscale=False)
 
+        # 🌟 全局多组 PCA 图 (解放两组限制，绘制所有上传样本)
         fig_pca = None
-        if len(df_sub) >= 3:
-            X_scaled = StandardScaler().fit_transform(df_sub[feats])
-            pca = PCA(n_components=2).fit(X_scaled); pcs = pca.transform(X_scaled); var = pca.explained_variance_ratio_
-            pca_df = pd.DataFrame({'PC1': pcs[:,0], 'PC2': pcs[:,1], 'Group': df_sub[group_col].values, 'SampleID': df_sub['SampleID']})
-            fig_pca = px.scatter(pca_df, x='PC1', y='PC2', color='Group', symbol='Group', hover_data=['SampleID'], color_discrete_sequence=GROUP_COLORS)
-            el_x, el_y = get_ellipse_coordinates(pca_df['PC1'], pca_df['PC2'])
-            if el_x is not None: fig_pca.add_trace(go.Scatter(x=el_x, y=el_y, mode='lines', line=dict(color='black', width=1, dash='dot'), name='95% Hotelling T2'))
-            fig_pca.update_traces(marker=dict(size=14, line=dict(width=1, color='black'), opacity=0.9))
-            fig_pca = update_layout_square(fig_pca, "PCA (QC Check)", f"PC1 ({var[0]:.1%})", f"PC2 ({var[1]:.1%})")
+        # 这里不再使用只有 2 个组的 df_sub，而是使用清洗完的全局数据 df_proc
+        if len(df_proc) >= 3:
+            # 过滤掉方差为0的特征，防止 StandardScaler 报错
+            valid_feats_pca = df_proc[feats].var()[df_proc[feats].var() > 1e-9].index.tolist()
+            if valid_feats_pca:
+                X_scaled_all = StandardScaler().fit_transform(df_proc[valid_feats_pca])
+                pca_all = PCA(n_components=2).fit(X_scaled_all)
+                pcs_all = pca_all.transform(X_scaled_all)
+                var_all = pca_all.explained_variance_ratio_
+                
+                pca_df_all = pd.DataFrame({
+                    'PC1': pcs_all[:,0], 
+                    'PC2': pcs_all[:,1], 
+                    'Group': df_proc[group_col].values, 
+                    'SampleID': df_proc['SampleID']
+                })
+                
+                # 绘制散点图
+                fig_pca = px.scatter(
+                    pca_df_all, x='PC1', y='PC2', color='Group', symbol='Group', 
+                    hover_data=['SampleID'], color_discrete_sequence=GROUP_COLORS
+                )
+                
+                # 为图上的每一个组分别画 95% 置信区间椭圆
+                for i, g in enumerate(sorted(df_proc[group_col].unique())):
+                    sub_grp = pca_df_all[pca_df_all['Group'] == g]
+                    if len(sub_grp) >= 3:
+                        el_x, el_y = get_ellipse_coordinates(sub_grp['PC1'], sub_grp['PC2'])
+                        if el_x is not None: 
+                            fig_pca.add_trace(go.Scatter(
+                                x=el_x, y=el_y, mode='lines', 
+                                line=dict(color=GROUP_COLORS[i % len(GROUP_COLORS)], width=1, dash='dot'), 
+                                showlegend=False, hoverinfo='skip'
+                            ))
+                            
+                fig_pca.update_traces(marker=dict(size=14, line=dict(width=1, color='black'), opacity=0.9))
+                fig_pca = update_layout_square(fig_pca, "Global PCA Plot (All Groups & QC)", f"PC1 ({var_all[0]:.1%})", f"PC2 ({var_all[1]:.1%})")
 
         fig_vol = px.scatter(stats_df, x="Log2_FC", y="-Log10_P", color="Sig", color_discrete_map=COLOR_PALETTE, hover_data=['Name', 'VIP'])
         fig_vol.add_hline(y=-np.log10(p_th), line_dash="dash", line_color="gray")
