@@ -8,6 +8,7 @@ import re
 import io
 import base64
 import requests
+import csv # 用于兼容 MA 的 QUOTE_ALL
 import plotly.express as px
 import plotly.graph_objects as go
 import seaborn as sns
@@ -532,7 +533,7 @@ if submit_button:
             'fig_opls': fig_opls, 'fig_perm': fig_perm, 'fig_splot': fig_splot,
             'fig_vip': fig_vip, 'fig_pca': fig_pca, 'fig_vol': fig_vol,
             'hm_fig': hm_fig, 'out_df': out_df, 'pathway_df': pathway_df,
-            'filtered_db_df': filtered_db_df, # 📦 将专属背景库加入保险箱！
+            'filtered_db_df': filtered_db_df, 
             'fig_nomogram': fig_nomogram, 'fig_pathway': fig_pathway, 'fig_network': fig_network,
             'html_report': html_report, 'prompt_md': prompt_md
         }
@@ -598,15 +599,15 @@ if 'analysis_res' in st.session_state:
     with tabs[8]:
         st.markdown("### 🕸️ 代谢通路富集 (万能自适应引擎)")
         
-        # 🌟 新增：下载专属实验背景库的按钮！
+        # 🌟 核心修改点：强制取消表头、全部加双引号包裹、逗号分隔！
         if 'filtered_db_df' in res and not res['filtered_db_df'].empty:
-            csv_bg_lib = res['filtered_db_df'].to_csv(index=False).encode('utf-8')
+            csv_bg_lib = res['filtered_db_df'].to_csv(index=False, header=False, quoting=csv.QUOTE_ALL).encode('utf-8')
             st.download_button(
                 label="📥 导出基于本次实验数据裁剪后的【专属背景通路库】",
                 data=csv_bg_lib,
                 file_name=f"Experimental_Background_Pathway_Library_{res['case']}_vs_{res['ctrl']}.csv",
                 mime="text/csv",
-                help="此文件展示了系统实际用于超几何分布计算的分母库。您可以将此库输入到 MetaboAnalyst 进行绝对的控制变量比对！",
+                help="此文件格式已 100% 对齐 MetaboAnalyst 官方范例：无表头、双引号包裹、逗号分隔、物质间分号加空格。",
                 type="primary"
             )
 
