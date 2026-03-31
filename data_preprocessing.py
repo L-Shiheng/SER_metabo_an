@@ -240,7 +240,7 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
     return pd.concat([meta_df, data_df], axis=1), data_df.columns.tolist()
 
 # ==============================================================================
-# 🌟 原版严谨通路富集引擎 (应用 MA 的两大科学过滤规则)
+# 🌟 原版严谨通路富集引擎 (应用 MA 科学过滤 + 全局基数 FDR 完美对齐校正)
 # ==============================================================================
 def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_source=None):
     db = pd.DataFrame()
@@ -304,7 +304,7 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
         pw = row['Pathway']
         if pd.isna(row['Compounds']): continue
 
-        # 🌟 黄金规则 1：剔除无意义的全局代谢总图 (符合代谢组学发文习惯)
+        # 🌟 规则 1：剔除无特异性意义的全局代谢总图
         if 'Metabolic pathways' in str(pw):
             continue
         
@@ -312,7 +312,7 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
         pw_detectable = pw_comps.intersection(mapped_bg_syns)
         M = len(pw_detectable)
         
-        # 🌟 黄金规则 2：通路在背景中实际存在的代谢物必须 >= 2，否则拒绝检验
+        # 🌟 规则 2：通路中被实测到的代谢物必须 >= 2，否则拒绝检验
         if M < 2: 
             continue
         
@@ -335,21 +335,23 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
                 hits_orig_names.add(orig_name)
                 
         k = len(hits_orig_names)
-        if k > 0:
-            p_val = hypergeom.sf(k - 1, N, M, K_drawn)
-            expected = (K_drawn * M) / N
-            enrich_factor = k / expected if expected > 0 else 0
-            
-            hits_pure_names = set([str(n).split('|')[0].strip() for n in hits_orig_names])
-            
-            results.append({
-                'Pathway': pw, 
-                'Total_in_Pathway': M, 
-                'Hits': k,
-                'P_Value': p_val, 
-                'Enrichment_Factor': enrich_factor,
-                'Hit_Metabolites': ", ".join(list(hits_pure_names))
-            })
+        
+        # 🌟 终极修复：即便某通路 Hits=0，它也已通过 M>=2 判定，必须生成 P=1.0 的检验记录充当 FDR 分母！
+        p_val = hypergeom.sf(k - 1, N, M, K_drawn) if k > 0 else 1.0
+        expected = (K_drawn * M) / N
+        enrich_factor = k / expected if expected > 0 else 0
+        
+        hits_pure_names = set([str(n).split('|')[0].strip() for n in hits_orig_names]) if k > 0 else set()
+        
+        # 把通过检验池的所有结果（含 k=0）统一入库
+        results.append({
+            'Pathway': pw, 
+            'Total_in_Pathway': M, 
+            'Hits': k,
+            'P_Value': p_val, 
+            'Enrichment_Factor': enrich_factor,
+            'Hit_Metabolites': ", ".join(list(hits_pure_names)) if k > 0 else ""
+        })
             
     res_df = pd.DataFrame(results)
     filtered_db_df = pd.DataFrame(filtered_db_records)
@@ -357,10 +359,15 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
     if not res_df.empty:
         try:
             from statsmodels.stats.multitest import multipletests
-            # 因为剔除了单物质通路，此时再算 FDR 将极其纯净且精确
+            # 因为我们在上面把 Hits=0 的通路也放进来了，所以此时算出的 FDR，跟 MA 的计算基数完美重合！
             _, fdr, _, _ = multipletests(res_df['P_Value'], method='fdr_bh')
             res_df['FDR'] = fdr
-        except: res_df['FDR'] = res_df['P_Value']
+        except: 
+            res_df['FDR'] = res_df['P_Value']
+            
+        # FDR 计算完毕后，为了表格展示清晰，我们再把 Hits=0 (那些 P=1.0) 的通路扔掉
+        res_df = res_df[res_df['Hits'] > 0].copy()
+        
         res_df['-Log10_P'] = -np.log10(res_df['P_Value'].astype(float) + 1e-300)
         res_df = res_df.sort_values('P_Value')
         
