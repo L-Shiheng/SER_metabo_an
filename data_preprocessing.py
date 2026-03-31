@@ -240,14 +240,13 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
     return pd.concat([meta_df, data_df], axis=1), data_df.columns.tolist()
 
 # ==============================================================================
-# 🌟 原版严谨通路富集引擎 (完美兼容 MA 官方无表头与带表头格式)
+# 🌟 原版严谨通路富集引擎 (完美兼容 MA 官方无表头与带表头格式，只导出纯净名称)
 # ==============================================================================
 def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_source=None):
     db = pd.DataFrame()
     if custom_db_source is not None:
         try:
             if hasattr(custom_db_source, 'name'): 
-                # 兼容读取时不再预设表头，防止把无表头的第一行数据当成列名吃掉
                 db = pd.read_csv(custom_db_source, header=None)
             elif isinstance(custom_db_source, str) and os.path.exists(custom_db_source): 
                 db = pd.read_csv(custom_db_source, header=None)
@@ -255,10 +254,8 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
             print(f"读取库失败: {e}")
             return pd.DataFrame(), pd.DataFrame()
             
-    # 将读进来的第0列和第1列强行命名为 Pathway 和 Compounds
     if not db.empty and len(db.columns) >= 2:
         db = db.rename(columns={0: 'Pathway', 1: 'Compounds'})
-        # 如果原来的文件其实是有表头并且真的写了 Pathway 两个字，那我们把假表头丢弃
         if str(db.iloc[0]['Pathway']).strip().lower() == 'pathway':
             db = db.iloc[1:].reset_index(drop=True)
     else:
@@ -268,7 +265,6 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
         syns = set()
         for p in str(full_name).split('|'):
             for sub_p in p.split(';'):
-                # 仅做最基础的特殊符号和空格清理，不加任何智能预测或替换 (维持纯净)
                 clean_p = re.sub(r'[^a-z0-9]', '', sub_p.lower())
                 if clean_p: syns.add(clean_p)
         return syns
@@ -320,10 +316,12 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
             if syns.intersection(pw_detectable):
                 pw_bg_orig_names.add(orig_name)
                 
-        # 🌟 核心修复点：导出为 MA 要求的 [分号+空格] 格式
+        # 🌟 核心终极修复：切掉 "| 编号"，只保留纯净的名称，彻底对齐 MA demo 格式！
+        pw_bg_pure_names = set([str(n).split('|')[0].strip() for n in pw_bg_orig_names])
+        
         filtered_db_records.append({
             'Pathway': pw,
-            'Compounds': "; ".join(list(pw_bg_orig_names))
+            'Compounds': "; ".join(list(pw_bg_pure_names))
         })
         
         hits_orig_names = set()
@@ -336,13 +334,17 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
             p_val = hypergeom.sf(k - 1, N, M, K_drawn)
             expected = (K_drawn * M) / N
             enrich_factor = k / expected if expected > 0 else 0
+            
+            # 为了美观，App 界面的 Hits 显示也剥离掉编号，保持纯净
+            hits_pure_names = set([str(n).split('|')[0].strip() for n in hits_orig_names])
+            
             results.append({
                 'Pathway': pw, 
                 'Total_in_Pathway': M, 
                 'Hits': k,
                 'P_Value': p_val, 
                 'Enrichment_Factor': enrich_factor,
-                'Hit_Metabolites': ", ".join(list(hits_orig_names))
+                'Hit_Metabolites': ", ".join(list(hits_pure_names))
             })
             
     res_df = pd.DataFrame(results)
