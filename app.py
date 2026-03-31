@@ -297,7 +297,7 @@ if st.session_state.data_loaded and st.session_state.raw_df is not None:
         submit_button = st.form_submit_button(label='🚀 运行全自动分析 (生成交互图表与报告)')
 
 if not st.session_state.data_loaded:
-    st.title("🧬 MetaboAnalyst Pro (SIMCA Edition)"); st.info("👈 请在左侧面板上传并处理数据"); st.stop()
+    st.title("🧬 MetaboAnalyst Pro"); st.info("👈 请在左侧面板上传并处理数据"); st.stop()
 
 # ==========================================
 # 4. 执行核心分析计算 (锁定后台保险箱)
