@@ -207,7 +207,8 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
     data_df = df[numeric_cols].copy()
     meta_df = df[meta_cols].copy()
     
-    data_df = data_df[data_df.isnull().mean()[data_df.isnull().mean() <= missing_thresh].index]
+    valid_cols = data_df.isnull().mean()[data_df.isnull().mean() <= missing_thresh].index
+    data_df = data_df[valid_cols]
     
     if data_df.isnull().sum().sum() > 0:
         if impute_method == 'min': data_df = data_df.fillna(data_df.min() * 0.5)
@@ -215,40 +216,53 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
         elif impute_method == 'KNN': data_df = pd.DataFrame(KNNImputer(n_neighbors=5).fit_transform(data_df), columns=data_df.columns, index=data_df.index)
         else: data_df = data_df.fillna(0)
 
-    if norm_method == 'Sum': data_df = data_df.div(data_df.sum(axis=1), axis=0) * data_df.sum(axis=1).mean()
-    elif norm_method == 'Median': data_df = data_df.div(data_df.median(axis=1), axis=0) * data_df.median(axis=1).mean()
+    data_df = data_df.astype(float)
+
+    if norm_method == 'Sum': data_df = data_df.div(data_df.sum(axis=1).replace(0, 1e-9), axis=0) * data_df.sum(axis=1).mean()
+    elif norm_method == 'Median': data_df = data_df.div(data_df.median(axis=1).replace(0, 1e-9), axis=0) * data_df.median(axis=1).mean()
     elif norm_method == 'PQN':
         ref = data_df.median(axis=0); ref[ref <= 0] = 1e-6
-        data_df = data_df.div(data_df.div(ref, axis=1).median(axis=1), axis=0)
+        data_df = data_df.div(data_df.div(ref, axis=1).median(axis=1).replace(0, 1e-9), axis=0)
 
-    if log_transform: data_df = np.log2(data_df + 1) if (data_df <= 0).any().any() else np.log2(data_df)
+    if log_transform:
+        data_df = np.log2(np.clip(data_df, 0, None) + 1)
+        
+    data_df = data_df.replace([np.inf, -np.inf], np.nan).fillna(0)
 
     if scale_method != 'None':
-        mean = data_df.mean(); std = data_df.std()
+        mean = data_df.mean()
+        std = data_df.std().replace(0, 1e-9) 
         if scale_method == 'Auto': data_df = (data_df - mean) / std
         elif scale_method == 'Pareto': data_df = (data_df - mean) / np.sqrt(std)
 
+    data_df = data_df.replace([np.inf, -np.inf], np.nan).fillna(0)
     data_df = data_df.loc[:, data_df.var() > 1e-9]
     return pd.concat([meta_df, data_df], axis=1), data_df.columns.tolist()
 
 # ==============================================================================
-# 🌟 全能通路富集引擎 (Universal Enrichment Engine)
+# 🌟 原版严谨通路富集引擎 (只保留基础去空匹配，增加返回过滤库 Filtered_DB)
 # ==============================================================================
 def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_source=None):
+    db = pd.DataFrame()
     if custom_db_source is not None:
         try:
-            if hasattr(custom_db_source, 'name'): db = pd.read_csv(custom_db_source)
-            elif isinstance(custom_db_source, str) and os.path.exists(custom_db_source): db = pd.read_csv(custom_db_source)
-            else: return pd.DataFrame()
-        except: return pd.DataFrame()
-    else: return pd.DataFrame()
-    
-    if 'Pathway' not in db.columns or 'Compounds' not in db.columns: return pd.DataFrame()
+            if hasattr(custom_db_source, 'name'): 
+                db = pd.read_csv(custom_db_source)
+            elif isinstance(custom_db_source, str) and os.path.exists(custom_db_source): 
+                db = pd.read_csv(custom_db_source)
+        except Exception as e:
+            print(f"读取库失败: {e}")
+            return pd.DataFrame(), pd.DataFrame()
+            
+    # 严格遵循原版逻辑：必须叫 Pathway 和 Compounds，否则直接退出
+    if 'Pathway' not in db.columns or 'Compounds' not in db.columns: 
+        return pd.DataFrame(), pd.DataFrame() 
     
     def get_synonyms(full_name):
         syns = set()
         for p in str(full_name).split('|'):
             for sub_p in p.split(';'):
+                # 仅做最基础的特殊符号和空格清理，不加任何智能预测或替换
                 clean_p = re.sub(r'[^a-z0-9]', '', sub_p.lower())
                 if clean_p: syns.add(clean_p)
         return syns
@@ -279,9 +293,11 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
     N = len(mapped_bg_names)
     K_drawn = len(mapped_sig_names)
     
-    if N == 0 or K_drawn == 0: return pd.DataFrame()
+    if N == 0 or K_drawn == 0: return pd.DataFrame(), pd.DataFrame()
     
     results = []
+    filtered_db_records = [] # 用于构建导出用的专属背景库
+
     for _, row in db.iterrows():
         pw = row['Pathway']
         if pd.isna(row['Compounds']): continue
@@ -292,10 +308,22 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
         
         if M == 0: continue
         
-        hits_orig_names = set()
-        for orig_name in mapped_sig_names:
+        # 1. 严格记录该通路在实验背景中实际存在的代谢物（导出库用）
+        pw_bg_orig_names = set()
+        for orig_name in mapped_bg_names:
             syns = next(s for n, s in bg_syns_list if n == orig_name)
             if syns.intersection(pw_detectable):
+                pw_bg_orig_names.add(orig_name)
+                
+        filtered_db_records.append({
+            'Pathway': pw,
+            'Compounds': ";".join(list(pw_bg_orig_names))
+        })
+        
+        # 2. 从这些被框定的背景物质中，找出属于显著标志物（Hits）的集合
+        hits_orig_names = set()
+        for orig_name in mapped_sig_names:
+            if orig_name in pw_bg_orig_names:
                 hits_orig_names.add(orig_name)
                 
         k = len(hits_orig_names)
@@ -313,6 +341,8 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
             })
             
     res_df = pd.DataFrame(results)
+    filtered_db_df = pd.DataFrame(filtered_db_records)
+    
     if not res_df.empty:
         try:
             from statsmodels.stats.multitest import multipletests
@@ -322,7 +352,7 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
         res_df['-Log10_P'] = -np.log10(res_df['P_Value'].astype(float) + 1e-300)
         res_df = res_df.sort_values('P_Value')
         
-    return res_df
+    return res_df, filtered_db_df
 
 # ==============================================================================
 # 【物理隔离流 B：手动靶向宽表专属解析器与 KEGG API 引擎】
