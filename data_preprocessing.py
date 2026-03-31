@@ -240,7 +240,7 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
     return pd.concat([meta_df, data_df], axis=1), data_df.columns.tolist()
 
 # ==============================================================================
-# 🌟 原版严谨通路富集引擎 (完美兼容 MA 官方无表头与带表头格式，只导出纯净名称)
+# 🌟 原版严谨通路富集引擎 (应用 MA 的两大科学过滤规则)
 # ==============================================================================
 def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_source=None):
     db = pd.DataFrame()
@@ -303,12 +303,18 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
     for _, row in db.iterrows():
         pw = row['Pathway']
         if pd.isna(row['Compounds']): continue
+
+        # 🌟 黄金规则 1：剔除无意义的全局代谢总图 (符合代谢组学发文习惯)
+        if 'Metabolic pathways' in str(pw):
+            continue
         
         pw_comps = set([re.sub(r'[^a-z0-9]', '', str(c).lower()) for c in str(row['Compounds']).split(';')])
         pw_detectable = pw_comps.intersection(mapped_bg_syns)
         M = len(pw_detectable)
         
-        if M == 0: continue
+        # 🌟 黄金规则 2：通路在背景中实际存在的代谢物必须 >= 2，否则拒绝检验
+        if M < 2: 
+            continue
         
         pw_bg_orig_names = set()
         for orig_name in mapped_bg_names:
@@ -316,7 +322,6 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
             if syns.intersection(pw_detectable):
                 pw_bg_orig_names.add(orig_name)
                 
-        # 🌟 核心终极修复：切掉 "| 编号"，只保留纯净的名称，彻底对齐 MA demo 格式！
         pw_bg_pure_names = set([str(n).split('|')[0].strip() for n in pw_bg_orig_names])
         
         filtered_db_records.append({
@@ -335,7 +340,6 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
             expected = (K_drawn * M) / N
             enrich_factor = k / expected if expected > 0 else 0
             
-            # 为了美观，App 界面的 Hits 显示也剥离掉编号，保持纯净
             hits_pure_names = set([str(n).split('|')[0].strip() for n in hits_orig_names])
             
             results.append({
@@ -353,6 +357,7 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
     if not res_df.empty:
         try:
             from statsmodels.stats.multitest import multipletests
+            # 因为剔除了单物质通路，此时再算 FDR 将极其纯净且精确
             _, fdr, _, _ = multipletests(res_df['P_Value'], method='fdr_bh')
             res_df['FDR'] = fdr
         except: res_df['FDR'] = res_df['P_Value']
