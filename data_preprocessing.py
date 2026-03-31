@@ -240,7 +240,7 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
     return pd.concat([meta_df, data_df], axis=1), data_df.columns.tolist()
 
 # ==============================================================================
-# 🌟 原版严谨通路富集引擎 (只保留基础去空匹配，增加返回过滤库 Filtered_DB)
+# 🌟 原版严谨通路富集引擎 (完美兼容 MA 的 "; " 空格格式)
 # ==============================================================================
 def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_source=None):
     db = pd.DataFrame()
@@ -254,7 +254,6 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
             print(f"读取库失败: {e}")
             return pd.DataFrame(), pd.DataFrame()
             
-    # 严格遵循原版逻辑：必须叫 Pathway 和 Compounds，否则直接退出
     if 'Pathway' not in db.columns or 'Compounds' not in db.columns: 
         return pd.DataFrame(), pd.DataFrame() 
     
@@ -262,7 +261,6 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
         syns = set()
         for p in str(full_name).split('|'):
             for sub_p in p.split(';'):
-                # 仅做最基础的特殊符号和空格清理，不加任何智能预测或替换
                 clean_p = re.sub(r'[^a-z0-9]', '', sub_p.lower())
                 if clean_p: syns.add(clean_p)
         return syns
@@ -296,7 +294,7 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
     if N == 0 or K_drawn == 0: return pd.DataFrame(), pd.DataFrame()
     
     results = []
-    filtered_db_records = [] # 用于构建导出用的专属背景库
+    filtered_db_records = [] 
 
     for _, row in db.iterrows():
         pw = row['Pathway']
@@ -308,19 +306,18 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
         
         if M == 0: continue
         
-        # 1. 严格记录该通路在实验背景中实际存在的代谢物（导出库用）
         pw_bg_orig_names = set()
         for orig_name in mapped_bg_names:
             syns = next(s for n, s in bg_syns_list if n == orig_name)
             if syns.intersection(pw_detectable):
                 pw_bg_orig_names.add(orig_name)
                 
+        # 🌟 核心修复：这里使用了 "; " (分号加空格) 拼接，完美兼容 MetaboAnalyst 要求！
         filtered_db_records.append({
             'Pathway': pw,
-            'Compounds': ";".join(list(pw_bg_orig_names))
+            'Compounds': "; ".join(list(pw_bg_orig_names))
         })
         
-        # 2. 从这些被框定的背景物质中，找出属于显著标志物（Hits）的集合
         hits_orig_names = set()
         for orig_name in mapped_sig_names:
             if orig_name in pw_bg_orig_names:
