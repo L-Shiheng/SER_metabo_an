@@ -264,7 +264,7 @@ if st.session_state.data_loaded and st.session_state.raw_df is not None:
     st.divider()
 
     with st.form(key='analysis_form'):
-        st.markdown("### ⚙️ 统计与富集分析设置 (SIMCA 金标准)")
+        st.markdown("### ⚙️ 统计与富集分析设置")
         non_num = raw_df.select_dtypes(exclude=[np.number]).columns.tolist()
         group_col = st.selectbox("分组列", non_num, index=non_num.index('Group') if 'Group' in non_num else 0)
         
@@ -597,7 +597,7 @@ if 'analysis_res' in st.session_state:
                 else: st.error("构建列线图失败，请检查样本的组别分布。")
                 
     with tabs[8]:
-        st.markdown("### 🕸️ 代谢通路富集 (万能自适应引擎)")
+        st.markdown("### 🕸️ 代谢通路富集")
         
         # 🌟 核心修改点：强制取消表头、全部加双引号包裹、逗号分隔！
         if 'filtered_db_df' in res and not res['filtered_db_df'].empty:
