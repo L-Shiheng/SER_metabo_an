@@ -177,7 +177,6 @@ with st.sidebar:
 # ==========================================
 if start_process:
     st.session_state.qc_report = {}
-    # 清空上次分析的缓存，防止数据重叠
     if 'analysis_res' in st.session_state:
         del st.session_state['analysis_res']
         
@@ -276,7 +275,7 @@ if st.session_state.data_loaded and st.session_state.raw_df is not None:
             c_p3, c_p4 = st.columns(2)
             norm_m = c_p3.selectbox("样本归一化", ["PQN", "Median", "Sum", "None"], index=0)
             scale_m = c_p4.selectbox("特征缩放 (Scaling)", ["Pareto", "Auto", "None"], index=0)
-            do_log = st.checkbox("Log2 对数转化 (强烈推荐)", value=True)
+            do_log = st.checkbox("Log2 对数转化", value=False)
 
         with st.expander("🎨 可视化高级工具栏 (图表参数微调)", expanded=False):
             c_t1, c_t2, c_t3 = st.columns(3)
@@ -345,7 +344,6 @@ if submit_button:
         stats_df['Is_Biomarker'] = (stats_df['VIP'] > 1.0) & (stats_df['P_Value'] < p_th) & (stats_df['Log2_FC'].abs() > fc_th)
         out_df = stats_df[stats_df['Is_Biomarker']].sort_values('VIP', ascending=False)
 
-        # 🎯 预先生成所有图表
         opls_score_df = pd.DataFrame({'t1 (Predictive)': opls.t, 't_ortho (Orthogonal)': opls.t_ortho, 'Group': df_sub[group_col].values})
         fig_opls = px.scatter(opls_score_df, x='t1 (Predictive)', y='t_ortho (Orthogonal)', color='Group', symbol='Group', color_discrete_sequence=GROUP_COLORS)
         for i, g in enumerate(list(sel_grps)):
@@ -378,11 +376,8 @@ if submit_button:
         fig_vip.add_vline(x=1.0, line_dash="dash", line_color="black")
         fig_vip.update_layout(template="simple_white", width=800, height=700, title={'text': f"Top {vip_show_num} VIP Scores", 'x':0.5, 'xanchor': 'center'}, coloraxis_showscale=False)
 
-        # 🌟 全局多组 PCA 图 (解放两组限制，绘制所有上传样本)
         fig_pca = None
-        # 这里不再使用只有 2 个组的 df_sub，而是使用清洗完的全局数据 df_proc
         if len(df_proc) >= 3:
-            # 过滤掉方差为0的特征，防止 StandardScaler 报错
             valid_feats_pca = df_proc[feats].var()[df_proc[feats].var() > 1e-9].index.tolist()
             if valid_feats_pca:
                 X_scaled_all = StandardScaler().fit_transform(df_proc[valid_feats_pca])
@@ -397,13 +392,11 @@ if submit_button:
                     'SampleID': df_proc['SampleID']
                 })
                 
-                # 绘制散点图
                 fig_pca = px.scatter(
                     pca_df_all, x='PC1', y='PC2', color='Group', symbol='Group', 
                     hover_data=['SampleID'], color_discrete_sequence=GROUP_COLORS
                 )
                 
-                # 为图上的每一个组分别画 95% 置信区间椭圆
                 for i, g in enumerate(sorted(df_proc[group_col].unique())):
                     sub_grp = pca_df_all[pca_df_all['Group'] == g]
                     if len(sub_grp) >= 3:
@@ -447,13 +440,14 @@ if submit_button:
                 fig_nomogram = plot_nomogram(df_sub, nomo_feats, nomo_names, group_col, case)
             except: pass
 
-        pathway_df = pd.DataFrame()
+        pathway_df, filtered_db_df = pd.DataFrame(), pd.DataFrame()
         fig_pathway = None
         sig_mets_fullnames = stats_df[stats_df['Is_Biomarker']]['Search_Name'].tolist()
         all_mets_fullnames = stats_df['Search_Name'].tolist()
+        
         if sig_mets_fullnames:
             db_source = custom_pathway_file if custom_pathway_file else db_filename
-            pathway_df = run_pathway_enrichment(sig_mets_fullnames, all_mets_fullnames, custom_db_source=db_source)
+            pathway_df, filtered_db_df = run_pathway_enrichment(sig_mets_fullnames, all_mets_fullnames, custom_db_source=db_source)
             if not pathway_df.empty:
                 if '-Log10_P' not in pathway_df.columns:
                     pathway_df['-Log10_P'] = -np.log10(pathway_df['P_Value'].astype(float).clip(lower=1e-10))
@@ -533,12 +527,12 @@ if submit_button:
         )
         prompt_md = generate_ai_prompt(case, ctrl, norm_m, scale_m, R2Y, Q2, b_q2, p_th, fc_th, out_df, pathway_df)
 
-        # 📦 结果存入保险箱！
         st.session_state['analysis_res'] = {
             'case': case, 'ctrl': ctrl, 'R2Y': R2Y, 'Q2': Q2, 'b_q2': b_q2,
             'fig_opls': fig_opls, 'fig_perm': fig_perm, 'fig_splot': fig_splot,
             'fig_vip': fig_vip, 'fig_pca': fig_pca, 'fig_vol': fig_vol,
             'hm_fig': hm_fig, 'out_df': out_df, 'pathway_df': pathway_df,
+            'filtered_db_df': filtered_db_df, # 📦 将专属背景库加入保险箱！
             'fig_nomogram': fig_nomogram, 'fig_pathway': fig_pathway, 'fig_network': fig_network,
             'html_report': html_report, 'prompt_md': prompt_md
         }
@@ -603,6 +597,19 @@ if 'analysis_res' in st.session_state:
                 
     with tabs[8]:
         st.markdown("### 🕸️ 代谢通路富集 (万能自适应引擎)")
+        
+        # 🌟 新增：下载专属实验背景库的按钮！
+        if 'filtered_db_df' in res and not res['filtered_db_df'].empty:
+            csv_bg_lib = res['filtered_db_df'].to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 导出基于本次实验数据裁剪后的【专属背景通路库】",
+                data=csv_bg_lib,
+                file_name=f"Experimental_Background_Pathway_Library_{res['case']}_vs_{res['ctrl']}.csv",
+                mime="text/csv",
+                help="此文件展示了系统实际用于超几何分布计算的分母库。您可以将此库输入到 MetaboAnalyst 进行绝对的控制变量比对！",
+                type="primary"
+            )
+
         c1, c2 = st.columns([1, 6])
         with c2:
             if res['pathway_df'].empty: st.warning("未能匹配到通路，请检查是否选择了正确的物种库，或无显著差异标志物。")
@@ -623,7 +630,7 @@ if 'analysis_res' in st.session_state:
         c_rep1, c_rep2 = st.columns(2)
         with c_rep1:
             st.markdown("#### 👨‍🔬 1. 完整可视化报告下载 (HTML)")
-            st.download_button("📥 下载完整交互式网页报告 (.html)", res['html_report'].encode('utf-8'), f"Metabolomics_Report_{res['case']}_vs_{res['ctrl']}.html", "text/html", type="primary")
+            st.download_button("📥 下载完整交互式网页报告 (.html)", res['html_report'].encode('utf-8'), f"Metabolomics_Report_{res['case']}_vs_{res['ctrl']}.html", "text/html")
         with c_rep2:
             st.markdown("#### 🤖 2. AI 撰稿专属 Prompt")
             st.text_area("拷贝此文本发送给 AI:", value=res['prompt_md'], height=250)
