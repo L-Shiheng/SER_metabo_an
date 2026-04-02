@@ -304,17 +304,13 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
         pw = row['Pathway']
         if pd.isna(row['Compounds']): continue
 
-        # 🌟 规则 1：剔除无特异性意义的全局代谢总图
-        if 'Metabolic pathways' in str(pw):
-            continue
+        if 'Metabolic pathways' in str(pw): continue
         
         pw_comps = set([re.sub(r'[^a-z0-9]', '', str(c).lower()) for c in str(row['Compounds']).split(';')])
         pw_detectable = pw_comps.intersection(mapped_bg_syns)
         M = len(pw_detectable)
         
-        # 🌟 规则 2：通路中被实测到的代谢物必须 >= 2，否则拒绝检验
-        if M < 2: 
-            continue
+        if M < 2: continue
         
         pw_bg_orig_names = set()
         for orig_name in mapped_bg_names:
@@ -323,7 +319,6 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
                 pw_bg_orig_names.add(orig_name)
                 
         pw_bg_pure_names = set([str(n).split('|')[0].strip() for n in pw_bg_orig_names])
-        
         filtered_db_records.append({
             'Pathway': pw,
             'Compounds': "; ".join(list(pw_bg_pure_names))
@@ -335,15 +330,11 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
                 hits_orig_names.add(orig_name)
                 
         k = len(hits_orig_names)
-        
-        # 🌟 终极修复：即便某通路 Hits=0，它也已通过 M>=2 判定，必须生成 P=1.0 的检验记录充当 FDR 分母！
         p_val = hypergeom.sf(k - 1, N, M, K_drawn) if k > 0 else 1.0
         expected = (K_drawn * M) / N
         enrich_factor = k / expected if expected > 0 else 0
-        
         hits_pure_names = set([str(n).split('|')[0].strip() for n in hits_orig_names]) if k > 0 else set()
         
-        # 把通过检验池的所有结果（含 k=0）统一入库
         results.append({
             'Pathway': pw, 
             'Total_in_Pathway': M, 
@@ -359,33 +350,31 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
     if not res_df.empty:
         try:
             from statsmodels.stats.multitest import multipletests
-            # 因为我们在上面把 Hits=0 的通路也放进来了，所以此时算出的 FDR，跟 MA 的计算基数完美重合！
             _, fdr, _, _ = multipletests(res_df['P_Value'], method='fdr_bh')
             res_df['FDR'] = fdr
         except: 
             res_df['FDR'] = res_df['P_Value']
             
-        # FDR 计算完毕后，为了表格展示清晰，我们再把 Hits=0 (那些 P=1.0) 的通路扔掉
         res_df = res_df[res_df['Hits'] > 0].copy()
-        
         res_df['-Log10_P'] = -np.log10(res_df['P_Value'].astype(float) + 1e-300)
         res_df = res_df.sort_values('P_Value')
         
     return res_df, filtered_db_df
 
 # ==============================================================================
-# 【物理隔离流 B：手动靶向宽表专属解析器与 KEGG API 引擎】
+# 🚀 物理隔离流 B：MetaFlow 通用单表解析器与自动字典合并 (Phase 1 & 2 升级版)
 # ==============================================================================
 def build_kegg_dictionary(dict_files):
     kegg_mapping = {}
     if not dict_files: return kegg_mapping
     for file in dict_files:
         try:
-            file.seek(0)
-            if file.name.endswith('.csv'):
-                try: df = pd.read_csv(file, engine='pyarrow')
-                except: file.seek(0); df = pd.read_csv(file, low_memory=False)
-            else: df = pd.read_excel(file)
+            df = read_file_robust(file)
+            if df.empty: continue
+            
+            # 第一行设为表头进行字典读取
+            df.columns = df.iloc[0].astype(str).tolist()
+            df = df.iloc[1:].reset_index(drop=True)
             
             target_cols = ['name', 'metabolite', '化合物名称', 'peak_name']
             name_col = None
@@ -410,54 +399,86 @@ def build_kegg_dictionary(dict_files):
         except Exception: pass
     return kegg_mapping
 
-def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_regex=r'-(P|N|RP-P|RP-N|HILIC-P|HILIC-N|POS|NEG)-', external_kegg_dict=None):
+# 🌟 Phase 1 核心：四重编码防崩溃读取器
+def read_file_robust(file_buffer):
+    file_buffer.seek(0)
+    if file_buffer.name.endswith('.csv'):
+        encodings = ['utf-8', 'utf-8-sig', 'gbk', 'latin1']
+        for enc in encodings:
+            try:
+                file_buffer.seek(0)
+                df = pd.read_csv(file_buffer, encoding=enc, header=None, low_memory=False)
+                return df
+            except Exception:
+                continue
+        # 兜底强制读取
+        file_buffer.seek(0)
+        return pd.read_csv(file_buffer, encoding='utf-8', header=None, errors='ignore')
+    else:
+        return pd.read_excel(file_buffer, header=None)
+
+# 🌟 Phase 2 核心：完美 MA 格式极简单表解析引擎
+def parse_universal_single_table(file_list, external_kegg_dict=None):
     if external_kegg_dict is None: external_kegg_dict = {}
     try:
-        all_dfs = []
-        local_kegg_mapping = {} 
-        for file in file_list:
-            file.seek(0)
-            if file.name.endswith('.csv'): df = pd.read_csv(file)
-            else: df = pd.read_excel(file)
-            
-            comp_col = df.columns[0] 
-            kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
-            if kegg_col:
-                for _, row in df.iterrows():
-                    n = str(row[comp_col]).strip()
-                    k = str(row[kegg_col]).strip()
-                    if k and k.lower() not in ['nan', 'none', '']: 
-                        local_kegg_mapping[n.lower()] = k
-                    
-            metric_cols = [c for c in df.columns if metric_suffix in str(c)]
-            if not metric_cols: continue 
-                
-            sub_df = df[[comp_col] + metric_cols].copy()
-            sub_df.rename(columns={comp_col: '__Compound__'}, inplace=True)
-            
-            def clean_col_name(c):
-                c = str(c).replace(metric_suffix, "").strip() 
-                c = re.sub(mode_regex, '-', c, flags=re.IGNORECASE) 
-                return c.replace('--', '-') 
-                
-            sub_df.rename(columns={c: clean_col_name(c) for c in metric_cols}, inplace=True)
-            for c in sub_df.columns[1:]: sub_df[c] = pd.to_numeric(sub_df[c], errors='coerce')
-            sub_df['__mean_resp__'] = sub_df.iloc[:, 1:].mean(axis=1)
-            all_dfs.append(sub_df)
-            
-        if not all_dfs: return None, None, "未找到指定的提取指标！"
-            
-        combined = pd.concat(all_dfs, ignore_index=True)
-        combined = combined.sort_values('__mean_resp__', ascending=False).drop_duplicates(subset=['__Compound__'])
-        combined = combined.drop(columns=['__mean_resp__'])
-        combined.set_index('__Compound__', inplace=True)
+        combined_records = {} 
+        sample_groups = {} 
         
+        for file in file_list:
+            df = read_file_robust(file)
+            if len(df) < 3: continue # 至少要有 Sample, Group, 加上一个代谢物数据
+            
+            # MA 通用格式解析：Row 0 是样本名，Row 1 是 Group 分组名
+            samples = df.iloc[0, 1:].astype(str).tolist()
+            groups = df.iloc[1, 1:].astype(str).tolist()
+            
+            for s, g in zip(samples, groups):
+                s_clean = s.strip()
+                if s_clean and s_clean.lower() != 'nan':
+                    sample_groups[s_clean] = g.strip()
+                    
+            # 提取数据矩阵（第 3 行开始）
+            data_df = df.iloc[2:].copy()
+            comp_col = data_df.columns[0]
+            data_df = data_df.set_index(comp_col)
+            data_df.columns = df.iloc[0, 1:].astype(str).str.strip().tolist()
+            
+            # 只保留存在有效样本名的列
+            valid_samples = [s for s in data_df.columns if s and s.lower() != 'nan']
+            data_df = data_df[valid_samples]
+            
+            # 强制转换为数值类型（非数值变为 NaN 后补 0）
+            for c in data_df.columns:
+                data_df[c] = pd.to_numeric(data_df[c], errors='coerce').fillna(0)
+                
+            data_df['__mean_resp__'] = data_df.mean(axis=1)
+            
+            for comp_name, row in data_df.iterrows():
+                c_name = str(comp_name).strip()
+                if not c_name or c_name.lower() == 'nan': continue
+                
+                # Phase 3 预留：多表最大响应值去重保留法（Max Response Rule）
+                m_val = row['__mean_resp__']
+                if c_name not in combined_records or m_val > combined_records[c_name][0]:
+                    combined_records[c_name] = (m_val, row.drop('__mean_resp__'))
+                    
+        if not combined_records:
+            return None, None, "未能解析出有效的数据。请确保上传了标准的单表格式（第一行样本名，第二行 Group分组名，第三行起为数据矩阵）。"
+            
+        final_data = []
+        final_comp_names = []
+        for c_name, (m_val, row_series) in combined_records.items():
+            final_comp_names.append(c_name)
+            final_data.append(row_series)
+            
+        combined_df = pd.DataFrame(final_data, index=final_comp_names)
+        
+        # 智能 KEGG ID 自动贴片
         orig_names = []
-        for n in combined.index:
+        for n in combined_df.index:
             n_lower = str(n).strip().lower()
             mapped_kegg = None
-            if n_lower in local_kegg_mapping: mapped_kegg = local_kegg_mapping[n_lower]
-            elif n_lower in external_kegg_dict: mapped_kegg = external_kegg_dict[n_lower]
+            if n_lower in external_kegg_dict: mapped_kegg = external_kegg_dict[n_lower]
             else:
                 for n_part in n_lower.split(';'):
                     n_part_clean = n_part.strip()
@@ -467,16 +488,19 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积 ", mode_rege
             if mapped_kegg: orig_names.append(f"{n} | {mapped_kegg}")
             else: orig_names.append(n)
                 
-        combined.index = orig_names
-        df_t = combined.T
+        combined_df.index = orig_names
+        df_t = combined_df.T
         df_t.index.name = 'SampleID'
         df_t = df_t.reset_index()
-        df_t['Group'] = 'Unknown'
-        df_t['Source_Files'] = 'Manual_Targeted_Merged'
         
-        meta = pd.DataFrame(index=combined.index)
-        meta['Clean_Name'] = [str(n).split(' | ')[0] for n in combined.index]
-        meta['Original_Name'] = combined.index
+        df_t['Group'] = df_t['SampleID'].map(sample_groups).fillna('Unknown')
+        df_t['Source_Files'] = 'Universal_Matrix'
+        
+        meta = pd.DataFrame(index=combined_df.index)
+        meta['Clean_Name'] = [str(n).split(' | ')[0] for n in combined_df.index]
+        meta['Original_Name'] = combined_df.index
         meta['Is_Annotated'] = True 
+        
         return df_t, meta, None
-    except Exception as e: return None, None, f"手动表格解析失败: {str(e)}"
+    except Exception as e: 
+        return None, None, f"通用表格解析失败，请检查格式: {str(e)}"
