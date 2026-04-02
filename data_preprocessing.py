@@ -80,127 +80,8 @@ class OPLS_DA:
         return np.array(correlations), np.array(r2_perm), np.array(q2_perm), orig_R2Y, orig_Q2
 
 # ====================
-# 数据解析与合并
+# 通用数据清洗管线
 # ====================
-def make_unique(series):
-    seen = set(); result = []
-    for item in series:
-        new_item = item; counter = 1
-        while new_item in seen:
-            new_item = f"{item}_{counter}"; counter += 1
-        seen.add(new_item); result.append(new_item)
-    return result
-
-def parse_metdna_file(file_buffer, file_name, file_type='csv'):
-    try:
-        if file_type == 'csv':
-            try: df = pd.read_csv(file_buffer, engine='pyarrow')
-            except: file_buffer.seek(0); df = pd.read_csv(file_buffer, low_memory=False)
-        else: df = pd.read_excel(file_buffer)
-    except Exception as e: return None, None, f"读取失败: {str(e)}"
-
-    known_meta_cols = {'peak_name', 'mz', 'rt', 'id', 'id_zhulab', 'name', 'formula', 'confidence_level', 'smiles', 'inchikey', 'isotope', 'adduct', 'total_score', 'mz_error', 'rt_error_abs', 'rt_error_rela', 'ms2_score', 'iden_score', 'iden_type', 'peak_group_id', 'base_peak', 'num_peaks', 'cons_formula_pred', 'id_kegg', 'id_hmdb', 'id_metacyc', 'stereo_isomer_id', 'stereo_isomer_name'}
-    potential_cols = [c for c in df.columns if str(c).lower() not in known_meta_cols]
-    sample_cols = []
-    if potential_cols:
-        subset = df[potential_cols].head(5)
-        is_numeric = subset.apply(lambda x: pd.to_numeric(x, errors='coerce').notna().all())
-        sample_cols = is_numeric[is_numeric].index.tolist()
-            
-    if not sample_cols: return None, None, "未找到样本数据列。"
-
-    file_tag = os.path.splitext(os.path.basename(file_name))[0]
-    clean_tag = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', file_tag)
-    if 'name' not in df.columns: df['name'] = ""
-    if 'confidence_level' not in df.columns: df['confidence_level'] = 'Unknown'
-    
-    df['name'] = df['name'].fillna("").astype(str)
-    mask_annotated = (df['name'] != "") & (df['name'].str.lower() != "nan")
-    clean_names = df['name'].str.split(';', expand=True)[0]
-    mz_str = df['mz'].map('{:.4f}'.format).astype(str) if 'mz' in df.columns else ""
-    rt_str = df['rt'].map('{:.2f}'.format).astype(str) if 'rt' in df.columns else ""
-    unannotated_ids = "m/z" + mz_str + "_RT" + rt_str + "_" + clean_tag
-    final_ids = np.where(mask_annotated, clean_names + "_" + clean_tag, unannotated_ids)
-    final_ids = make_unique(final_ids)
-
-    kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
-    if kegg_col is not None:
-        kegg_vals = df[kegg_col].fillna('').astype(str).values
-        orig_names = [f"{n} | {k}" if str(k).strip() and str(k).lower() not in ['nan', 'none', ''] else str(n) for n, k in zip(df['name'], kegg_vals)]
-    else:
-        orig_names = df['name']
-
-    meta_df = pd.DataFrame({
-        "Metabolite_ID": final_ids, 
-        "Original_Name": orig_names, 
-        "Clean_Name": np.where(mask_annotated, clean_names, final_ids), 
-        "Confidence_Level": df['confidence_level'], 
-        "Is_Annotated": mask_annotated, 
-        "Source_File": clean_tag
-    })
-    meta_df.set_index('Metabolite_ID', inplace=True)
-    
-    df_data = df[sample_cols].copy()
-    df_data.index = meta_df.index
-    df_transposed = df_data.T
-    df_transposed.reset_index(inplace=True)
-    df_transposed.rename(columns={'index': 'SampleID'}, inplace=True)
-    df_transposed['Source_Files'] = clean_tag
-    df_transposed['Group'] = df_transposed['SampleID'].astype(str).str.extract(r'([^\d]+)')[0].str.strip('._-').fillna("Unknown")
-    
-    return df_transposed, meta_df, None
-
-def merge_multiple_dfs(results_list):
-    if not results_list: return None, None, "无数据"
-    best_features = {}; sample_source_map = {}
-    for file_idx, (df, meta, fname) in enumerate(results_list):
-        if 'SampleID' in df.columns and 'Source_Files' in df.columns:
-            current_tag = df['Source_Files'].iloc[0]
-            for sid in df['SampleID']:
-                if sid not in sample_source_map: sample_source_map[sid] = set()
-                sample_source_map[sid].add(current_tag)
-        numeric_df = df.select_dtypes(include=[np.number])
-        intensities = numeric_df.sum(axis=0)
-        for feat_id in numeric_df.columns:
-            try: clean_name = meta.loc[feat_id, 'Clean_Name']
-            except KeyError: continue
-            curr_score = intensities.get(feat_id, 0)
-            if clean_name not in best_features or curr_score > best_features[clean_name][2]:
-                best_features[clean_name] = (file_idx, feat_id, curr_score)
-    
-    files_features_to_keep = {i: [] for i in range(len(results_list))}
-    for c_name, (f_idx, f_id, score) in best_features.items(): files_features_to_keep[f_idx].append(f_id)
-        
-    dfs_to_concat = []; base_group_series = None
-    for i, (df, meta, fname) in enumerate(results_list):
-        if 'SampleID' in df.columns: df = df.set_index('SampleID')
-        cols_to_drop = [c for c in ['Group', 'Source_Files'] if c in df.columns]
-        if 'Group' in df.columns and base_group_series is None: base_group_series = df['Group']
-        df_clean = df.drop(columns=cols_to_drop, errors='ignore')
-        dfs_to_concat.append(df_clean[[c for c in files_features_to_keep[i] if c in df_clean.columns]])
-        
-    try: full_df = pd.concat(dfs_to_concat, axis=1, join='outer')
-    except Exception as e: return None, None, f"合并出错: {str(e)}"
-    
-    full_df.fillna(0, inplace=True)
-    if base_group_series is not None: full_df.insert(0, 'Group', base_group_series.reindex(full_df.index).fillna('Unknown'))
-    else: full_df.insert(0, 'Group', 'Unknown')
-    full_df.reset_index(inplace=True)
-    full_df.rename(columns={'index': 'SampleID'}, inplace=True)
-    full_df['Source_Files'] = full_df['SampleID'].apply(lambda sid: "; ".join(sorted(list(sample_source_map.get(sid, set())))))
-    
-    final_ids = [fid for f_list in files_features_to_keep.values() for fid in f_list]
-    merged_meta = pd.concat([res[1] for res in results_list]).loc[final_ids]
-    return full_df, merged_meta, None
-
-def align_sample_info(data_df, info_df, sample_col_name=None):
-    target_col = sample_col_name if sample_col_name and sample_col_name in info_df.columns else info_df.columns[0]
-    info_map = {re.sub(r'[^a-zA-Z0-9]', '', str(r[target_col])).lower(): r for _, r in info_df.iterrows()}
-    aligned_data = [info_map.get(re.sub(r'[^a-zA-Z0-9]', '', str(sid)).lower(), pd.Series([np.nan]*len(info_df.columns), index=info_df.columns)) for sid in data_df['SampleID']]
-    aligned_df = pd.DataFrame(aligned_data)
-    aligned_df.index = data_df.index 
-    return aligned_df
-
 def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min', norm_method='None', log_transform=True, scale_method='Pareto'):
     numeric_cols = [c for c in df.select_dtypes(include=[np.number]).columns if c not in [group_col, 'SampleID', 'Source_Files']]
     meta_cols = [c for c in df.columns if c not in numeric_cols]
@@ -239,131 +120,40 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.5, impute_method='min
     data_df = data_df.loc[:, data_df.var() > 1e-9]
     return pd.concat([meta_df, data_df], axis=1), data_df.columns.tolist()
 
-# ==============================================================================
-# 🌟 原版严谨通路富集引擎 (应用 MA 科学过滤 + 全局基数 FDR 完美对齐校正)
-# ==============================================================================
-def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_source=None):
-    db = pd.DataFrame()
-    if custom_db_source is not None:
-        try:
-            if hasattr(custom_db_source, 'name'): 
-                db = pd.read_csv(custom_db_source, header=None)
-            elif isinstance(custom_db_source, str) and os.path.exists(custom_db_source): 
-                db = pd.read_csv(custom_db_source, header=None)
-        except Exception as e:
-            print(f"读取库失败: {e}")
-            return pd.DataFrame(), pd.DataFrame()
-            
-    if not db.empty and len(db.columns) >= 2:
-        db = db.rename(columns={0: 'Pathway', 1: 'Compounds'})
-        if str(db.iloc[0]['Pathway']).strip().lower() == 'pathway':
-            db = db.iloc[1:].reset_index(drop=True)
+def align_sample_info(data_df, info_df, sample_col_name=None):
+    target_col = sample_col_name if sample_col_name and sample_col_name in info_df.columns else info_df.columns[0]
+    info_map = {re.sub(r'[^a-zA-Z0-9]', '', str(r[target_col])).lower(): r for _, r in info_df.iterrows()}
+    aligned_data = [info_map.get(re.sub(r'[^a-zA-Z0-9]', '', str(sid)).lower(), pd.Series([np.nan]*len(info_df.columns), index=info_df.columns)) for sid in data_df['SampleID']]
+    aligned_df = pd.DataFrame(aligned_data)
+    aligned_df.index = data_df.index 
+    return aligned_df
+
+def make_unique(series):
+    seen = set(); result = []
+    for item in series:
+        new_item = item; counter = 1
+        while new_item in seen:
+            new_item = f"{item}_{counter}"; counter += 1
+        seen.add(new_item); result.append(new_item)
+    return result
+
+# 🌟 防崩溃文件读取器
+def read_file_robust(file_buffer):
+    file_buffer.seek(0)
+    if file_buffer.name.endswith('.csv'):
+        encodings = ['utf-8', 'utf-8-sig', 'gbk', 'latin1']
+        for enc in encodings:
+            try:
+                file_buffer.seek(0)
+                df = pd.read_csv(file_buffer, encoding=enc, header=None, low_memory=False)
+                return df
+            except Exception: continue
+        file_buffer.seek(0)
+        return pd.read_csv(file_buffer, encoding='utf-8', header=None, errors='ignore')
     else:
-        return pd.DataFrame(), pd.DataFrame() 
-    
-    def get_synonyms(full_name):
-        syns = set()
-        for p in str(full_name).split('|'):
-            for sub_p in p.split(';'):
-                clean_p = re.sub(r'[^a-z0-9]', '', sub_p.lower())
-                if clean_p: syns.add(clean_p)
-        return syns
+        return pd.read_excel(file_buffer, header=None)
 
-    bg_syns_list = []
-    for name in background_metabolites:
-        bg_syns_list.append((name, get_synonyms(name)))
-        
-    sig_names = set(sig_metabolites)
-    
-    all_db_comps = set()
-    for _, row in db.iterrows():
-        if pd.notna(row['Compounds']):
-            for c in str(row['Compounds']).split(';'):
-                clean_c = re.sub(r'[^a-z0-9]', '', c.lower())
-                if clean_c: all_db_comps.add(clean_c)
-                
-    mapped_bg_names = set()
-    mapped_bg_syns = set()
-    for orig_name, syns in bg_syns_list:
-        intersect = syns.intersection(all_db_comps)
-        if intersect:
-            mapped_bg_names.add(orig_name)
-            mapped_bg_syns.update(intersect)
-            
-    mapped_sig_names = mapped_bg_names.intersection(sig_names)
-    
-    N = len(mapped_bg_names)
-    K_drawn = len(mapped_sig_names)
-    
-    if N == 0 or K_drawn == 0: return pd.DataFrame(), pd.DataFrame()
-    
-    results = []
-    filtered_db_records = [] 
-
-    for _, row in db.iterrows():
-        pw = row['Pathway']
-        if pd.isna(row['Compounds']): continue
-
-        if 'Metabolic pathways' in str(pw): continue
-        
-        pw_comps = set([re.sub(r'[^a-z0-9]', '', str(c).lower()) for c in str(row['Compounds']).split(';')])
-        pw_detectable = pw_comps.intersection(mapped_bg_syns)
-        M = len(pw_detectable)
-        
-        if M < 2: continue
-        
-        pw_bg_orig_names = set()
-        for orig_name in mapped_bg_names:
-            syns = next(s for n, s in bg_syns_list if n == orig_name)
-            if syns.intersection(pw_detectable):
-                pw_bg_orig_names.add(orig_name)
-                
-        pw_bg_pure_names = set([str(n).split('|')[0].strip() for n in pw_bg_orig_names])
-        filtered_db_records.append({
-            'Pathway': pw,
-            'Compounds': "; ".join(list(pw_bg_pure_names))
-        })
-        
-        hits_orig_names = set()
-        for orig_name in mapped_sig_names:
-            if orig_name in pw_bg_orig_names:
-                hits_orig_names.add(orig_name)
-                
-        k = len(hits_orig_names)
-        p_val = hypergeom.sf(k - 1, N, M, K_drawn) if k > 0 else 1.0
-        expected = (K_drawn * M) / N
-        enrich_factor = k / expected if expected > 0 else 0
-        hits_pure_names = set([str(n).split('|')[0].strip() for n in hits_orig_names]) if k > 0 else set()
-        
-        results.append({
-            'Pathway': pw, 
-            'Total_in_Pathway': M, 
-            'Hits': k,
-            'P_Value': p_val, 
-            'Enrichment_Factor': enrich_factor,
-            'Hit_Metabolites': ", ".join(list(hits_pure_names)) if k > 0 else ""
-        })
-            
-    res_df = pd.DataFrame(results)
-    filtered_db_df = pd.DataFrame(filtered_db_records)
-    
-    if not res_df.empty:
-        try:
-            from statsmodels.stats.multitest import multipletests
-            _, fdr, _, _ = multipletests(res_df['P_Value'], method='fdr_bh')
-            res_df['FDR'] = fdr
-        except: 
-            res_df['FDR'] = res_df['P_Value']
-            
-        res_df = res_df[res_df['Hits'] > 0].copy()
-        res_df['-Log10_P'] = -np.log10(res_df['P_Value'].astype(float) + 1e-300)
-        res_df = res_df.sort_values('P_Value')
-        
-    return res_df, filtered_db_df
-
-# ==============================================================================
-# 🚀 物理隔离流 B：MetaFlow 通用单表解析器与自动字典合并 (Phase 1 & 2 升级版)
-# ==============================================================================
+# 📚 通用字典构建
 def build_kegg_dictionary(dict_files):
     kegg_mapping = {}
     if not dict_files: return kegg_mapping
@@ -371,8 +161,6 @@ def build_kegg_dictionary(dict_files):
         try:
             df = read_file_robust(file)
             if df.empty: continue
-            
-            # 第一行设为表头进行字典读取
             df.columns = df.iloc[0].astype(str).tolist()
             df = df.iloc[1:].reset_index(drop=True)
             
@@ -399,108 +187,323 @@ def build_kegg_dictionary(dict_files):
         except Exception: pass
     return kegg_mapping
 
-# 🌟 Phase 1 核心：四重编码防崩溃读取器
-def read_file_robust(file_buffer):
-    file_buffer.seek(0)
-    if file_buffer.name.endswith('.csv'):
-        encodings = ['utf-8', 'utf-8-sig', 'gbk', 'latin1']
-        for enc in encodings:
-            try:
-                file_buffer.seek(0)
-                df = pd.read_csv(file_buffer, encoding=enc, header=None, low_memory=False)
-                return df
-            except Exception:
-                continue
-        # 兜底强制读取
-        file_buffer.seek(0)
-        return pd.read_csv(file_buffer, encoding='utf-8', header=None, errors='ignore')
-    else:
-        return pd.read_excel(file_buffer, header=None)
-
-# 🌟 Phase 2 核心：完美 MA 格式极简单表解析引擎
+# ==============================================================================
+# 🚀 引擎 A：MA 极简单表解析器 (针对 lcms_table.csv 这类表)
+# ==============================================================================
 def parse_universal_single_table(file_list, external_kegg_dict=None):
     if external_kegg_dict is None: external_kegg_dict = {}
     try:
-        combined_records = {} 
-        sample_groups = {} 
-        
+        combined_records = {}; sample_groups = {}
         for file in file_list:
             df = read_file_robust(file)
-            if len(df) < 3: continue # 至少要有 Sample, Group, 加上一个代谢物数据
+            if len(df) < 3: continue 
             
-            # MA 通用格式解析：Row 0 是样本名，Row 1 是 Group 分组名
             samples = df.iloc[0, 1:].astype(str).tolist()
             groups = df.iloc[1, 1:].astype(str).tolist()
-            
             for s, g in zip(samples, groups):
                 s_clean = s.strip()
                 if s_clean and s_clean.lower() != 'nan':
                     sample_groups[s_clean] = g.strip()
                     
-            # 提取数据矩阵（第 3 行开始）
             data_df = df.iloc[2:].copy()
             comp_col = data_df.columns[0]
             data_df = data_df.set_index(comp_col)
             data_df.columns = df.iloc[0, 1:].astype(str).str.strip().tolist()
             
-            # 只保留存在有效样本名的列
             valid_samples = [s for s in data_df.columns if s and s.lower() != 'nan']
             data_df = data_df[valid_samples]
-            
-            # 强制转换为数值类型（非数值变为 NaN 后补 0）
             for c in data_df.columns:
                 data_df[c] = pd.to_numeric(data_df[c], errors='coerce').fillna(0)
                 
             data_df['__mean_resp__'] = data_df.mean(axis=1)
-            
             for comp_name, row in data_df.iterrows():
                 c_name = str(comp_name).strip()
                 if not c_name or c_name.lower() == 'nan': continue
-                
-                # Phase 3 预留：多表最大响应值去重保留法（Max Response Rule）
                 m_val = row['__mean_resp__']
                 if c_name not in combined_records or m_val > combined_records[c_name][0]:
                     combined_records[c_name] = (m_val, row.drop('__mean_resp__'))
                     
-        if not combined_records:
-            return None, None, "未能解析出有效的数据。请确保上传了标准的单表格式（第一行样本名，第二行 Group分组名，第三行起为数据矩阵）。"
+        if not combined_records: return None, None, "未能解析出有效数据。请确保符合MA单表格式。"
             
-        final_data = []
-        final_comp_names = []
+        final_data = []; final_comp_names = []
         for c_name, (m_val, row_series) in combined_records.items():
-            final_comp_names.append(c_name)
-            final_data.append(row_series)
+            final_comp_names.append(c_name); final_data.append(row_series)
             
         combined_df = pd.DataFrame(final_data, index=final_comp_names)
         
-        # 智能 KEGG ID 自动贴片
         orig_names = []
         for n in combined_df.index:
-            n_lower = str(n).strip().lower()
-            mapped_kegg = None
+            n_lower = str(n).strip().lower(); mapped_kegg = None
             if n_lower in external_kegg_dict: mapped_kegg = external_kegg_dict[n_lower]
             else:
                 for n_part in n_lower.split(';'):
-                    n_part_clean = n_part.strip()
-                    if n_part_clean in external_kegg_dict:
-                        mapped_kegg = external_kegg_dict[n_part_clean]
-                        break
-            if mapped_kegg: orig_names.append(f"{n} | {mapped_kegg}")
-            else: orig_names.append(n)
+                    if n_part.strip() in external_kegg_dict:
+                        mapped_kegg = external_kegg_dict[n_part.strip()]; break
+            orig_names.append(f"{n} | {mapped_kegg}" if mapped_kegg else n)
                 
         combined_df.index = orig_names
         df_t = combined_df.T
         df_t.index.name = 'SampleID'
         df_t = df_t.reset_index()
-        
         df_t['Group'] = df_t['SampleID'].map(sample_groups).fillna('Unknown')
-        df_t['Source_Files'] = 'Universal_Matrix'
+        df_t['Source_Files'] = 'MA_Single_Matrix'
         
         meta = pd.DataFrame(index=combined_df.index)
         meta['Clean_Name'] = [str(n).split(' | ')[0] for n in combined_df.index]
         meta['Original_Name'] = combined_df.index
         meta['Is_Annotated'] = True 
-        
         return df_t, meta, None
-    except Exception as e: 
-        return None, None, f"通用表格解析失败，请检查格式: {str(e)}"
+    except Exception as e: return None, None, f"通用表格解析失败: {str(e)}"
+
+# ==============================================================================
+# 🚀 引擎 B：MRM 拟靶向后缀解析器 (针对 RP-N-MRM 等多模式宽表)
+# ==============================================================================
+def parse_manual_targeted_files(file_list, metric_suffix=" : 面积", mode_regex=r'-(P|N|RP-P|RP-N|HILIC-P|HILIC-N|POS|NEG)-', external_kegg_dict=None):
+    if external_kegg_dict is None: external_kegg_dict = {}
+    try:
+        all_dfs = []; local_kegg_mapping = {} 
+        for file in file_list:
+            df = read_file_robust(file)
+            if df.empty: continue
+            df.columns = df.iloc[0].astype(str).tolist()
+            df = df.iloc[1:].reset_index(drop=True)
+            
+            comp_col = df.columns[0] 
+            kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
+            if kegg_col:
+                for _, row in df.iterrows():
+                    n = str(row[comp_col]).strip(); k = str(row[kegg_col]).strip()
+                    if k and k.lower() not in ['nan', 'none', '']: local_kegg_mapping[n.lower()] = k
+                    
+            metric_cols = [c for c in df.columns if metric_suffix in str(c)]
+            if not metric_cols: continue 
+                
+            sub_df = df[[comp_col] + metric_cols].copy()
+            sub_df.rename(columns={comp_col: '__Compound__'}, inplace=True)
+            
+            def clean_col_name(c):
+                c = str(c).replace(metric_suffix, "").strip() 
+                c = re.sub(mode_regex, '-', c, flags=re.IGNORECASE) 
+                return c.replace('--', '-') 
+                
+            sub_df.rename(columns={c: clean_col_name(c) for c in metric_cols}, inplace=True)
+            for c in sub_df.columns[1:]: sub_df[c] = pd.to_numeric(sub_df[c], errors='coerce').fillna(0)
+            sub_df['__mean_resp__'] = sub_df.iloc[:, 1:].mean(axis=1)
+            all_dfs.append(sub_df)
+            
+        if not all_dfs: return None, None, f"未找到后缀为 '{metric_suffix}' 的数据列！请检查表头。"
+            
+        combined = pd.concat(all_dfs, ignore_index=True)
+        # 多表自动去重：保留最大响应值
+        combined = combined.sort_values('__mean_resp__', ascending=False).drop_duplicates(subset=['__Compound__'])
+        combined = combined.drop(columns=['__mean_resp__'])
+        combined.set_index('__Compound__', inplace=True)
+        
+        orig_names = []
+        for n in combined.index:
+            n_lower = str(n).strip().lower(); mapped_kegg = None
+            if n_lower in local_kegg_mapping: mapped_kegg = local_kegg_mapping[n_lower]
+            elif n_lower in external_kegg_dict: mapped_kegg = external_kegg_dict[n_lower]
+            else:
+                for n_part in n_lower.split(';'):
+                    if n_part.strip() in external_kegg_dict:
+                        mapped_kegg = external_kegg_dict[n_part.strip()]; break
+            orig_names.append(f"{n} | {mapped_kegg}" if mapped_kegg else n)
+                
+        combined.index = orig_names
+        df_t = combined.T
+        df_t.index.name = 'SampleID'
+        df_t = df_t.reset_index()
+        df_t['Group'] = 'Unknown' # 等待 Info 表对其赋予真实分组
+        df_t['Source_Files'] = 'MRM_Merged_Matrix'
+        
+        meta = pd.DataFrame(index=combined.index)
+        meta['Clean_Name'] = [str(n).split(' | ')[0] for n in combined.index]
+        meta['Original_Name'] = combined.index
+        meta['Is_Annotated'] = True 
+        return df_t, meta, None
+    except Exception as e: return None, None, f"MRM 拟靶向表格解析失败: {str(e)}"
+
+# ==============================================================================
+# 🚀 引擎 C：MetDNA 原生管线提取器
+# ==============================================================================
+def parse_metdna_file(file_buffer, file_name):
+    try:
+        df = read_file_robust(file_buffer)
+        if df.empty: return None, None, "表格为空"
+        df.columns = df.iloc[0].astype(str).tolist()
+        df = df.iloc[1:].reset_index(drop=True)
+    except Exception as e: return None, None, f"读取失败: {str(e)}"
+
+    known_meta = {'peak_name', 'mz', 'rt', 'id', 'id_zhulab', 'name', 'formula', 'confidence_level', 'smiles', 'inchikey', 'isotope', 'adduct', 'total_score', 'mz_error', 'rt_error_abs', 'rt_error_rela', 'ms2_score', 'iden_score', 'iden_type', 'peak_group_id', 'base_peak', 'num_peaks', 'cons_formula_pred', 'id_kegg', 'id_hmdb', 'id_metacyc'}
+    sample_cols = [c for c in df.columns if str(c).lower() not in known_meta]
+            
+    if not sample_cols: return None, None, "未找到样本数据列。"
+
+    file_tag = os.path.splitext(os.path.basename(file_name))[0]
+    clean_tag = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', file_tag)
+    if 'name' not in df.columns: df['name'] = ""
+    if 'confidence_level' not in df.columns: df['confidence_level'] = 'Unknown'
+    
+    df['name'] = df['name'].fillna("").astype(str)
+    mask_annotated = (df['name'] != "") & (df['name'].str.lower() != "nan")
+    clean_names = df['name'].str.split(';', expand=True)[0]
+    unannotated_ids = "mz_" + df['mz'].astype(str) + "_rt_" + df['rt'].astype(str) if 'mz' in df.columns and 'rt' in df.columns else df.index.astype(str)
+    final_ids = np.where(mask_annotated, clean_names + "_" + clean_tag, unannotated_ids)
+    final_ids = make_unique(final_ids)
+
+    kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
+    if kegg_col is not None:
+        orig_names = [f"{n} | {k}" if str(k).strip() and str(k).lower() not in ['nan', 'none', ''] else str(n) for n, k in zip(df['name'], df[kegg_col].fillna(''))]
+    else:
+        orig_names = df['name']
+
+    meta_df = pd.DataFrame({
+        "Metabolite_ID": final_ids, 
+        "Original_Name": orig_names, 
+        "Clean_Name": np.where(mask_annotated, clean_names, final_ids), 
+        "Confidence_Level": df['confidence_level'], 
+        "Is_Annotated": mask_annotated, 
+        "Source_File": clean_tag
+    })
+    meta_df.set_index('Metabolite_ID', inplace=True)
+    
+    df_data = df[sample_cols].copy()
+    for c in df_data.columns: df_data[c] = pd.to_numeric(df_data[c], errors='coerce').fillna(0)
+    df_data.index = meta_df.index
+    df_transposed = df_data.T
+    df_transposed.reset_index(inplace=True)
+    df_transposed.rename(columns={'index': 'SampleID'}, inplace=True)
+    df_transposed['Source_Files'] = clean_tag
+    df_transposed['Group'] = 'Unknown'
+    
+    return df_transposed, meta_df, None
+
+def merge_multiple_dfs(results_list):
+    if not results_list: return None, None, "无数据"
+    best_features = {}; sample_source_map = {}
+    for file_idx, (df, meta, fname) in enumerate(results_list):
+        current_tag = df['Source_Files'].iloc[0]
+        for sid in df['SampleID']:
+            if sid not in sample_source_map: sample_source_map[sid] = set()
+            sample_source_map[sid].add(current_tag)
+        numeric_df = df.select_dtypes(include=[np.number])
+        intensities = numeric_df.sum(axis=0)
+        for feat_id in numeric_df.columns:
+            try: clean_name = meta.loc[feat_id, 'Clean_Name']
+            except KeyError: continue
+            curr_score = intensities.get(feat_id, 0)
+            if clean_name not in best_features or curr_score > best_features[clean_name][2]:
+                best_features[clean_name] = (file_idx, feat_id, curr_score)
+    
+    files_features_to_keep = {i: [] for i in range(len(results_list))}
+    for c_name, (f_idx, f_id, score) in best_features.items(): files_features_to_keep[f_idx].append(f_id)
+        
+    dfs_to_concat = []
+    for i, (df, meta, fname) in enumerate(results_list):
+        df = df.set_index('SampleID')
+        df_clean = df.drop(columns=['Group', 'Source_Files'], errors='ignore')
+        dfs_to_concat.append(df_clean[[c for c in files_features_to_keep[i] if c in df_clean.columns]])
+        
+    full_df = pd.concat(dfs_to_concat, axis=1, join='outer').fillna(0)
+    full_df.insert(0, 'Group', 'Unknown')
+    full_df.reset_index(inplace=True)
+    full_df.rename(columns={'index': 'SampleID'}, inplace=True)
+    full_df['Source_Files'] = full_df['SampleID'].apply(lambda sid: "; ".join(sorted(list(sample_source_map.get(sid, set())))))
+    
+    final_ids = [fid for f_list in files_features_to_keep.values() for fid in f_list]
+    merged_meta = pd.concat([res[1] for res in results_list]).loc[final_ids]
+    return full_df, merged_meta, None
+
+# ==============================================================================
+# 🌟 原版严谨通路富集引擎
+# ==============================================================================
+def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_source=None):
+    db = pd.DataFrame()
+    if custom_db_source is not None:
+        try:
+            if hasattr(custom_db_source, 'name'): db = pd.read_csv(custom_db_source, header=None)
+            elif isinstance(custom_db_source, str) and os.path.exists(custom_db_source): db = pd.read_csv(custom_db_source, header=None)
+        except Exception as e: return pd.DataFrame(), pd.DataFrame()
+            
+    if not db.empty and len(db.columns) >= 2:
+        db = db.rename(columns={0: 'Pathway', 1: 'Compounds'})
+        if str(db.iloc[0]['Pathway']).strip().lower() == 'pathway': db = db.iloc[1:].reset_index(drop=True)
+    else: return pd.DataFrame(), pd.DataFrame() 
+    
+    def get_synonyms(full_name):
+        syns = set()
+        for p in str(full_name).split('|'):
+            for sub_p in p.split(';'):
+                clean_p = re.sub(r'[^a-z0-9]', '', sub_p.lower())
+                if clean_p: syns.add(clean_p)
+        return syns
+
+    bg_syns_list = [(name, get_synonyms(name)) for name in background_metabolites]
+    sig_names = set(sig_metabolites)
+    
+    all_db_comps = set()
+    for _, row in db.iterrows():
+        if pd.notna(row['Compounds']):
+            for c in str(row['Compounds']).split(';'):
+                clean_c = re.sub(r'[^a-z0-9]', '', c.lower())
+                if clean_c: all_db_comps.add(clean_c)
+                
+    mapped_bg_names, mapped_bg_syns = set(), set()
+    for orig_name, syns in bg_syns_list:
+        intersect = syns.intersection(all_db_comps)
+        if intersect:
+            mapped_bg_names.add(orig_name); mapped_bg_syns.update(intersect)
+            
+    mapped_sig_names = mapped_bg_names.intersection(sig_names)
+    N, K_drawn = len(mapped_bg_names), len(mapped_sig_names)
+    
+    if N == 0 or K_drawn == 0: return pd.DataFrame(), pd.DataFrame()
+    
+    results, filtered_db_records = [], []
+    for _, row in db.iterrows():
+        pw = row['Pathway']
+        if pd.isna(row['Compounds']) or 'Metabolic pathways' in str(pw): continue
+        
+        pw_comps = set([re.sub(r'[^a-z0-9]', '', str(c).lower()) for c in str(row['Compounds']).split(';')])
+        pw_detectable = pw_comps.intersection(mapped_bg_syns)
+        M = len(pw_detectable)
+        if M < 2: continue
+        
+        pw_bg_orig_names = set()
+        for orig_name in mapped_bg_names:
+            syns = next(s for n, s in bg_syns_list if n == orig_name)
+            if syns.intersection(pw_detectable): pw_bg_orig_names.add(orig_name)
+                
+        pw_bg_pure_names = set([str(n).split('|')[0].strip() for n in pw_bg_orig_names])
+        filtered_db_records.append({'Pathway': pw, 'Compounds': "; ".join(list(pw_bg_pure_names))})
+        
+        hits_orig_names = set([n for n in mapped_sig_names if n in pw_bg_orig_names])
+        k = len(hits_orig_names)
+        
+        p_val = hypergeom.sf(k - 1, N, M, K_drawn) if k > 0 else 1.0
+        expected = (K_drawn * M) / N
+        enrich_factor = k / expected if expected > 0 else 0
+        hits_pure_names = set([str(n).split('|')[0].strip() for n in hits_orig_names]) if k > 0 else set()
+        
+        results.append({
+            'Pathway': pw, 'Total_in_Pathway': M, 'Hits': k,
+            'P_Value': p_val, 'Enrichment_Factor': enrich_factor,
+            'Hit_Metabolites': ", ".join(list(hits_pure_names)) if k > 0 else ""
+        })
+            
+    res_df = pd.DataFrame(results)
+    filtered_db_df = pd.DataFrame(filtered_db_records)
+    
+    if not res_df.empty:
+        try:
+            from statsmodels.stats.multitest import multipletests
+            _, fdr, _, _ = multipletests(res_df['P_Value'], method='fdr_bh')
+            res_df['FDR'] = fdr
+        except: res_df['FDR'] = res_df['P_Value']
+            
+        res_df = res_df[res_df['Hits'] > 0].copy()
+        res_df['-Log10_P'] = -np.log10(res_df['P_Value'].astype(float) + 1e-300)
+        res_df = res_df.sort_values('P_Value')
+        
+    return res_df, filtered_db_df
