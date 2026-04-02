@@ -484,8 +484,15 @@ if 'analysis_res' in st.session_state:
     
     st.title("📊 综合代谢组学分析报告")
     st.markdown(f"**对比**: {res['case']} vs {res['ctrl']} &nbsp;&nbsp;|&nbsp;&nbsp; **模型**: R²Y = `{res['R2Y']:.3f}` &nbsp;&nbsp;|&nbsp;&nbsp; Q² = `{res['Q2']:.3f}`")
-    if res['b_q2'] < 0.05 and res['Q2'] > 0.5: st.success(f"✅ OPLS-DA 模型优秀且未过拟合！ (Q²截距: {res['b_q2']:.3f})")
-    else: st.warning(f"⚠️ 模型可能过拟合，或组间差异不大 (Q²截距: {res['b_q2']:.3f})")
+    b_q2_val = res['b_q2']
+    q2_val = res['Q2']
+    
+    if b_q2_val < 0.05 and q2_val > 0.5:
+        st.success(f"✅ OPLS-DA 模型预测能力强，且未发生过拟合 (Q²={q2_val:.3f}, 截距={b_q2_val:.3f})")
+    elif b_q2_val < 0.05 and q2_val <= 0.5:
+        st.info(f"💡 模型未过拟合，但组间整体代谢差异偏弱 (Q²={q2_val:.3f} < 0.5, 截距={b_q2_val:.3f})")
+    else:
+        st.warning(f"⚠️ 警告：模型存在严重的过拟合风险，不建议采信其 VIP 值！(Q²截距={b_q2_val:.3f} ≥ 0.05)")
 
     tabs = st.tabs(["🎯 OPLS-DA", "🔄 置换检验", "🧬 S-Plot", "📊 VIP", "🌐 PCA", "🌋 火山/热图", "📑 清单", "📏 列线图", "🕸️ 通路富集", "🔗 机制网络图", "📄 导出报告与AI助手"])
     
