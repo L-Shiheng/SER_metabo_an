@@ -8,7 +8,7 @@ import re
 import io
 import base64
 import requests
-import csv # 用于兼容 MA 的 QUOTE_ALL
+import csv 
 import plotly.express as px
 import plotly.graph_objects as go
 import seaborn as sns
@@ -18,9 +18,9 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
 # ==========================================
-# 0. 自定义模块导入与配置
+# 0. 品牌更新与 UI 配置 (MetaFlow Studio)
 # ==========================================
-st.set_page_config(page_title="MetaboAnalyst Pro", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="MetaFlow Studio", page_icon="🧬", layout="wide")
 
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'PingFang SC', 'Arial Unicode MS', 'sans-serif']
 plt.rcParams['axes.unicode_minus'] = False
@@ -29,7 +29,7 @@ try:
     from data_preprocessing import (
         data_cleaning_pipeline, 
         parse_metdna_file, 
-        parse_manual_targeted_files, 
+        parse_universal_single_table, 
         merge_multiple_dfs, 
         align_sample_info, 
         OPLS_DA, 
@@ -37,16 +37,13 @@ try:
         build_kegg_dictionary
     )
     from stats_utils import run_pairwise_statistics
-    from plot_utils import (
-        update_layout_square, 
-        get_ellipse_coordinates, 
-        plot_nomogram
-    )
+    from plot_utils import update_layout_square, get_ellipse_coordinates, plot_nomogram
     from report_generator import generate_offline_html, generate_ai_prompt
 except ImportError as e:
-    st.error(f"❌ 严重错误：未找到依赖文件。请确保同目录下有所需的 .py 文件。详情: {e}")
+    st.error(f"❌ 严重错误：未找到依赖文件。详情: {e}")
     st.stop()
 
+# 恢复 SERRF 模块检测
 try:
     from serrf_module import serrf_normalization
 except ImportError:
@@ -64,163 +61,143 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. 状态管理 & 侧边栏
+# 1. 极简侧边栏数据流控制台
 # ==========================================
 if 'raw_df' not in st.session_state: st.session_state.raw_df = None
 if 'feature_meta' not in st.session_state: st.session_state.feature_meta = None
 if 'data_loaded' not in st.session_state: st.session_state.data_loaded = False
 if 'qc_report' not in st.session_state: st.session_state.qc_report = {}
-if 'all_sample_ids' not in st.session_state: st.session_state.all_sample_ids = []
 
 with st.sidebar:
     st.header("🛠️ 数据控制台")
-    st.markdown("#### 1. 上传 Sample Info (必选)")
-    sample_info_file = st.file_uploader("Info表格 (.csv/.xlsx)", type=["csv", "xlsx"], key="info")
+    
+    data_source = st.radio(
+        "选择数据流模式", 
+        ["通用单表矩阵 (MetaFlow/MA 格式)", "MetDNA 原始工作流"], 
+        index=0,
+        help="【通用单表】：无需独立 Sample Info，前两行自带样本名和分组，自动规避乱码。\n【MetDNA】：上传原始宽表，需外挂 Sample Info。"
+    )
+    
     info_df = None; candidate_samples = []; user_sample_col = None; user_group_col = None
+    excluded_samples = []
     
-    if sample_info_file:
-        try:
-            sample_info_file.seek(0)
-            info_df = pd.read_csv(sample_info_file) if sample_info_file.name.endswith('.csv') else pd.read_excel(sample_info_file)
-            cols = list(info_df.columns); cols_lower = [c.lower() for c in cols]
-            idx_sample = next((cols_lower.index(kw) for kw in ['sample.name', 'sample_name', 'sample', 'name', 'id'] if kw in cols_lower), 0)
-            idx_group = next((cols_lower.index(kw) for kw in ['group', 'class', 'type', 'condition'] if kw in cols_lower), 1 if len(cols) > 1 else 0)
-            c1, c2 = st.columns(2)
-            user_sample_col = c1.selectbox("样本列", cols, index=idx_sample)
-            user_group_col = c2.selectbox("分组列", cols, index=idx_group)
-            if user_sample_col: candidate_samples = info_df[user_sample_col].astype(str).unique().tolist()
-            st.caption(f"✅ 已加载 {len(info_df)} 行")
-        except Exception as e: st.error(f"Info 读取失败: {e}")
+    if data_source == "MetDNA 原始工作流":
+        st.markdown("#### 1. 上传 Sample Info")
+        sample_info_file = st.file_uploader("Info表格 (.csv/.xlsx)", type=["csv", "xlsx"], key="info")
+        if sample_info_file:
+            try:
+                sample_info_file.seek(0)
+                info_df = pd.read_csv(sample_info_file) if sample_info_file.name.endswith('.csv') else pd.read_excel(sample_info_file)
+                cols = list(info_df.columns); cols_lower = [c.lower() for c in cols]
+                idx_sample = next((cols_lower.index(kw) for kw in ['sample.name', 'sample_name', 'sample', 'name', 'id'] if kw in cols_lower), 0)
+                idx_group = next((cols_lower.index(kw) for kw in ['group', 'class', 'type', 'condition'] if kw in cols_lower), 1 if len(cols) > 1 else 0)
+                c1, c2 = st.columns(2)
+                user_sample_col = c1.selectbox("样本列", cols, index=idx_sample)
+                user_group_col = c2.selectbox("分组列", cols, index=idx_group)
+                if user_sample_col: candidate_samples = info_df[user_sample_col].astype(str).unique().tolist()
+                st.caption(f"✅ 已加载 {len(info_df)} 行")
+            except Exception as e: st.error(f"Info 读取失败: {e}")
+            
+        excluded_samples = st.multiselect("2. 样本剔除 (黑名单)", options=candidate_samples, default=[], help="从分析中彻底移除异常样本。")
+        
+        # 恢复 SERRF 校正 UI (仅在有 Info 表时才可配置)
+        use_serrf = st.checkbox("3. 启用 SERRF 批次校正", value=False)
+        serrf_ready = False
+        if use_serrf:
+            if info_df is not None:
+                idx_order = next((i for i, c in enumerate(cols_lower) if any(x in c for x in ['order', 'run', 'idx', 'seq'])), 0)
+                final_type_idx = cols.index(user_group_col) if user_group_col and info_df[user_group_col].astype(str).str.contains('QC', case=False).any() else next((i for i, c in enumerate(cols_lower) if any(x in c for x in ['class', 'type', 'group'])), 0)
+                default_qc_label = next((v for v in info_df.iloc[:, final_type_idx].unique().astype(str) if 'qc' in v.lower()), "QC")
+                sc1, sc2, sc3 = st.columns(3)
+                run_order_col = sc1.selectbox("进样顺序列", cols, index=idx_order)
+                sample_type_col = sc2.selectbox("样本类型列", cols, index=final_type_idx)
+                qc_label = sc3.text_input("QC标识", value=default_qc_label)
+                serrf_ready = True
+            else: 
+                st.warning("⚠️ 需先上传 Info 表才能配置 SERRF")
+                
+    else:
+        st.markdown("#### 1. 上传数据矩阵")
+        st.caption("要求：Row 1 为样本名，Row 2 为分组，Row 3 起为代谢物与丰度。无多余后缀。")
+        ex_str = st.text_input("2. 样本剔除 (选填)", help="输入需剔除的样本名，用英文逗号分隔，如: S1,S5")
+        if ex_str: excluded_samples = [s.strip() for s in ex_str.split(',') if s.strip()]
 
-    excluded_samples = st.multiselect("2. 样本剔除 (黑名单)", options=candidate_samples, default=[])
-    
-    use_serrf = st.checkbox("3. 启用 SERRF 批次校正", value=False)
-    serrf_ready = False
-    if use_serrf:
-        if info_df is not None:
-            cols = list(info_df.columns); cols_lower = [c.lower() for c in cols]
-            idx_order = next((i for i, c in enumerate(cols_lower) if any(x in c for x in ['order', 'run', 'idx', 'seq'])), 0)
-            final_type_idx = cols.index(user_group_col) if user_group_col and info_df[user_group_col].astype(str).str.contains('QC', case=False).any() else next((i for i, c in enumerate(cols_lower) if any(x in c for x in ['class', 'type', 'group'])), 0)
-            default_qc_label = next((v for v in info_df.iloc[:, final_type_idx].unique().astype(str) if 'qc' in v.lower()), "QC")
-            c1, c2, c3 = st.columns(3)
-            run_order_col = c1.selectbox("Order", cols, index=idx_order)
-            sample_type_col = c2.selectbox("Type", cols, index=final_type_idx)
-            qc_label = c3.text_input("QC名", value=default_qc_label)
-            serrf_ready = True
-        else: st.warning("⚠️ 需上传 Info 表")
-
-    st.markdown("#### 4. 在线通路引擎 (自动调用 KEGG API)")
-    species = st.selectbox("选择物种 (强烈影响富集显著性)", ["Human (人类 - 推荐)", "Mouse (小鼠)", "Rat (大鼠)", "General (所有物种)"], index=0)
-    species_code = {"Human (人类 - 推荐)": "hsa", "Mouse (小鼠)": "mmu", "Rat (大鼠)": "rno", "General (所有物种)": "map"}[species]
+    st.markdown("#### 3. KEGG 通路配置")
+    species = st.selectbox("物种背景", ["Human (Homo sapiens)", "Mouse (Mus musculus)", "Rat (Rattus norvegicus)", "General (所有物种)"], index=0, help="强烈影响超几何富集背景的计算精度。")
+    species_code = {"Human (Homo sapiens)": "hsa", "Mouse (Mus musculus)": "mmu", "Rat (Rattus norvegicus)": "rno", "General (所有物种)": "map"}[species]
     db_filename = f"kegg_{species_code}.csv"
     
-    custom_pathway_file = st.file_uploader("手动上传库 (覆盖在线库)", type=["csv", "gmt"], key="pathway_db")
+    custom_pathway_file = st.file_uploader("自定义通路库 (.csv)", type=["csv", "gmt"], key="pathway_db", help="若上传此项，则覆盖在线库。要求：无表头，化合物用分号+空格分隔。")
     
-    if st.button(f"🔄 强制同步 {species_code} 最新通路库", use_container_width=True) or not os.path.exists(db_filename):
-        with st.spinner(f"正在连接 KEGG API 拉取 {species} 最新专属通路库..."):
+    if st.button(f"🔄 同步 {species_code} 最新通路库", use_container_width=True) or not os.path.exists(db_filename):
+        with st.spinner(f"正在连接 KEGG API 拉取 {species} 库..."):
             try:
                 pw_res = requests.get(f"http://rest.kegg.jp/list/pathway/{species_code}")
-                pw_dict = {}
-                for line in pw_res.text.strip().split('\n'):
-                    if line:
-                        parts = line.split('\t')
-                        pw_id_num = re.sub(r'^[a-z]+', '', parts[0].replace('path:', ''))
-                        pw_dict[pw_id_num] = parts[1]
-                
+                pw_dict = {re.sub(r'^[a-z]+', '', p.split('\t')[0].replace('path:', '')): p.split('\t')[1] for p in pw_res.text.strip().split('\n') if p}
                 link_res = requests.get("http://rest.kegg.jp/link/cpd/pathway")
                 pw_cpd_map = {}
                 for line in link_res.text.strip().split('\n'):
-                    if line:
-                        parts = line.split('\t')
-                        if parts[0].startswith('path:map'):
-                            pw_num = parts[0].replace('path:map', '')
-                            cpd = parts[1].replace('cpd:', '')
-                            if pw_num not in pw_cpd_map:
-                                pw_cpd_map[pw_num] = []
-                            pw_cpd_map[pw_num].append(cpd)
-                
-                data = []
-                for pw_num, name in pw_dict.items():
-                    if pw_num in pw_cpd_map:
-                        data.append({'Pathway': name, 'Compounds': ';'.join(pw_cpd_map[pw_num])})
-                pd.DataFrame(data).to_csv(db_filename, index=False)
+                    if line and line.startswith('path:map'):
+                        pw_num, cpd = line.split('\t')[0].replace('path:map', ''), line.split('\t')[1].replace('cpd:', '')
+                        if pw_num not in pw_cpd_map: pw_cpd_map[pw_num] = []
+                        pw_cpd_map[pw_num].append(cpd)
+                pd.DataFrame([{'Pathway': name, 'Compounds': ';'.join(pw_cpd_map[pw_num])} for pw_num, name in pw_dict.items() if pw_num in pw_cpd_map]).to_csv(db_filename, index=False)
                 st.toast(f"✅ {species} 库同步成功！")
-            except Exception as e:
-                st.error(f"❌ 网络请求失败: {str(e)}")
+            except Exception as e: st.error("❌ 网络请求失败，请检查网络或稍后再试。")
     
-    st.markdown("#### 5. 上传代谢组学数据")
-    data_source = st.radio("选择数据源类型 (物理隔离双轨制):", ["MetDNA 原始结果", "手动 MRM 靶向宽表"], index=0)
-    
-    metric_suffix = " : 面积 "
-    mode_regex = r'-(P|N|RP-P|RP-N|HILIC-P|HILIC-N|POS|NEG)-'
     dict_files = None
-    
-    if data_source == "手动 MRM 靶向宽表":
-        st.info("💡 系统将调用专属【宽表字典融合引擎】")
-        c1, c2 = st.columns(2)
-        metric_suffix = c1.text_input("提取指标", value=" : 面积 ")
-        mode_regex = c2.text_input("模式清洗正则", value=mode_regex)
-        feature_scope = "全部特征" 
-        
-        st.markdown("##### 📚 关联 MetDNA 字典 (仅手动表模式可用)")
-        dict_files = st.file_uploader("上传 MetDNA 字典表 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="dict_files")
-        
+    if data_source == "通用单表矩阵 (MetaFlow/MA 格式)":
+        st.markdown("#### 4. KEGG 注释字典 (选填)")
+        dict_files = st.file_uploader("关联 MetDNA 字典", type=["csv", "xlsx"], accept_multiple_files=True, key="dict_files", help="提供 名称<->KEGG 对应关系，系统将自动映射单表中的化合物，实现 100% 精准匹配。")
+        feature_scope = "全部特征"
+        uploaded_files = st.file_uploader("上传主分析数据表 (支持多选自动去重合并)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
     else:
-        st.info("💡 系统将调用纯净的【MetDNA 原始解析引擎】")
+        st.markdown("#### 4. 上传代谢组学数据")
         feature_scope = st.radio("特征范围", ["仅已注释特征", "全部特征"], index=0)
+        uploaded_files = st.file_uploader("上传 MetDNA 原表 (支持多选自动合并)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
         
-    uploaded_files = st.file_uploader("上传主分析数据表 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
     st.markdown("---")
-    start_process = st.container().button("📥 开始清洗并加载数据", use_container_width=True, type="primary")
+    start_process = st.container().button("📥 加载数据矩阵", use_container_width=True, type="primary")
 
 # ==========================================
-# 2. 数据处理运行 (隔离路由)
+# 2. 路由与万能解析引擎
 # ==========================================
 if start_process:
     st.session_state.qc_report = {}
-    if 'analysis_res' in st.session_state:
-        del st.session_state['analysis_res']
+    if 'analysis_res' in st.session_state: del st.session_state['analysis_res']
         
-    if not uploaded_files: st.error("请先上传数据文件！")
+    if not uploaded_files: 
+        st.error("请先上传数据文件！")
     else:
         progress_bar = st.progress(0); status_text = st.empty()
         
-        if data_source == "手动 MRM 靶向宽表":
-            with st.spinner("正在启动手动宽表融合引擎..."):
+        if data_source == "通用单表矩阵 (MetaFlow/MA 格式)":
+            with st.spinner("正在启动万能矩阵解析引擎 (内置多重编码防崩溃)..."):
                 ext_dict = build_kegg_dictionary(dict_files) if dict_files else {}
-                if ext_dict: st.success(f"📚 成功构建后台字典：共提取到 {len(ext_dict)} 个独特代谢物的 KEGG 映射！")
+                if ext_dict: st.success(f"📚 成功关联后台字典：提取到 {len(ext_dict)} 个专属 KEGG 映射！")
                 
-                df_t, meta, err = parse_manual_targeted_files(uploaded_files, metric_suffix, mode_regex, external_kegg_dict=ext_dict)
+                df_t, meta, err = parse_universal_single_table(uploaded_files, external_kegg_dict=ext_dict)
                 
-                if err: 
-                    st.error(err)
+                if err: st.error(err)
                 else:
                     if excluded_samples:
                         ex_fps = set([re.sub(r'[^a-z0-9]', '', str(s).strip().lower()) for s in excluded_samples])
                         df_t = df_t[~df_t['SampleID'].astype(str).apply(lambda s: re.sub(r'[^a-z0-9]', '', str(s).strip().lower())).isin(ex_fps)]
                     
-                    if info_df is not None:
-                        info_aligned = align_sample_info(df_t, info_df, sample_col_name=user_sample_col)
-                        if user_group_col and user_group_col in info_aligned.columns: df_t['Group'] = info_aligned[user_group_col].fillna('Unknown').values
-                        else:
-                            g_col = next((c for c in info_aligned.columns if c.lower() in ['group', 'class']), None)
-                            if g_col: df_t['Group'] = info_aligned[g_col].fillna('Unknown').values
-                    
                     st.session_state.raw_df = df_t
                     st.session_state.feature_meta = meta
                     st.session_state.data_loaded = True
-                    st.success("✅ 手动靶向数据融合完成！")
+                    st.success("✅ 单表流数据加载、多重编码兼容与多表去重成功！")
                     st.rerun()
 
         else:
-            with st.spinner("正在启动 MetDNA 原表解析引擎..."):
-                parsed_results = []; current_run_samples = set()
+            with st.spinner("正在启动 MetDNA 解析引擎..."):
+                parsed_results = []
                 for i, file in enumerate(uploaded_files):
                     status_text.text(f"处理中: {file.name} ...")
                     try:
                         file_type = 'csv' if file.name.endswith('.csv') else 'excel'
                         unique_name = f"{os.path.splitext(file.name)[0]}_{i+1}{os.path.splitext(file.name)[1]}"
-                        
                         df_t, meta, err = parse_metdna_file(file, unique_name, file_type=file_type)
                         if err: st.warning(f"{file.name}: {err}"); continue
                         parsed_results.append((df_t, meta, unique_name))
@@ -229,12 +206,11 @@ if start_process:
     
                 if parsed_results:
                     raw_df, feature_meta, err = merge_multiple_dfs(parsed_results)
-                    if err:
-                        st.error(err)
+                    if err: st.error(err)
                     else:
                         if excluded_samples:
-                            ex_fingerprints = set([re.sub(r'[^a-z0-9]', '', str(s).strip().lower()) for s in excluded_samples])
-                            raw_df = raw_df[~raw_df['SampleID'].astype(str).apply(lambda s: re.sub(r'[^a-z0-9]', '', str(s).strip().lower())).isin(ex_fingerprints)]
+                            ex_fps = set([re.sub(r'[^a-z0-9]', '', str(s).strip().lower()) for s in excluded_samples])
+                            raw_df = raw_df[~raw_df['SampleID'].astype(str).apply(lambda s: re.sub(r'[^a-z0-9]', '', str(s).strip().lower())).isin(ex_fps)]
                         
                         if feature_scope.startswith("仅已注释"):
                             annotated_ids = feature_meta[feature_meta['Is_Annotated'] == True].index
@@ -250,57 +226,58 @@ if start_process:
                         st.session_state.raw_df = raw_df
                         st.session_state.feature_meta = feature_meta
                         st.session_state.data_loaded = True
-                        st.success("✅ MetDNA 纯净解析完成！")
+                        st.success("✅ MetDNA 原始分析流加载成功！")
                         st.rerun()
 
 # ==========================================
-# 3. 统计与可视化展示区
+# 3. 统计与可视化展示区 (脱水瘦身版)
 # ==========================================
-if st.session_state.data_loaded and st.session_state.raw_df is not None:
-    raw_df = st.session_state.raw_df
-    st.info(f"数据总览: {len(raw_df)} 样本 x {len(raw_df.columns)-3} 特征")
-    csv_data = raw_df.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 导出清洗前合并数据", csv_data, f"Metabo_Raw_{datetime.datetime.now().strftime('%Y%m%d')}.csv", "text/csv")
-    st.divider()
-
-    with st.form(key='analysis_form'):
-        st.markdown("### ⚙️ 统计与富集分析设置")
-        non_num = raw_df.select_dtypes(exclude=[np.number]).columns.tolist()
-        group_col = st.selectbox("分组列", non_num, index=non_num.index('Group') if 'Group' in non_num else 0)
-        
-        with st.expander("数据预处理配置 (点击展开)", expanded=False):
-            c_p1, c_p2 = st.columns(2)
-            miss_th = c_p1.slider("剔除缺失率 > X", 0.0, 1.0, 0.20)
-            impute_m = c_p2.selectbox("缺失值填充", ["KNN", "min", "mean", "zero"], index=0)
-            
-            c_p3, c_p4 = st.columns(2)
-            norm_m = c_p3.selectbox("样本归一化", ["PQN", "Median", "Sum", "None"], index=0)
-            scale_m = c_p4.selectbox("特征缩放 (Scaling)", ["Pareto", "Auto", "None"], index=0)
-            do_log = st.checkbox("Log2 对数转化", value=False)
-
-        with st.expander("🎨 可视化高级工具栏 (图表参数微调)", expanded=False):
-            c_t1, c_t2, c_t3 = st.columns(3)
-            vip_show_num = c_t1.slider("VIP 柱状图显示数量", min_value=10, max_value=50, value=25, step=5)
-            nomo_num = c_t2.slider("列线图纳入标志物数", min_value=2, max_value=8, value=4)
-            pw_show_num = c_t3.slider("网络图通路数", min_value=5, max_value=30, value=15, step=5)
-
-        cur_grps = sorted(raw_df[group_col].astype(str).unique())
-        sel_grps = st.multiselect("纳入对比组 (OPLS-DA 需要严格的 2 组对比)", cur_grps, default=cur_grps[:2] if len(cur_grps)>=2 else cur_grps)
-        
-        c1, c2, c3, c4 = st.columns(4)
-        valid = list(sel_grps)
-        case = c1.selectbox("Case 组 (实验组)", valid, index=0 if valid else None)
-        ctrl = c2.selectbox("Control 组 (对照组)", valid, index=1 if len(valid)>1 else 0)
-        p_th = c3.number_input("P-value 阈值", value=0.05, step=0.01)
-        fc_th = c4.number_input("Log2 FC 阈值", value=0.58, step=0.10)
-        
-        submit_button = st.form_submit_button(label='🚀 运行全自动分析 (生成交互图表与报告)')
-
 if not st.session_state.data_loaded:
-    st.title("🧬 MetaboAnalyst Pro"); st.info("👈 请在左侧面板上传并处理数据"); st.stop()
+    st.title("🧬 MetaFlow Studio")
+    st.info("👈 请在左侧控制台上传数据并加载矩阵。")
+    st.stop()
+
+raw_df = st.session_state.raw_df
+st.info(f"数据总览: {len(raw_df)} 样本 x {len(raw_df.columns)-3} 特征")
+csv_data = raw_df.to_csv(index=False).encode('utf-8')
+st.download_button("📥 导出清洗前合并数据", csv_data, f"MetaFlow_Raw_{datetime.datetime.now().strftime('%Y%m%d')}.csv", "text/csv")
+st.divider()
+
+with st.form(key='analysis_form'):
+    st.markdown("### ⚙️ 分析参数配置")
+    non_num = raw_df.select_dtypes(exclude=[np.number]).columns.tolist()
+    group_col = st.selectbox("分组列", non_num, index=non_num.index('Group') if 'Group' in non_num else 0)
+    
+    with st.expander("数据预处理", expanded=False):
+        c_p1, c_p2 = st.columns(2)
+        miss_th = c_p1.slider("缺失率过滤阈值", 0.0, 1.0, 0.20, help="特征缺失率高于此值将被剔除")
+        impute_m = c_p2.selectbox("缺失值填充", ["KNN", "min", "mean", "zero"], index=0)
+        
+        c_p3, c_p4 = st.columns(2)
+        norm_m = c_p3.selectbox("样本归一化", ["PQN", "Median", "Sum", "None"], index=0, help="消除样本间进样系统误差")
+        scale_m = c_p4.selectbox("特征缩放", ["Pareto", "Auto", "None"], index=0, help="推荐 Pareto，降低高丰度物质绝对权重，提升小分子话语权")
+        do_log = st.checkbox("Log2 对数转化", value=True, help="极力推荐：消除高低丰度物质间的极度偏态分布。")
+
+    with st.expander("高级可视化设置", expanded=False):
+        c_t1, c_t2, c_t3 = st.columns(3)
+        vip_show_num = c_t1.slider("VIP 柱状图展示数", min_value=10, max_value=50, value=25, step=5)
+        nomo_num = c_t2.slider("列线图标志物数", min_value=2, max_value=8, value=4)
+        pw_show_num = c_t3.slider("网络图通路数", min_value=5, max_value=30, value=15, step=5)
+
+    cur_grps = sorted(raw_df[group_col].astype(str).unique())
+    sel_grps = st.multiselect("选择对比组 (限 2 组)", cur_grps, default=cur_grps[:2] if len(cur_grps)>=2 else cur_grps, help="OPLS-DA 强制要求且只支持标准的 2 组对比分类模型。")
+    
+    c1, c2, c3, c4 = st.columns(4)
+    valid = list(sel_grps)
+    case = c1.selectbox("Case 组", valid, index=0 if valid else None)
+    ctrl = c2.selectbox("Control 组", valid, index=1 if len(valid)>1 else 0)
+    p_th = c3.number_input("P-value 阈值", value=0.05, step=0.01)
+    fc_th = c4.number_input("Log2 FC 阈值", value=0.58, step=0.10)
+    
+    submit_button = st.form_submit_button(label='🚀 执行分析')
 
 # ==========================================
-# 4. 执行核心分析计算 (锁定后台保险箱)
+# 4. 执行核心分析计算
 # ==========================================
 if submit_button:
     if len(sel_grps) != 2: 
@@ -410,7 +387,7 @@ if submit_button:
                             ))
                             
                 fig_pca.update_traces(marker=dict(size=14, line=dict(width=1, color='black'), opacity=0.9))
-                fig_pca = update_layout_square(fig_pca, "Global PCA Plot (All Groups & QC)", f"PC1 ({var_all[0]:.1%})", f"PC2 ({var_all[1]:.1%})")
+                fig_pca = update_layout_square(fig_pca, "Global PCA Plot", f"PC1 ({var_all[0]:.1%})", f"PC2 ({var_all[1]:.1%})")
 
         fig_vol = px.scatter(stats_df, x="Log2_FC", y="-Log10_P", color="Sig", color_discrete_map=COLOR_PALETTE, hover_data=['Name', 'VIP'])
         fig_vol.add_hline(y=-np.log10(p_th), line_dash="dash", line_color="gray")
@@ -539,7 +516,7 @@ if submit_button:
         }
 
 # ==========================================
-# 5. UI 展示层 (无论怎么点击下载，永远从保险箱中取数据呈现，绝不重置！)
+# 5. UI 展示层 
 # ==========================================
 if 'analysis_res' in st.session_state:
     res = st.session_state['analysis_res']
@@ -587,52 +564,46 @@ if 'analysis_res' in st.session_state:
         st.dataframe(res['out_df'][disp_cols].style.format({"Log2_FC":"{:.2f}", "P_Value":"{:.3e}", "FDR":"{:.3e}", "VIP":"{:.2f}", "p_corr":"{:.2f}"}).background_gradient(subset=['VIP'], cmap="Reds"), use_container_width=True)
         
     with tabs[7]:
-        st.markdown("### 📏 临床诊断列线图 (Diagnostic Nomogram)")
-        st.caption("基于 Logistic 回归模型构建的列线图。系统自动提取 Top 差异标志物构建风险预测模型。")
-        if len(res['out_df']) < 2: st.warning("⚠️ 显著差异代谢物不足 2 个，无法构建列线图回归模型。")
+        st.markdown("### 📏 临床诊断列线图")
+        if len(res['out_df']) < 2: st.warning("⚠️ 显著差异代谢物不足 2 个，无法构建列线图。")
         else:
             c1, c2 = st.columns([1, 6])
             with c2:
                 if res['fig_nomogram'] is not None: st.plotly_chart(res['fig_nomogram'])
-                else: st.error("构建列线图失败，请检查样本的组别分布。")
+                else: st.error("构建列线图失败，请检查样本组别分布。")
                 
     with tabs[8]:
         st.markdown("### 🕸️ 代谢通路富集")
         
-        # 🌟 核心修改点：强制取消表头、全部加双引号包裹、逗号分隔！
         if 'filtered_db_df' in res and not res['filtered_db_df'].empty:
             csv_bg_lib = res['filtered_db_df'].to_csv(index=False, header=False, quoting=csv.QUOTE_ALL).encode('utf-8')
             st.download_button(
-                label="📥 导出基于本次实验数据裁剪后的【专属背景通路库】",
+                label="📥 导出基于本次实验的专属 MA 背景库",
                 data=csv_bg_lib,
-                file_name=f"Experimental_Background_Pathway_Library_{res['case']}_vs_{res['ctrl']}.csv",
+                file_name=f"MA_Background_Lib_{res['case']}_vs_{res['ctrl']}.csv",
                 mime="text/csv",
-                help="此文件格式已 100% 对齐 MetaboAnalyst 官方范例：无表头、双引号包裹、逗号分隔、物质间分号加空格。",
+                help="100% 兼容 MA 官方范例：无表头、双引号包裹、分号+空格分隔、纯名称无 ID。",
                 type="primary"
             )
 
         c1, c2 = st.columns([1, 6])
         with c2:
-            if res['pathway_df'].empty: st.warning("未能匹配到通路，请检查是否选择了正确的物种库，或无显著差异标志物。")
+            if res['pathway_df'].empty: st.warning("未能匹配到通路，请检查物种库或是否存在显著差异物。")
             else:
                 if res['fig_pathway'] is not None: st.plotly_chart(res['fig_pathway'])
                 st.dataframe(res['pathway_df'].drop(columns=['-Log10_P'], errors='ignore').style.format({"P_Value":"{:.3e}", "FDR":"{:.3e}", "Enrichment_Factor":"{:.2f}"}).background_gradient(subset=['P_Value'], cmap="Reds_r", vmin=0, vmax=0.05), use_container_width=True)
                 
     with tabs[9]:
-        st.markdown("### 🔗 代谢重编程机制网络 (Pathway-Metabolite Network)")
-        st.caption("展示显著富集通路（P < 0.05）与核心标志物的相互关联。")
-        if res['pathway_df'].empty or res['out_df'].empty: st.info("需要产生显著通路和差异代谢物才能构建网络。")
+        st.markdown("### 🔗 代谢重编程机制网络")
+        if res['pathway_df'].empty or res['out_df'].empty: st.info("无显著通路或代谢物。")
         else:
             if res['fig_network'] is not None: st.plotly_chart(res['fig_network'])
-            else: st.warning("⚠️ 没有找到通路和代谢物之间的有效映射关联或无显著通路，无法绘图。")
+            else: st.warning("⚠️ 没有找到通路与代谢物的有效映射。")
             
     with tabs[10]:
         st.markdown("### 📄 报告生成中心")
         c_rep1, c_rep2 = st.columns(2)
         with c_rep1:
-            st.markdown("#### 👨‍🔬 1. 完整可视化报告下载 (HTML)")
-            st.download_button("📥 下载完整交互式网页报告 (.html)", res['html_report'].encode('utf-8'), f"Metabolomics_Report_{res['case']}_vs_{res['ctrl']}.html", "text/html")
+            st.download_button("📥 下载完整离线网页报告 (.html)", res['html_report'].encode('utf-8'), f"MetaFlow_Report_{res['case']}_vs_{res['ctrl']}.html", "text/html")
         with c_rep2:
-            st.markdown("#### 🤖 2. AI 撰稿专属 Prompt")
-            st.text_area("拷贝此文本发送给 AI:", value=res['prompt_md'], height=250)
-            st.download_button("📥 下载 Prompt 文件 (.md)", res['prompt_md'].encode('utf-8'), f"AI_Prompt_{res['case']}_vs_{res['ctrl']}.md", "text/markdown")
+            st.download_button("📥 下载 AI 辅助撰稿 Prompt (.md)", res['prompt_md'].encode('utf-8'), f"MetaFlow_Prompt_{res['case']}_vs_{res['ctrl']}.md", "text/markdown")
