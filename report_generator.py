@@ -40,7 +40,7 @@ def generate_ai_prompt(case, ctrl, norm_m, scale_m, R2Y, Q2, b_q2, p_th, fc_th, 
     return prompt
 
 def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, Q2, b_q2, 
-                         out_df, pathway_df, fig_opls, fig_perm, fig_splot, fig_vol, fig_pca, 
+                         out_df, pathway_df, fig_opls, fig_perm, fig_splot, fig_vip, fig_vol, fig_pca, 
                          hm_base64, fig_nomogram, fig_pathway, fig_network, 
                          vip_show_num, pw_show_num, nomo_num):
     """生成独立的离线 HTML 报告，内嵌交互图表与科学解读文案"""
