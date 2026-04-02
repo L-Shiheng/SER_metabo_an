@@ -1,139 +1,133 @@
 import pandas as pd
+import numpy as np
+
+def generate_ai_prompt(case, ctrl, norm_m, scale_m, R2Y, Q2, b_q2, p_th, fc_th, out_df, pathway_df):
+    """生成用于大模型交互分析的 Markdown 提示词 (Prompt)，已更新三级评估标准"""
+    
+    # 核心：OPLS-DA 三级科学评估
+    if b_q2 < 0.05 and Q2 > 0.5:
+        model_eval_text = f"OPLS-DA 模型预测能力强，且未发生过拟合 (Q²={Q2:.3f}, 截距={b_q2:.3f})。提示两组间存在显著且广泛的全局代谢轮廓差异。"
+    elif b_q2 < 0.05 and Q2 <= 0.5:
+        model_eval_text = f"模型未过拟合 (截距={b_q2:.3f} < 0.05)，证明所提取的差异特征真实可靠；但 Q²={Q2:.3f} 偏低，提示两组间不存在全局性的代谢颠覆，属于典型的局部微弱代谢表型改变。请重点聚焦于 VIP 和 P 值双显著的核心标志物。"
+    else:
+        model_eval_text = f"警告：置换检验提示模型存在严重的过拟合风险 (Q²截距={b_q2:.3f} ≥ 0.05)，这意味着组间差异极小或存在系统误差，建议极其谨慎地解读本模型提取的 VIP 值。"
+
+    top_mets = out_df.head(15)['Name'].tolist() if not out_df.empty else ["无显著差异代谢物"]
+    top_pws = pathway_df.head(5)['Pathway'].tolist() if not pathway_df.empty else ["无显著富集通路"]
+
+    prompt = f"""# 代谢组学分析专家解读请求
+
+你是一个资深的代谢组学生信专家与生物学家。请根据以下我的实验结果，帮我撰写一段用于学术论文的 `Results` 或 `Discussion` 部分的草稿。
+
+## 1. 实验背景与数据处理
+- **实验组别**: {case} vs {ctrl}
+- **数据预处理**: 归一化方法为 {norm_m}，特征缩放方法为 {scale_m}。
+
+## 2. 统计学模型评估 (SIMCA 标准)
+- **模型指标**: R²Y = {R2Y:.3f}, Q² = {Q2:.3f}, 置换检验 Q² 截距 = {b_q2:.3f}。
+- **专家诊断结论**: {model_eval_text}
+- **筛选阈值**: P-value < {p_th}, |Log2FC| > {fc_th}, VIP > 1.0
+
+## 3. 核心发现
+- **Top 显著差异标志物**: {', '.join(top_mets)}
+- **Top 显著改变代谢通路**: {', '.join(top_pws)}
+
+## 你的任务：
+1. **模型陈述**: 用专业的学术语言描述上述 OPLS-DA 模型的可靠性（请参考专家诊断结论）。
+2. **生物学意义**: 挑选几个核心代谢物和通路，解释它们在生物学或病理学上的潜在联系。
+3. **机理推测**: 根据这些差异，推测在这两个组别之间发生了怎样的代谢重编程（Metabolic Reprogramming）？
+"""
+    return prompt
 
 def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, Q2, b_q2, 
-                          out_df, pathway_df, fig_opls, fig_perm, fig_splot, fig_vol, fig_pca, 
-                          hm_base64, fig_nomogram, fig_pathway, fig_network, 
-                          vip_show_num, pw_show_num, nomo_num):
+                         out_df, pathway_df, fig_opls, fig_perm, fig_splot, fig_vol, fig_pca, 
+                         hm_base64, fig_nomogram, fig_pathway, fig_network, 
+                         vip_show_num, pw_show_num, nomo_num):
+    """生成独立的离线 HTML 报告，内嵌交互图表与科学解读文案"""
     
-    js_added = [False] 
-    def get_html_plot(fig):
-        if fig is not None:
-            if not js_added[0]:
-                js_added[0] = True
-                return fig.to_html(full_html=False, include_plotlyjs=True)
-            else:
-                return fig.to_html(full_html=False, include_plotlyjs=False)
-        return "<p style='color:red;'>未生成该图表</p >"
+    # 核心：OPLS-DA 三级科学评估
+    if b_q2 < 0.05 and Q2 > 0.5:
+        model_eval_html = f"<div class='highlight-box success'><strong>模型评价：优秀。</strong> OPLS-DA 模型预测能力强且未过拟合 (Q²={Q2:.3f}, 截距={b_q2:.3f})，表明组间存在显著的代谢表型差异。</div>"
+    elif b_q2 < 0.05 and Q2 <= 0.5:
+        model_eval_html = f"<div class='highlight-box info'><strong>模型评价：局部差异 (未过拟合)。</strong> 截距={b_q2:.3f} &lt; 0.05 证明差异特征真实有效。Q²={Q2:.3f} &lt; 0.5 提示组间为局部微弱变化而非全局颠覆，需重点关注核心差异标志物。</div>"
+    else:
+        model_eval_html = f"<div class='highlight-box warning'><strong>模型评价：过拟合风险。</strong> 置换检验截距={b_q2:.3f} ≥ 0.05，模型存在假阳性可能，结果解释需非常谨慎。</div>"
 
-    # 🟢 完美解决对齐问题：在转成 HTML 前，过滤掉 Hits 为 0 的背景通路
-    pw_html = "<p>未进行通路富集分析或无显著命中。</p >"
-    if not pathway_df.empty and 'Hits' in pathway_df.columns:
-        valid_pw_df = pathway_df[pathway_df['Hits'] > 0].head(pw_show_num)
-        if not valid_pw_df.empty:
-            pw_html = valid_pw_df[['Pathway', 'Total_in_Pathway', 'Hits', 'Enrichment_Factor', 'P_Value']].to_html(index=False, float_format="%.4f")
-    
-    html_report = f"""
+    # 将图表转换为 HTML div
+    def get_plotly_html(fig):
+        return fig.to_html(full_html=False, include_plotlyjs='cdn') if fig else "<p style='color:#999;text-align:center;'>图表生成失败或无数据</p >"
+
+    html_content = f"""
     <!DOCTYPE html>
-    <html>
+    <html lang="zh-CN">
     <head>
-        <meta charset="utf-8">
-        <title>代谢组学综合分析报告 | {case} vs {ctrl}</title>
+        <meta charset="UTF-8">
+        <title>MetaFlow Studio 综合代谢组学分析报告 ({case} vs {ctrl})</title>
         <style>
-            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 40px auto; max-width: 1100px; color: #333; line-height: 1.6; background-color: #f4f7f6; }}
-            .container {{ background-color: #fff; padding: 40px; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }}
-            h1 {{ color: #2c3e50; text-align: center; border-bottom: 2px solid #3498db; padding-bottom: 10px; }}
-            h2 {{ color: #2980b9; margin-top: 40px; border-left: 4px solid #2980b9; padding-left: 10px; }}
-            table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; font-size: 14px; text-align: left; }}
-            th, td {{ border: 1px solid #ddd; padding: 10px; }}
-            th {{ background-color: #f8f9fa; color: #2c3e50; }}
-            tr:nth-child(even) {{ background-color: #f9f9f9; }}
-            .plot-box {{ margin: 30px 0; padding: 15px; border: 1px solid #eee; border-radius: 8px; background: #fafafa; text-align: center; }}
-            .metric-container {{ display: flex; justify-content: space-around; background: #eef2f5; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
-            .metric {{ text-align: center; }}
-            .metric-title {{ font-size: 14px; color: #7f8c8d; text-transform: uppercase; }}
-            .metric-value {{ font-size: 28px; font-weight: bold; color: #e74c3c; }}
+            body {{ font-family: 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 1200px; margin: 0 auto; padding: 20px; background-color: #f8f9fa; }}
+            .container {{ background-color: #fff; padding: 40px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
+            h1 {{ color: #1e3c72; border-bottom: 2px solid #1e3c72; padding-bottom: 10px; text-align: center; }}
+            h2 {{ color: #2a5298; margin-top: 40px; border-left: 4px solid #2a5298; padding-left: 10px; }}
+            .summary-table {{ width: 100%; border-collapse: collapse; margin-bottom: 20px; }}
+            .summary-table th, .summary-table td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
+            .summary-table th {{ background-color: #f2f2f2; color: #333; font-weight: bold; width: 30%; }}
+            .plot-container {{ background: #fff; border: 1px solid #eee; border-radius: 4px; padding: 20px; margin-bottom: 30px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }}
+            .highlight-box {{ padding: 15px; border-radius: 4px; margin-bottom: 20px; }}
+            .success {{ background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
+            .info {{ background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }}
+            .warning {{ background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; }}
+            .footer {{ margin-top: 50px; text-align: center; color: #777; font-size: 0.9em; }}
         </style>
     </head>
     <body>
-    <div class="container">
-        <h1>代谢组学综合分析报告 (SIMCA 规范)</h1>
-        
-        <h2>1. 实验项目与参数</h2>
-        <ul>
-            <li><b>对比组别:</b> <code>{case}</code> (实验组) vs <code>{ctrl}</code> (对照组)</li>
-            <li><b>数据规模:</b> 鉴定出 {len(feats)} 个特征</li>
-            <li><b>筛选标准:</b> VIP > 1.0, P-value < {p_th}, |Log2 FC| > {fc_th}</li>
-            <li><b>预处理策略:</b> {norm_m} + {scale_m} Scaling</li>
-        </ul>
-        
-        <h2>2. OPLS-DA 模型评估</h2>
-        <div class="metric-container">
-            <div class="metric"><div class="metric-title">R²Y (模型解释率)</div><div class="metric-value">{R2Y:.3f}</div></div>
-            <div class="metric"><div class="metric-title">Q² (模型预测率)</div><div class="metric-value">{Q2:.3f}</div></div>
-            <div class="metric"><div class="metric-title">Q² 置换检验截距</div><div class="metric-value">{b_q2:.3f}</div></div>
+        <div class="container">
+            <h1>MetaFlow Studio 综合代谢组学分析报告</h1>
+            
+            <h2>1. 分析概要与模型评价</h2>
+            <table class="summary-table">
+                <tr><th>对比组别</th><td>{case} (Case) vs {ctrl} (Control)</td></tr>
+                <tr><th>预处理方法</th><td>归一化: {norm_m} | 缩放: {scale_m}</td></tr>
+                <tr><th>特征筛选阈值</th><td>P-value &lt; {p_th} | |Log2FC| &gt; {fc_th} | VIP &gt; 1.0</td></tr>
+                <tr><th>显著差异代谢物数量</th><td>{len(out_df)} 个</td></tr>
+                <tr><th>OPLS-DA 评价参数</th><td>R²Y = {R2Y:.3f} | Q² = {Q2:.3f} | 截距 = {b_q2:.3f}</td></tr>
+            </table>
+            {model_eval_html}
+
+            <h2>2. 模式识别与多元统计分析 (SIMCA)</h2>
+            <p>通过正交偏最小二乘判别分析 (OPLS-DA) 剔除与分组无关的噪音变量，最大限度地提取组间的特征差异，并通过 100 次置换检验验证模型的稳健性。</p >
+            <div style="display: flex; flex-wrap: wrap; justify-content: space-between;">
+                <div class="plot-container" style="width: 48%;">{get_plotly_html(fig_opls)}</div>
+                <div class="plot-container" style="width: 48%;">{get_plotly_html(fig_perm)}</div>
+            </div>
+
+            <h2>3. 潜在生物标志物筛选</h2>
+            <p>结合单变量统计分析 (Fold Change, P-value) 与多变量模型 (VIP, S-Plot)，筛选出高度置信的差异代谢物。</p >
+            <div style="display: flex; flex-wrap: wrap; justify-content: space-between;">
+                <div class="plot-container" style="width: 48%;">{get_plotly_html(fig_vol)}</div>
+                <div class="plot-container" style="width: 48%;">{get_plotly_html(fig_splot)}</div>
+            </div>
+            
+            <div class="plot-container">
+                <h3 style="text-align:center;">Top 差异代谢物 VIP 排序</h3>
+                {get_plotly_html(fig_vip)}
+            </div>
+
+            <h2>4. 代谢表型重编程分析 (KEGG 通路)</h2>
+            <p>利用超几何分布检验，将显著改变的代谢物映射至代谢网络中，揭示发生扰动的关键生化途径。</p >
+            <div class="plot-container">
+                {get_plotly_html(fig_pathway)}
+            </div>
+            
+            <div class="plot-container">
+                <h3 style="text-align:center;">代谢机制重编程关联网络图</h3>
+                {get_plotly_html(fig_network)}
+            </div>
+
+            <div class="footer">
+                <p>生成于: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')} | 由 MetaFlow Studio Pro 提供技术支持</p >
+            </div>
         </div>
-        <p style="text-align: center;"><b>结论:</b> {"该 OPLS-DA 模型分离度极佳且未发生过拟合，预测结果高度可靠。" if (b_q2 < 0.05 and Q2 > 0.5) else "模型分离度一般或存在轻微过拟合，提示两组间代谢差异可能不显著。"}</p >
-        
-        <h2>3. 核心差异代谢物清单 (Top {vip_show_num} Biomarkers)</h2>
-        {out_df[['Name', 'Log2_FC', 'P_Value', 'VIP', 'p_corr']].head(vip_show_num).to_html(index=False, float_format="%.3f")}
-        
-        <h2>4. KEGG 代谢通路富集分析 (Top {pw_show_num})</h2>
-        {pw_html}
-        
-        <h2>5. 统计与多维可视化图表</h2>
-        <p><i>注：本报告为纯离线交互版。图表支持鼠标悬停、框选缩放，点击图表右上角相机图标 📷 即可下载透明底色高清图片。</i></p >
-        
-        <div class="plot-box"><h3>(1) OPLS-DA 得分图</h3>{get_html_plot(fig_opls)}</div>
-        <div class="plot-box"><h3>(2) 置换检验 (Permutation Test)</h3>{get_html_plot(fig_perm)}</div>
-        <div class="plot-box"><h3>(3) S-Plot</h3>{get_html_plot(fig_splot)}</div>
-        <div class="plot-box"><h3>(4) 火山图</h3>{get_html_plot(fig_vol)}</div>
-        <div class="plot-box"><h3>(5) PCA 宏观质控得分图</h3>{get_html_plot(fig_pca)}</div>
-    """
-    
-    if hm_base64:
-        clean_b64 = hm_base64.replace('\n', '').replace('\r', '').strip()
-        html_report += f'''
-        <div class="plot-box">
-            <h3>(6) Top 50 差异代谢物聚类热图</h3>
-            <img src="data:image/png;base64,{clean_b64}" style="max-width:100%; border:1px solid #ccc;"/>
-        </div>
-        '''
-        
-    if fig_nomogram is not None:
-        html_report += f'''<div class="plot-box"><h3>(7) 诊断预测列线图 (Top {nomo_num})</h3>{get_html_plot(fig_nomogram)}</div>'''
-        
-    if fig_pathway is not None:
-        html_report += f'''<div class="plot-box"><h3>(8) KEGG 通路富集气泡图</h3>{get_html_plot(fig_pathway)}</div>'''
-        
-    if fig_network is not None:
-        html_report += f'''<div class="plot-box"><h3>(9) 代谢重编程机制网络图</h3>{get_html_plot(fig_network)}</div>'''
-        
-    html_report += """
-    </div>
     </body>
     </html>
     """
-    return html_report
-
-def generate_ai_prompt(case, ctrl, norm_m, scale_m, R2Y, Q2, b_q2, p_th, fc_th, out_df, pathway_df):
-    num_up = len(out_df[out_df['Log2_FC'] > 0])
-    num_down = len(out_df[out_df['Log2_FC'] < 0])
-    top_mets_str = out_df[['Name', 'Log2_FC', 'P_Value', 'VIP']].head(15).to_markdown(index=False) if not out_df.empty else "无显著差异物"
-    
-    pw_str = "无显著富集通路"
-    if not pathway_df.empty and 'Hits' in pathway_df.columns:
-        sig_pws = pathway_df[(pathway_df['P_Value'] < 0.05) & (pathway_df['Hits'] > 0)].head(10)
-        if not sig_pws.empty: pw_str = sig_pws[['Pathway', 'Hits', 'P_Value']].to_markdown(index=False)
-    
-    prompt_md = f"""请作为一名资深的生物信息学和代谢组学专家，根据以下我提供的代谢组学数据分析结果，帮我撰写一篇英文科研论文的 **Results（结果）** 和 **Discussion（讨论）** 部分。
-
-### 🔬 1. 实验参数与模型质控
-- **对比组别**: {case} (Case) vs {ctrl} (Control)
-- **预处理与缩放**: {norm_m} + {scale_m} Scaling
-- **OPLS-DA 模型评估**: R²Y = {R2Y:.3f}, Q² = {Q2:.3f}, 置换检验 Q² 截距 = {b_q2:.3f} (模型{"稳健且未过拟合" if (b_q2<0.05 and Q2>0.5) else "预测能力一般"})。
-
-### 🧬 2. 差异生物标志物 (Biomarkers)
-- 筛选阈值: VIP > 1.0 且 P-value < {p_th}。
-- 整体情况: 共找到 {num_up + num_down} 个标志物，其中 {num_up} 个在 {case} 组中显著上调，{num_down} 个显著下调。
-- **Top 15 核心标志物清单**:
-{top_mets_str}
-
-### 🕸️ 3. KEGG 代谢通路富集 (P < 0.05)
-{pw_str}
-
----
-### 📝 撰写要求：
-1. **Results 部分**：总结 OPLS-DA 模型的分离情况和置换检验结果；描述差异代谢物的整体分布；客观描述上述显著富集的 KEGG 通路。
-2. **Discussion 部分**：结合上述查出的 Top 标志物和关键通路，查阅最新生化医学文献，深入探讨 {case} 组相对于 {ctrl} 组发生这些代谢网络改变的生理/病理机制，以及潜在的临床指导意义。
-"""
-    return prompt_md
+    return html_content
