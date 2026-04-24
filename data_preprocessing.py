@@ -457,7 +457,7 @@ def merge_multiple_dfs(results_list):
     
     final_ids = [fid for f_list in files_features_to_keep.values() for fid in f_list]
     
-    # 安全组合元数据（杜绝Pandas Hash错误）
+    # 🛡️ 安全组合元数据（杜绝Pandas Hash错误）
     merged_meta = pd.concat([res[1] for res in results_list])
     merged_meta = merged_meta[~merged_meta.index.duplicated(keep='first')]
     merged_meta = merged_meta.loc[final_ids]
