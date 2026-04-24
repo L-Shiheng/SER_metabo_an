@@ -209,16 +209,23 @@ if start_process:
                             df_t['Group'] = info_aligned[user_group_col].fillna('Unknown').values
                         final_df, final_meta = df_t, meta
 
-        # 引擎 C：MetDNA 原始 (Sprint 1 更新点：传入 valid_samples 净化提取)
+        # 引擎 C：MetDNA 原始 (防沉默崩溃升级版)
         else:
-            if info_df is None: st.error("⚠️ 必须先上传 Sample Info 表格以映射分组！")
+            if info_df is None: 
+                st.error("⚠️ 必须先上传 Sample Info 表格以映射分组！")
             else:
                 with st.spinner("正在启动 MetDNA 解析引擎 (三级漏斗去重)..."):
                     parsed_results = []
                     for i, file in enumerate(uploaded_files):
                         unique_name = f"{os.path.splitext(file.name)[0]}_{i}{os.path.splitext(file.name)[1]}"
                         df_t, meta, err = parse_metdna_file(file, unique_name, valid_samples=candidate_samples)
-                        if not err: parsed_results.append((df_t, meta, unique_name))
+                        
+                        # 如果出现错误，现在会立刻弹红框告诉您，绝不偷偷崩溃！
+                        if not err: 
+                            parsed_results.append((df_t, meta, unique_name))
+                        else: 
+                            st.error(f"❌ 文件 {file.name} 解析失败: {err}")
+                            
                         progress_bar.progress((i + 1) / len(uploaded_files))
                     
                     if parsed_results:
@@ -234,6 +241,8 @@ if start_process:
                             if user_group_col and user_group_col in info_aligned.columns: 
                                 raw_df['Group'] = info_aligned[user_group_col].fillna('Unknown').values
                             final_df, final_meta = raw_df, meta
+                    else:
+                        st.error("⚠️ 所有上传的 MetDNA 文件均未能提取到有效样本数据，请检查您的 Info 表格式！")
 
         # 后续处理：剔除样本与 SERRF 校正
         if final_df is not None:
@@ -304,7 +313,7 @@ with st.form(key='analysis_form'):
     submit_button = st.form_submit_button(label='🚀 执行分析')
 
 # ==========================================
-# 4. 执行核心分析计算 (防崩溃拦截器)
+# 4. 执行核心分析计算
 # ==========================================
 if submit_button:
     if len(sel_grps) != 2: 
@@ -457,7 +466,6 @@ if submit_button:
                             fig_network = go.Figure(data=[edge_trace, node_trace])
                             fig_network.update_layout(title={'text': "Mechanism Network", 'y':0.95, 'x':0.5, 'xanchor': 'center'}, showlegend=False, xaxis=dict(showgrid=False, zeroline=False, showticklabels=False), yaxis=dict(showgrid=False, zeroline=False, showticklabels=False), width=900, height=700, plot_bgcolor='white')
 
-            # ======================== 25 参数正确传递 ========================
             html_report = generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, Q2, b_q2, out_df, pathway_df, fig_opls, fig_perm, fig_splot, fig_vip, fig_vol, fig_pca, hm_base64, fig_nomogram, fig_pathway, fig_network, vip_show_num, pw_show_num, nomo_num)
             prompt_md = generate_ai_prompt(case, ctrl, norm_m, scale_m, R2Y, Q2, b_q2, p_th, fc_th, out_df, pathway_df)
 
