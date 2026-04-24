@@ -223,7 +223,7 @@ if start_process:
                             if feature_scope.startswith("仅已注释"):
                                 # 🛡️ 强制纯文本匹配，杜绝Pandas Hash宕机
                                 anno_ids = set(meta[meta['Is_Annotated'] == True].index.astype(str).tolist())
-                                keep_cols = ['SampleID', 'Group', 'Source_Files'] + [str(c) for c in raw_df.columns if str(c) in anno_ids]
+                                keep_cols = ['SampleID', 'Group', 'Source_Files'] + [c for c in raw_df.columns if str(c) in anno_ids]
                                 raw_df = raw_df[keep_cols]
                                 meta = meta.loc[meta.index.astype(str).isin([str(c) for c in raw_df.columns])]
                             
@@ -420,6 +420,7 @@ if submit_button:
                     fig_pathway = px.scatter(plot_pw_df, x='Enrichment_Factor', y='-Log10_P', size='Hits', color='P_Value', hover_name='Pathway')
                     fig_pathway.update_layout(template="simple_white", width=800, height=600, title={'text': "Pathway Enrichment", 'x':0.5, 'xanchor': 'center'})
 
+            # 确保 25 个参数传递给离线报告
             html_report = generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, Q2, b_q2, out_df, pathway_df, fig_opls, fig_perm, fig_splot, fig_vip, fig_vol, fig_pca, hm_base64, fig_nomogram, fig_pathway, fig_network, vip_show_num, pw_show_num, nomo_num)
             prompt_md = generate_ai_prompt(case, ctrl, norm_m, scale_m, R2Y, Q2, b_q2, p_th, fc_th, out_df, pathway_df)
 
@@ -437,7 +438,7 @@ if submit_button:
             with st.expander("点击查看详细报错日志"): st.code(traceback.format_exc())
 
 # ==========================================
-# 5. UI 展示层
+# 5. UI 展示层 (彻底恢复黄金排版布局)
 # ==========================================
 if 'analysis_res' in st.session_state:
     res = st.session_state['analysis_res']
@@ -448,33 +449,77 @@ if 'analysis_res' in st.session_state:
     b_q2_val = res['b_q2']
     q2_val = res['Q2']
     if b_q2_val < 0.05 and q2_val > 0.5:
-        st.success(f"✅ OPLS-DA 模型预测能力强，且未发生过拟合")
+        st.success(f"✅ OPLS-DA 模型预测能力强，且未发生过拟合 (Q²={q2_val:.3f}, 截距={b_q2_val:.3f})")
     elif b_q2_val < 0.05 and q2_val <= 0.5:
-        st.info(f"💡 模型未过拟合，但组间整体代谢差异偏弱")
+        st.info(f"💡 模型未过拟合，但组间整体代谢差异偏弱 (Q²={q2_val:.3f} < 0.5, 截距={b_q2_val:.3f})")
     else:
-        st.warning(f"⚠️ 警告：模型存在严重的过拟合风险，不建议采信其 VIP 值！")
+        st.warning(f"⚠️ 警告：模型存在严重的过拟合风险，不建议采信其 VIP 值！(Q²截距={b_q2_val:.3f} ≥ 0.05)")
 
     tabs = st.tabs(["🎯 OPLS-DA", "🔄 置换检验", "🧬 S-Plot", "📊 VIP", "🌐 PCA", "🌋 火山/热图", "📑 清单", "📏 列线图", "🕸️ 通路富集", "🔗 机制网络图", "📄 导出报告"])
     
-    with tabs[0]: st.plotly_chart(res['fig_opls']) if res['fig_opls'] else st.warning("图表失败")
-    with tabs[1]: st.plotly_chart(res['fig_perm']) if res['fig_perm'] else st.warning("图表失败")
-    with tabs[2]: st.plotly_chart(res['fig_splot']) if res['fig_splot'] else st.warning("图表失败")
-    with tabs[3]: st.plotly_chart(res['fig_vip']) if res['fig_vip'] else st.warning("图表失败")
-    with tabs[4]: st.plotly_chart(res['fig_pca']) if res['fig_pca'] else st.warning("图表失败")
+    with tabs[0]:
+        c1, c2 = st.columns([1, 4])
+        with c2: 
+            if res['fig_opls']: st.plotly_chart(res['fig_opls']) 
+            else: st.warning("图表生成失败")
+            
+    with tabs[1]:
+        c1, c2 = st.columns([1, 4])
+        with c2: 
+            if res['fig_perm']: st.plotly_chart(res['fig_perm'])
+            else: st.warning("图表生成失败")
+            
+    with tabs[2]:
+        c1, c2 = st.columns([1, 4])
+        with c2: 
+            if res['fig_splot']: st.plotly_chart(res['fig_splot'])
+            else: st.warning("图表生成失败")
+            
+    with tabs[3]:
+        c1, c2 = st.columns([1, 6])
+        with c2: 
+            if res['fig_vip']: st.plotly_chart(res['fig_vip'])
+            else: st.warning("图表生成失败")
+            
+    with tabs[4]:
+        c1, c2 = st.columns([1, 4])
+        with c2: 
+            if res['fig_pca']: st.plotly_chart(res['fig_pca'])
+            else: st.warning("样本不足以绘制PCA")
+            
     with tabs[5]:
         c1, c2 = st.columns(2)
-        with c1: st.plotly_chart(res['fig_vol'], use_container_width=True) if res['fig_vol'] else None
-        with c2: st.pyplot(res['hm_fig']) if res['hm_fig'] else st.info("无满足要求数据")
+        with c1: 
+            if res['fig_vol']: st.plotly_chart(res['fig_vol'], use_container_width=True)
+        with c2: 
+            if res['hm_fig']: st.pyplot(res['hm_fig']) 
+            else: st.info("无满足要求的差异代谢物")
+            
     with tabs[6]:
         st.markdown("### 🏆 生物标志物清单")
-        st.dataframe(res['out_df'][['Name', 'Log2_FC', 'P_Value', 'FDR', 'VIP']].style.background_gradient(subset=['VIP'], cmap="Reds"), use_container_width=True)
-    with tabs[7]: st.plotly_chart(res['fig_nomogram']) if res['fig_nomogram'] else st.warning("无法构建列线图")
+        st.dataframe(res['out_df'][['Name', 'Log2_FC', 'P_Value', 'FDR', 'VIP', 'p_corr']].style.format({"Log2_FC":"{:.2f}", "P_Value":"{:.3e}", "FDR":"{:.3e}", "VIP":"{:.2f}", "p_corr":"{:.2f}"}).background_gradient(subset=['VIP'], cmap="Reds"), use_container_width=True)
+        
+    with tabs[7]:
+        c1, c2 = st.columns([1, 6])
+        with c2:
+            if res['fig_nomogram']: st.plotly_chart(res['fig_nomogram'])
+            else: st.warning("⚠️ 显著差异代谢物不足 2 个或分组异常，无法构建列线图。")
+            
     with tabs[8]:
-        if res['pathway_df'].empty: st.warning("未能匹配到通路。")
-        else:
-            if res['fig_pathway']: st.plotly_chart(res['fig_pathway'])
-            st.dataframe(res['pathway_df'].drop(columns=['-Log10_P'], errors='ignore'), use_container_width=True)
-    with tabs[9]: st.plotly_chart(res['fig_network']) if res['fig_network'] else st.info("无数据")
+        if 'filtered_db_df' in res and not res['filtered_db_df'].empty:
+            st.download_button("📥 导出专属 MA 背景库", res['filtered_db_df'].to_csv(index=False, header=False, quoting=csv.QUOTE_ALL).encode('utf-8'), f"MA_Background_{res['case']}_{res['ctrl']}.csv", "text/csv", type="primary")
+        c1, c2 = st.columns([1, 6])
+        with c2:
+            if res['pathway_df'].empty: st.warning("未能匹配到通路。")
+            else:
+                if res['fig_pathway']: st.plotly_chart(res['fig_pathway'])
+                st.dataframe(res['pathway_df'].drop(columns=['-Log10_P'], errors='ignore').style.format({"P_Value":"{:.3e}", "FDR":"{:.3e}", "Enrichment_Factor":"{:.2f}"}).background_gradient(subset=['P_Value'], cmap="Reds_r", vmin=0, vmax=0.05), use_container_width=True)
+                
+    with tabs[9]:
+        if res['fig_network']: st.plotly_chart(res['fig_network'])
+        else: st.info("没有找到通路与代谢物的有效映射。")
+        
     with tabs[10]:
-        st.download_button("📥 离线网页报告 (.html)", res['html_report'].encode('utf-8'), "Report.html", "text/html")
-        st.download_button("📥 AI Prompt (.md)", res['prompt_md'].encode('utf-8'), "Prompt.md", "text/markdown")
+        c_rep1, c_rep2 = st.columns(2)
+        with c_rep1: st.download_button("📥 离线网页报告 (.html)", res['html_report'].encode('utf-8'), f"Report_{res['case']}_{res['ctrl']}.html", "text/html")
+        with c_rep2: st.download_button("📥 AI Prompt (.md)", res['prompt_md'].encode('utf-8'), f"Prompt_{res['case']}_{res['ctrl']}.md", "text/markdown")
