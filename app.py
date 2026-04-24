@@ -19,7 +19,7 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
 # ==========================================
-# 0. 品牌更新与 UI 配置 (MetaFlow Studio)
+# 0. 品牌更新与 UI 配置
 # ==========================================
 st.set_page_config(page_title="MetaFlow Studio", page_icon="🧬", layout="wide")
 
@@ -80,7 +80,6 @@ st.markdown("""
 if 'raw_df' not in st.session_state: st.session_state.raw_df = None
 if 'feature_meta' not in st.session_state: st.session_state.feature_meta = None
 if 'data_loaded' not in st.session_state: st.session_state.data_loaded = False
-if 'qc_report' not in st.session_state: st.session_state.qc_report = {}
 
 with st.sidebar:
     st.header("🛠️ 数据控制台")
@@ -88,8 +87,7 @@ with st.sidebar:
     data_source = st.radio(
         "选择数据流模式", 
         ["1. MA 标准单表 (自带分组)", "2. 拟靶向 MRM 宽表 (需后缀)", "3. MetDNA 原始宽表"], 
-        index=0,
-        help="【MA 单表】：第一行样本，第二行分组。\n【MRM 宽表】：仪器原始导出表，列名包含特定后缀。\n【MetDNA】：原始结果表。"
+        index=0
     )
     
     info_df = None; candidate_samples = []; user_sample_col = None; user_group_col = None
@@ -111,14 +109,13 @@ with st.sidebar:
                 user_sample_col = c1.selectbox("样本列", cols, index=idx_sample)
                 user_group_col = c2.selectbox("分组列", cols, index=idx_group)
                 if user_sample_col: candidate_samples = info_df[user_sample_col].astype(str).unique().tolist()
-                st.caption(f"✅ 已加载 {len(info_df)} 行")
             except Exception as e: st.error(f"Info 读取失败: {e}")
             
-        excluded_samples = st.multiselect("2. 样本剔除 (黑名单)", options=candidate_samples, default=[], help="移除异常样本。")
+        excluded_samples = st.multiselect("2. 样本剔除 (黑名单)", options=candidate_samples, default=[])
         
         use_serrf = st.checkbox("3. 启用 SERRF 批次校正", value=False)
         if use_serrf:
-            if not has_serrf: st.warning("⚠️ 缺失 serrf_module.py，请检查依赖。")
+            if not has_serrf: st.warning("⚠️ 缺失 serrf_module.py")
             elif info_df is not None:
                 idx_order = next((i for i, c in enumerate(cols_lower) if any(x in c for x in ['order', 'run', 'idx', 'seq'])), 0)
                 sc1, sc2, sc3 = st.columns(3)
@@ -127,13 +124,10 @@ with st.sidebar:
                 default_qc = next((v for v in info_df[sample_type_col].unique().astype(str) if 'qc' in v.lower()), "QC")
                 qc_label = sc3.text_input("QC标识", value=default_qc)
                 serrf_ready = True
-            else:
-                st.warning("请先上传 Info 表格。")
 
     else:
         st.markdown("#### 1. 上传数据矩阵")
-        st.caption("格式：Row1 样本名，Row2 分组，Row3起为数据。")
-        ex_str = st.text_input("2. 样本剔除 (选填)", help="输入需剔除的样本名，用英文逗号分隔，如: S1,S5")
+        ex_str = st.text_input("2. 样本剔除 (选填)")
         if ex_str: excluded_samples = [s.strip() for s in ex_str.split(',') if s.strip()]
 
     st.markdown("#### 3. KEGG 通路配置")
@@ -143,7 +137,7 @@ with st.sidebar:
     custom_pathway_file = st.file_uploader("自定义通路库 (.csv)", type=["csv", "gmt"], key="pathway_db")
     
     if st.button(f"🔄 同步 {species_code} 通路库", use_container_width=True) or not os.path.exists(db_filename):
-        with st.spinner(f"正在连接 KEGG API 拉取库..."):
+        with st.spinner(f"正在连接 KEGG API..."):
             try:
                 pw_res = requests.get(f"http://rest.kegg.jp/list/pathway/{species_code}")
                 pw_dict = {re.sub(r'^[a-z]+', '', p.split('\t')[0].replace('path:', '')): p.split('\t')[1] for p in pw_res.text.strip().split('\n') if p}
@@ -163,12 +157,12 @@ with st.sidebar:
     dict_files = None
     
     if data_source == "1. MA 标准单表 (自带分组)":
-        dict_files = st.file_uploader("关联 MetDNA 字典 (可选)", type=["csv", "xlsx"], accept_multiple_files=True, key="dict_files")
-        uploaded_files = st.file_uploader("上传 MA 格式单表 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
+        dict_files = st.file_uploader("关联 MetDNA 字典", type=["csv", "xlsx"], accept_multiple_files=True, key="dict_files")
+        uploaded_files = st.file_uploader("上传 MA 格式单表", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
     elif data_source == "2. 拟靶向 MRM 宽表 (需后缀)":
-        suffix = st.text_input("提取指标后缀", value=" : 面积", help="代码将按此后缀寻找数据列。")
-        dict_files = st.file_uploader("关联 MetDNA 字典 (可选)", type=["csv", "xlsx"], accept_multiple_files=True, key="dict_files")
-        uploaded_files = st.file_uploader("上传 MRM 宽表 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
+        suffix = st.text_input("提取指标后缀", value=" : 面积")
+        dict_files = st.file_uploader("关联 MetDNA 字典", type=["csv", "xlsx"], accept_multiple_files=True, key="dict_files")
+        uploaded_files = st.file_uploader("上传 MRM 宽表", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
     else:
         feature_scope = st.radio("特征范围", ["仅已注释特征", "全部特征"], index=0)
         uploaded_files = st.file_uploader("上传 MetDNA 结果表", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
@@ -184,22 +178,20 @@ if start_process:
     if not uploaded_files: 
         st.error("请先上传主数据文件！")
     else:
-        progress_bar = st.progress(0); status_text = st.empty()
+        progress_bar = st.progress(0)
         final_df = None; final_meta = None
         
-        # 引擎 A：MA 单表
         if data_source == "1. MA 标准单表 (自带分组)":
-            with st.spinner("正在启动 MA 矩阵解析引擎..."):
+            with st.spinner("启动 MA 引擎..."):
                 ext_dict = build_kegg_dictionary(dict_files) if dict_files else {}
                 df_t, meta, err = parse_universal_single_table(uploaded_files, external_kegg_dict=ext_dict)
                 if err: st.error(err)
                 else: final_df, final_meta = df_t, meta
 
-        # 引擎 B：MRM 拟靶向
         elif data_source == "2. 拟靶向 MRM 宽表 (需后缀)":
-            if info_df is None: st.error("⚠️ 必须先上传 Sample Info 表格以映射分组！")
+            if info_df is None: st.error("⚠️ 请先上传 Info 表格！")
             else:
-                with st.spinner("正在启动 MRM 拟靶向缝合引擎..."):
+                with st.spinner("启动 MRM 引擎..."):
                     ext_dict = build_kegg_dictionary(dict_files) if dict_files else {}
                     df_t, meta, err = parse_manual_targeted_files(uploaded_files, metric_suffix=suffix, external_kegg_dict=ext_dict)
                     if err: st.error(err)
@@ -209,22 +201,18 @@ if start_process:
                             df_t['Group'] = info_aligned[user_group_col].fillna('Unknown').values
                         final_df, final_meta = df_t, meta
 
-        # 引擎 C：MetDNA 原始 (防沉默崩溃升级版)
         else:
             if info_df is None: 
-                st.error("⚠️ 必须先上传 Sample Info 表格以映射分组！")
+                st.error("⚠️ 请先上传 Info 表格！")
             else:
-                with st.spinner("正在启动 MetDNA 解析引擎 (三级漏斗去重)..."):
+                with st.spinner("启动 MetDNA 三级漏斗去重引擎..."):
                     parsed_results = []
                     for i, file in enumerate(uploaded_files):
                         unique_name = f"{os.path.splitext(file.name)[0]}_{i}{os.path.splitext(file.name)[1]}"
                         df_t, meta, err = parse_metdna_file(file, unique_name, valid_samples=candidate_samples)
                         
-                        # 如果出现错误，现在会立刻弹红框告诉您，绝不偷偷崩溃！
-                        if not err: 
-                            parsed_results.append((df_t, meta, unique_name))
-                        else: 
-                            st.error(f"❌ 文件 {file.name} 解析失败: {err}")
+                        if not err: parsed_results.append((df_t, meta, unique_name))
+                        else: st.error(f"❌ 文件 {file.name} 解析失败: {err}")
                             
                         progress_bar.progress((i + 1) / len(uploaded_files))
                     
@@ -233,27 +221,26 @@ if start_process:
                         if err: st.error(err)
                         else:
                             if feature_scope.startswith("仅已注释"):
-                                # 🛡️ 强制转换为纯 Python 字符串集合，彻底消除 Pandas 底层 Hash 冲突
+                                # 🛡️ 强制纯文本匹配，杜绝Pandas Hash宕机
                                 anno_ids = set(meta[meta['Is_Annotated'] == True].index.astype(str).tolist())
-                                keep_cols = ['SampleID', 'Group', 'Source_Files'] + [c for c in raw_df.columns if str(c) in anno_ids]
+                                keep_cols = ['SampleID', 'Group', 'Source_Files'] + [str(c) for c in raw_df.columns if str(c) in anno_ids]
                                 raw_df = raw_df[keep_cols]
                                 meta = meta.loc[meta.index.astype(str).isin([str(c) for c in raw_df.columns])]
+                            
                             info_aligned = align_sample_info(raw_df, info_df, sample_col_name=user_sample_col)
                             if user_group_col and user_group_col in info_aligned.columns: 
                                 raw_df['Group'] = info_aligned[user_group_col].fillna('Unknown').values
                             final_df, final_meta = raw_df, meta
                     else:
-                        st.error("⚠️ 所有上传的 MetDNA 文件均未能提取到有效样本数据，请检查您的 Info 表格式！")
+                        st.error("⚠️ 未能提取到有效数据，请检查 Info 表格式！")
 
-        # 后续处理：剔除样本与 SERRF 校正
         if final_df is not None:
             if excluded_samples:
                 ex_fps = set([re.sub(r'[^a-z0-9]', '', str(s).strip().lower()) for s in excluded_samples])
                 final_df = final_df[~final_df['SampleID'].astype(str).apply(lambda s: re.sub(r'[^a-z0-9]', '', str(s).strip().lower())).isin(ex_fps)]
             
-            # 执行 SERRF
             if use_serrf and serrf_ready and has_serrf:
-                with st.spinner("🔬 正在执行 SERRF 机器学习批次校正..."):
+                with st.spinner("🔬 执行 SERRF 校正..."):
                     try:
                         aligned_info = align_sample_info(final_df, info_df, sample_col_name=user_sample_col)
                         time_arr = aligned_info[run_order_col].astype(float).values
@@ -263,9 +250,9 @@ if start_process:
                         
                         corrected_matrix = serrf_normalization(data_matrix, time_arr, type_arr, qc_label)
                         final_df.loc[:, num_cols] = corrected_matrix
-                        st.success(f"✅ SERRF 校正成功！已使用 {qc_label} 修正了 {len(num_cols)} 个特征的批次效应。")
+                        st.success(f"✅ SERRF 校正成功！")
                     except Exception as e:
-                        st.error(f"❌ SERRF 校正失败：{str(e)}。已回退到未校正数据。")
+                        st.error(f"❌ SERRF 失败：{str(e)}。已回退到未校正数据。")
 
             st.session_state.raw_df = final_df
             st.session_state.feature_meta = final_meta
@@ -318,7 +305,7 @@ with st.form(key='analysis_form'):
 # ==========================================
 if submit_button:
     if len(sel_grps) != 2: 
-        st.error("⚠️ 必须且只能选择 2 个组进行对比建模！")
+        st.error("⚠️ 必须且只能选择 2 个组！")
         st.stop()
 
     with st.spinner("正在运行分析引擎..."):
@@ -332,8 +319,8 @@ if submit_button:
                 log_transform=do_log, scale_method=scale_m
             )
             df_sub = df_proc[df_proc[group_col].isin(sel_grps)].copy()
-            if len(df_sub) < 4: raise ValueError(f"所选两组总样本数太少 ({len(df_sub)}个)，无法建模。")
-            if len(feats) < 2: raise ValueError("清洗后剩余特征太少，无法建模。请调高缺失率过滤阈值。")
+            if len(df_sub) < 4: raise ValueError(f"样本数太少 ({len(df_sub)}个)，无法建模。")
+            if len(feats) < 2: raise ValueError("特征太少，无法建模。")
      
             stats_df = run_pairwise_statistics(df_sub, group_col, case, ctrl, feats)
             if meta is not None and 'Clean_Name' in meta.columns and 'Original_Name' in meta.columns: 
@@ -354,7 +341,6 @@ if submit_button:
             opls.fit(X_matrix, y_binary)
             corrs, r2_perm, q2_perm, R2Y, Q2 = opls.permutation_test(X_matrix, y_binary, n_permutations=100)
             m_q2, b_q2 = np.polyfit(corrs, q2_perm, 1) if len(corrs)>0 else (0,0)
-            m_r2, b_r2 = np.polyfit(corrs, r2_perm, 1) if len(corrs)>0 else (0,0)
 
             vip_df = pd.DataFrame({'Metabolite': feats, 'VIP': opls.vip, 'p_corr': opls.p_corr})
             stats_df = stats_df.merge(vip_df, on='Metabolite')
@@ -379,20 +365,18 @@ if submit_button:
             fig_perm.add_trace(go.Scatter(x=[1], y=[R2Y], mode='markers', name='Original R2', marker=dict(color='green', symbol='circle', size=12)))
             fig_perm.add_trace(go.Scatter(x=[1], y=[Q2], mode='markers', name='Original Q2', marker=dict(color='blue', symbol='square', size=12)))
             x_line = np.array([0, 1])
-            fig_perm.add_trace(go.Scatter(x=x_line, y=m_r2*x_line + b_r2, mode='lines', name=f'R2 Line (Int: {b_r2:.2f})', line=dict(color='green', dash='dash')))
-            fig_perm.add_trace(go.Scatter(x=x_line, y=m_q2*x_line + b_q2, mode='lines', name=f'Q2 Line (Int: {b_q2:.2f})', line=dict(color='blue', dash='dash')))
-            fig_perm.update_layout(template="simple_white", width=600, height=600, title={'text': "Permutation Test (n=100)", 'y':0.95, 'x':0.5, 'xanchor': 'center'}, xaxis_title="Correlation", yaxis_title="R2 / Q2")
+            fig_perm.add_trace(go.Scatter(x=x_line, y=m_r2*x_line + b_r2, mode='lines', line=dict(color='green', dash='dash')))
+            fig_perm.add_trace(go.Scatter(x=x_line, y=m_q2*x_line + b_q2, mode='lines', line=dict(color='blue', dash='dash')))
+            fig_perm.update_layout(template="simple_white", width=600, height=600, title={'text': "Permutation Test", 'y':0.95, 'x':0.5, 'xanchor': 'center'}, xaxis_title="Correlation", yaxis_title="R2 / Q2")
 
             splot_df = stats_df.copy()
             splot_df['Color'] = np.where(splot_df['Is_Biomarker'], 'VIP>1 & P<0.05', 'NS')
             fig_splot = px.scatter(splot_df, x='Log2_FC', y='p_corr', color='Color', hover_data=['Name', 'VIP'], color_discrete_map={'VIP>1 & P<0.05': '#CD0000', 'NS': '#E0E0E0'})
-            fig_splot.add_hline(y=0.5, line_dash="dash", line_color="gray"); fig_splot.add_hline(y=-0.5, line_dash="dash", line_color="gray")
             fig_splot = update_layout_square(fig_splot, "S-Plot", "Log2 Fold Change", "p(corr)")
 
             top_vip_df = stats_df.sort_values('VIP', ascending=True).tail(vip_show_num)
             fig_vip = px.bar(top_vip_df, x="VIP", y="Name", orientation='h', color="VIP", color_continuous_scale="RdBu_r")
-            fig_vip.add_vline(x=1.0, line_dash="dash", line_color="black")
-            fig_vip.update_layout(template="simple_white", width=800, height=700, title={'text': f"Top {vip_show_num} VIP Scores", 'x':0.5, 'xanchor': 'center'}, coloraxis_showscale=False)
+            fig_vip.update_layout(template="simple_white", width=800, height=700, title={'text': f"Top VIP Scores", 'x':0.5, 'xanchor': 'center'}, coloraxis_showscale=False)
 
             fig_pca = None
             if len(df_proc) >= 3:
@@ -401,21 +385,12 @@ if submit_button:
                     X_scaled_all = StandardScaler().fit_transform(df_proc[valid_feats_pca])
                     pca_all = PCA(n_components=2).fit(X_scaled_all)
                     pcs_all = pca_all.transform(X_scaled_all)
-                    var_all = pca_all.explained_variance_ratio_
                     pca_df_all = pd.DataFrame({'PC1': pcs_all[:,0], 'PC2': pcs_all[:,1], 'Group': df_proc[group_col].values, 'SampleID': df_proc['SampleID']})
                     fig_pca = px.scatter(pca_df_all, x='PC1', y='PC2', color='Group', symbol='Group', hover_data=['SampleID'], color_discrete_sequence=GROUP_COLORS)
-                    for i, g in enumerate(sorted(df_proc[group_col].unique())):
-                        sub_grp = pca_df_all[pca_df_all['Group'] == g]
-                        if len(sub_grp) >= 3:
-                            el_x, el_y = get_ellipse_coordinates(sub_grp['PC1'], sub_grp['PC2'])
-                            if el_x is not None: fig_pca.add_trace(go.Scatter(x=el_x, y=el_y, mode='lines', line=dict(color=GROUP_COLORS[i % len(GROUP_COLORS)], width=1, dash='dot'), showlegend=False, hoverinfo='skip'))
-                    fig_pca.update_traces(marker=dict(size=14, line=dict(width=1, color='black'), opacity=0.9))
-                    fig_pca = update_layout_square(fig_pca, "Global PCA Plot", f"PC1 ({var_all[0]:.1%})", f"PC2 ({var_all[1]:.1%})")
+                    fig_pca = update_layout_square(fig_pca, "PCA Plot", "PC1", "PC2")
 
             fig_vol = px.scatter(stats_df, x="Log2_FC", y="-Log10_P", color="Sig", color_discrete_map=COLOR_PALETTE, hover_data=['Name', 'VIP'])
-            fig_vol.add_hline(y=-np.log10(p_th), line_dash="dash", line_color="gray")
-            fig_vol.add_vline(x=fc_th, line_dash="dash", line_color="gray"); fig_vol.add_vline(x=-fc_th, line_dash="dash", line_color="gray")
-            fig_vol = update_layout_square(fig_vol, "Volcano Plot", "Log2 Fold Change", "-Log10(P-value)")
+            fig_vol = update_layout_square(fig_vol, "Volcano Plot", "Log2 FC", "-Log10(P)")
 
             hm_fig, hm_base64 = None, ""
             sig_mets = out_df['Metabolite'].tolist()
@@ -426,14 +401,13 @@ if submit_button:
                 lut = {g: GROUP_COLORS[i%len(GROUP_COLORS)] for i, g in enumerate(df_sub[group_col].unique())}
                 try:
                     g = sns.clustermap(hm_data.astype(float), z_score=0, cmap="vlag", center=0, col_colors=df_sub[group_col].map(lut), figsize=(8, 8))
-                    g.ax_heatmap.set_xlabel(""); g.ax_heatmap.set_ylabel(""); hm_fig = g.fig
+                    hm_fig = g.fig
                     buf = io.BytesIO(); g.savefig(buf, format='png', bbox_inches='tight'); buf.seek(0); hm_base64 = base64.b64encode(buf.read()).decode('utf-8')
                 except Exception: pass
 
             fig_nomogram = None
             if len(out_df) >= 2:
-                top_n = min(nomo_num, len(out_df))
-                try: fig_nomogram = plot_nomogram(df_sub, out_df.head(top_n)['Metabolite'].tolist(), out_df.head(top_n)['Name'].tolist(), group_col, case)
+                try: fig_nomogram = plot_nomogram(df_sub, out_df.head(min(nomo_num, len(out_df)))['Metabolite'].tolist(), out_df.head(min(nomo_num, len(out_df)))['Name'].tolist(), group_col, case)
                 except: pass
 
             pathway_df, filtered_db_df, fig_pathway, fig_network = pd.DataFrame(), pd.DataFrame(), None, None
@@ -443,29 +417,8 @@ if submit_button:
                 if not pathway_df.empty:
                     pathway_df['-Log10_P'] = -np.log10(pathway_df['P_Value'].astype(float).clip(lower=1e-10))
                     plot_pw_df = pathway_df[pathway_df['Hits'] > 0].head(pw_show_num)
-                    fig_pathway = px.scatter(plot_pw_df, x='Enrichment_Factor', y='-Log10_P', size='Hits', color='P_Value', hover_name='Pathway', hover_data={'Hit_Metabolites': True, 'P_Value': ':.4f'}, color_continuous_scale='Reds_r', size_max=40)
-                    fig_pathway.update_traces(marker=dict(line=dict(width=1, color='black'), opacity=0.6))
-                    fig_pathway.update_layout(template="simple_white", width=800, height=600, title={'text': "Pathway Enrichment", 'y':0.95, 'x':0.5, 'xanchor': 'center'}, xaxis_title="Enrichment Factor", yaxis_title="-Log10(P)")
-                    fig_pathway.add_hline(y=-np.log10(0.05), line_dash="dash", line_color="gray")
-
-                    sig_pws = pathway_df[pathway_df['P_Value'] < 0.05].head(pw_show_num)
-                    if not sig_pws.empty:
-                        G = nx.Graph()
-                        fc_dict = dict(zip(out_df['Search_Name'].apply(lambda x: str(x).split(';')[0].strip()), out_df['Log2_FC']))
-                        for _, row in sig_pws.iterrows():
-                            pw_name = row['Pathway']
-                            G.add_node(pw_name, node_type='pathway', size=max(15, -np.log10(row['P_Value']) * 10))
-                            if pd.notna(row['Hit_Metabolites']) and str(row['Hit_Metabolites']).strip() != "":
-                                for hit in [m.strip() for m in row['Hit_Metabolites'].split(',')]:
-                                    if hit in fc_dict:
-                                        G.add_node(hit, node_type='metabolite', size=10, fc=fc_dict[hit], disp_name=hit)
-                                        G.add_edge(pw_name, hit)
-                        if len(G.nodes) > 0:
-                            pos = nx.spring_layout(G, k=0.7, seed=42)
-                            edge_trace = go.Scatter(x=[pos[e[0]][0] for e in G.edges()] + [pos[e[1]][0] for e in G.edges()], y=[pos[e[0]][1] for e in G.edges()] + [pos[e[1]][1] for e in G.edges()], mode='lines', line=dict(width=1, color='#888'), hoverinfo='none')
-                            node_trace = go.Scatter(x=[pos[n][0] for n in G.nodes()], y=[pos[n][1] for n in G.nodes()], mode='markers+text', text=[G.nodes[n].get('disp_name', n) if G.nodes[n]['node_type']=='metabolite' else '' for n in G.nodes()], textposition="top center", marker=dict(symbol=['square' if G.nodes[n]['node_type']=='pathway' else 'circle' for n in G.nodes()], color=['#FFD700' if G.nodes[n]['node_type']=='pathway' else ('#CD0000' if G.nodes[n]['fc']>0 else '#00008B') for n in G.nodes()], size=[G.nodes[n]['size'] for n in G.nodes()], line_width=1, line_color='black'))
-                            fig_network = go.Figure(data=[edge_trace, node_trace])
-                            fig_network.update_layout(title={'text': "Mechanism Network", 'y':0.95, 'x':0.5, 'xanchor': 'center'}, showlegend=False, xaxis=dict(showgrid=False, zeroline=False, showticklabels=False), yaxis=dict(showgrid=False, zeroline=False, showticklabels=False), width=900, height=700, plot_bgcolor='white')
+                    fig_pathway = px.scatter(plot_pw_df, x='Enrichment_Factor', y='-Log10_P', size='Hits', color='P_Value', hover_name='Pathway')
+                    fig_pathway.update_layout(template="simple_white", width=800, height=600, title={'text': "Pathway Enrichment", 'x':0.5, 'xanchor': 'center'})
 
             html_report = generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, Q2, b_q2, out_df, pathway_df, fig_opls, fig_perm, fig_splot, fig_vip, fig_vol, fig_pca, hm_base64, fig_nomogram, fig_pathway, fig_network, vip_show_num, pw_show_num, nomo_num)
             prompt_md = generate_ai_prompt(case, ctrl, norm_m, scale_m, R2Y, Q2, b_q2, p_th, fc_th, out_df, pathway_df)
@@ -480,9 +433,8 @@ if submit_button:
                 'html_report': html_report, 'prompt_md': prompt_md
             }
         except Exception as e:
-            error_details = traceback.format_exc()
-            st.error(f"❌ 分析计算失败，请检查数据组别与参数。错误摘要: {str(e)}")
-            with st.expander("点击查看详细报错日志 (供排查)"): st.code(error_details)
+            st.error(f"❌ 分析计算失败。错误摘要: {str(e)}")
+            with st.expander("点击查看详细报错日志"): st.code(traceback.format_exc())
 
 # ==========================================
 # 5. UI 展示层
@@ -496,51 +448,33 @@ if 'analysis_res' in st.session_state:
     b_q2_val = res['b_q2']
     q2_val = res['Q2']
     if b_q2_val < 0.05 and q2_val > 0.5:
-        st.success(f"✅ OPLS-DA 模型预测能力强，且未发生过拟合 (Q²={q2_val:.3f}, 截距={b_q2_val:.3f})")
+        st.success(f"✅ OPLS-DA 模型预测能力强，且未发生过拟合")
     elif b_q2_val < 0.05 and q2_val <= 0.5:
-        st.info(f"💡 模型未过拟合，但组间整体代谢差异偏弱 (Q²={q2_val:.3f} < 0.5, 截距={b_q2_val:.3f})")
+        st.info(f"💡 模型未过拟合，但组间整体代谢差异偏弱")
     else:
-        st.warning(f"⚠️ 警告：模型存在严重的过拟合风险，不建议采信其 VIP 值！(Q²截距={b_q2_val:.3f} ≥ 0.05)")
+        st.warning(f"⚠️ 警告：模型存在严重的过拟合风险，不建议采信其 VIP 值！")
 
-    tabs = st.tabs(["🎯 OPLS-DA", "🔄 置换检验", "🧬 S-Plot", "📊 VIP", "🌐 PCA", "🌋 火山/热图", "📑 清单", "📏 列线图", "🕸️ 通路富集", "🔗 机制网络图", "📄 导出报告与AI助手"])
+    tabs = st.tabs(["🎯 OPLS-DA", "🔄 置换检验", "🧬 S-Plot", "📊 VIP", "🌐 PCA", "🌋 火山/热图", "📑 清单", "📏 列线图", "🕸️ 通路富集", "🔗 机制网络图", "📄 导出报告"])
     
-    with tabs[0]:
-        c1, c2 = st.columns([1, 4])
-        with c2: st.plotly_chart(res['fig_opls']) if res['fig_opls'] else st.warning("图表生成失败")
-    with tabs[1]:
-        c1, c2 = st.columns([1, 4])
-        with c2: st.plotly_chart(res['fig_perm']) if res['fig_perm'] else st.warning("图表生成失败")
-    with tabs[2]:
-        c1, c2 = st.columns([1, 4])
-        with c2: st.plotly_chart(res['fig_splot']) if res['fig_splot'] else st.warning("图表生成失败")
-    with tabs[3]:
-        c1, c2 = st.columns([1, 6])
-        with c2: st.plotly_chart(res['fig_vip']) if res['fig_vip'] else st.warning("图表生成失败")
-    with tabs[4]:
-        c1, c2 = st.columns([1, 4])
-        with c2: st.plotly_chart(res['fig_pca']) if res['fig_pca'] else st.warning("样本不足以绘制PCA")
+    with tabs[0]: st.plotly_chart(res['fig_opls']) if res['fig_opls'] else st.warning("图表失败")
+    with tabs[1]: st.plotly_chart(res['fig_perm']) if res['fig_perm'] else st.warning("图表失败")
+    with tabs[2]: st.plotly_chart(res['fig_splot']) if res['fig_splot'] else st.warning("图表失败")
+    with tabs[3]: st.plotly_chart(res['fig_vip']) if res['fig_vip'] else st.warning("图表失败")
+    with tabs[4]: st.plotly_chart(res['fig_pca']) if res['fig_pca'] else st.warning("图表失败")
     with tabs[5]:
         c1, c2 = st.columns(2)
         with c1: st.plotly_chart(res['fig_vol'], use_container_width=True) if res['fig_vol'] else None
-        with c2: st.pyplot(res['hm_fig']) if res['hm_fig'] else st.info("无满足要求的差异代谢物")
+        with c2: st.pyplot(res['hm_fig']) if res['hm_fig'] else st.info("无满足要求数据")
     with tabs[6]:
         st.markdown("### 🏆 生物标志物清单")
-        st.dataframe(res['out_df'][['Name', 'Log2_FC', 'P_Value', 'FDR', 'VIP', 'p_corr']].style.format({"Log2_FC":"{:.2f}", "P_Value":"{:.3e}", "FDR":"{:.3e}", "VIP":"{:.2f}", "p_corr":"{:.2f}"}).background_gradient(subset=['VIP'], cmap="Reds"), use_container_width=True)
-    with tabs[7]:
-        c1, c2 = st.columns([1, 6])
-        with c2: st.plotly_chart(res['fig_nomogram']) if res['fig_nomogram'] else st.warning("⚠️ 显著差异代谢物不足 2 个或分组异常，无法构建列线图。")
+        st.dataframe(res['out_df'][['Name', 'Log2_FC', 'P_Value', 'FDR', 'VIP']].style.background_gradient(subset=['VIP'], cmap="Reds"), use_container_width=True)
+    with tabs[7]: st.plotly_chart(res['fig_nomogram']) if res['fig_nomogram'] else st.warning("无法构建列线图")
     with tabs[8]:
-        if 'filtered_db_df' in res and not res['filtered_db_df'].empty:
-            st.download_button("📥 导出专属 MA 背景库", res['filtered_db_df'].to_csv(index=False, header=False, quoting=csv.QUOTE_ALL).encode('utf-8'), f"MA_Background_{res['case']}_{res['ctrl']}.csv", "text/csv", type="primary")
-        c1, c2 = st.columns([1, 6])
-        with c2:
-            if res['pathway_df'].empty: st.warning("未能匹配到通路。")
-            else:
-                if res['fig_pathway']: st.plotly_chart(res['fig_pathway'])
-                st.dataframe(res['pathway_df'].drop(columns=['-Log10_P'], errors='ignore').style.format({"P_Value":"{:.3e}", "FDR":"{:.3e}", "Enrichment_Factor":"{:.2f}"}).background_gradient(subset=['P_Value'], cmap="Reds_r", vmin=0, vmax=0.05), use_container_width=True)
-    with tabs[9]:
-        st.plotly_chart(res['fig_network']) if res['fig_network'] else st.info("没有找到通路与代谢物的有效映射。")
+        if res['pathway_df'].empty: st.warning("未能匹配到通路。")
+        else:
+            if res['fig_pathway']: st.plotly_chart(res['fig_pathway'])
+            st.dataframe(res['pathway_df'].drop(columns=['-Log10_P'], errors='ignore'), use_container_width=True)
+    with tabs[9]: st.plotly_chart(res['fig_network']) if res['fig_network'] else st.info("无数据")
     with tabs[10]:
-        c_rep1, c_rep2 = st.columns(2)
-        with c_rep1: st.download_button("📥 下载完整离线网页报告 (.html)", res['html_report'].encode('utf-8'), f"Report_{res['case']}_{res['ctrl']}.html", "text/html")
-        with c_rep2: st.download_button("📥 下载 AI 辅助撰稿 Prompt (.md)", res['prompt_md'].encode('utf-8'), f"Prompt_{res['case']}_{res['ctrl']}.md", "text/markdown")
+        st.download_button("📥 离线网页报告 (.html)", res['html_report'].encode('utf-8'), "Report.html", "text/html")
+        st.download_button("📥 AI Prompt (.md)", res['prompt_md'].encode('utf-8'), "Prompt.md", "text/markdown")
