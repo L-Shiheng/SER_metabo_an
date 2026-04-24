@@ -233,10 +233,11 @@ if start_process:
                         if err: st.error(err)
                         else:
                             if feature_scope.startswith("仅已注释"):
-                                anno_ids = meta[meta['Is_Annotated'] == True].index
-                                keep_cols = ['SampleID', 'Group', 'Source_Files'] + [c for c in raw_df.columns if c in anno_ids]
+                                # 🛡️ 强制转换为纯 Python 字符串集合，彻底消除 Pandas 底层 Hash 冲突
+                                anno_ids = set(meta[meta['Is_Annotated'] == True].index.astype(str).tolist())
+                                keep_cols = ['SampleID', 'Group', 'Source_Files'] + [c for c in raw_df.columns if str(c) in anno_ids]
                                 raw_df = raw_df[keep_cols]
-                                meta = meta.loc[meta.index.isin(raw_df.columns)]
+                                meta = meta.loc[meta.index.astype(str).isin([str(c) for c in raw_df.columns])]
                             info_aligned = align_sample_info(raw_df, info_df, sample_col_name=user_sample_col)
                             if user_group_col and user_group_col in info_aligned.columns: 
                                 raw_df['Group'] = info_aligned[user_group_col].fillna('Unknown').values
