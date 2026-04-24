@@ -221,7 +221,6 @@ if start_process:
                         if err: st.error(err)
                         else:
                             if feature_scope.startswith("仅已注释"):
-                                # 🛡️ 强制纯文本匹配，杜绝Pandas Hash宕机
                                 anno_ids = set(meta[meta['Is_Annotated'] == True].index.astype(str).tolist())
                                 keep_cols = ['SampleID', 'Group', 'Source_Files'] + [c for c in raw_df.columns if str(c) in anno_ids]
                                 raw_df = raw_df[keep_cols]
@@ -323,10 +322,22 @@ if submit_button:
             if len(feats) < 2: raise ValueError("特征太少，无法建模。")
      
             stats_df = run_pairwise_statistics(df_sub, group_col, case, ctrl, feats)
+            
+            # 🛡️ 核心修复 1：安全整合 KEGG ID 并创建双向撞击靶点 Search_Name
             if meta is not None and 'Clean_Name' in meta.columns and 'Original_Name' in meta.columns: 
-                stats_df = stats_df.merge(meta[['Clean_Name', 'Original_Name']], left_on='Metabolite', right_index=True, how='left')
+                merge_cols = ['Clean_Name', 'Original_Name']
+                if 'KEGG_ID' in meta.columns:
+                    merge_cols.append('KEGG_ID')
+                
+                stats_df = stats_df.merge(meta[merge_cols], left_on='Metabolite', right_index=True, how='left')
                 stats_df['Name'] = stats_df['Clean_Name'].fillna(stats_df['Metabolite'])
-                stats_df['Search_Name'] = stats_df['Original_Name'].fillna(stats_df['Metabolite'])
+                
+                if 'KEGG_ID' in stats_df.columns:
+                    kegg_str = stats_df['KEGG_ID'].fillna('').astype(str).replace('nan', '').replace('None', '')
+                    orig_str = stats_df['Original_Name'].fillna(stats_df['Metabolite']).astype(str)
+                    stats_df['Search_Name'] = np.where(kegg_str != '', orig_str + '|' + kegg_str, orig_str)
+                else:
+                    stats_df['Search_Name'] = stats_df['Original_Name'].fillna(stats_df['Metabolite'])
             else:
                 stats_df['Name'] = stats_df['Search_Name'] = stats_df['Metabolite']
                 
@@ -341,7 +352,6 @@ if submit_button:
             opls.fit(X_matrix, y_binary)
             corrs, r2_perm, q2_perm, R2Y, Q2 = opls.permutation_test(X_matrix, y_binary, n_permutations=100)
             
-            # 🛡️ 修复漏掉的 R2 和 Q2 截距计算
             m_q2, b_q2 = np.polyfit(corrs, q2_perm, 1) if len(corrs)>0 else (0,0)
             m_r2, b_r2 = np.polyfit(corrs, r2_perm, 1) if len(corrs)>0 else (0,0)
 
@@ -422,8 +432,27 @@ if submit_button:
                     plot_pw_df = pathway_df[pathway_df['Hits'] > 0].head(pw_show_num)
                     fig_pathway = px.scatter(plot_pw_df, x='Enrichment_Factor', y='-Log10_P', size='Hits', color='P_Value', hover_name='Pathway')
                     fig_pathway.update_layout(template="simple_white", width=800, height=600, title={'text': "Pathway Enrichment", 'x':0.5, 'xanchor': 'center'})
+                    
+                    sig_pws = pathway_df[pathway_df['P_Value'] < 0.05].head(pw_show_num)
+                    if not sig_pws.empty:
+                        G = nx.Graph()
+                        # 🛡️ 核心修复 2：画网络图字典时，强行剥离 | 后缀，防止 Hit_Metabolites 找不到主匹配！
+                        fc_dict = dict(zip(out_df['Search_Name'].apply(lambda x: str(x).split('|')[0].split(';')[0].strip()), out_df['Log2_FC']))
+                        for _, row in sig_pws.iterrows():
+                            pw_name = row['Pathway']
+                            G.add_node(pw_name, node_type='pathway', size=max(15, -np.log10(row['P_Value']) * 10))
+                            if pd.notna(row['Hit_Metabolites']) and str(row['Hit_Metabolites']).strip() != "":
+                                for hit in [m.strip() for m in row['Hit_Metabolites'].split(',')]:
+                                    if hit in fc_dict:
+                                        G.add_node(hit, node_type='metabolite', size=10, fc=fc_dict[hit], disp_name=hit)
+                                        G.add_edge(pw_name, hit)
+                        if len(G.nodes) > 0:
+                            pos = nx.spring_layout(G, k=0.7, seed=42)
+                            edge_trace = go.Scatter(x=[pos[e[0]][0] for e in G.edges()] + [pos[e[1]][0] for e in G.edges()], y=[pos[e[0]][1] for e in G.edges()] + [pos[e[1]][1] for e in G.edges()], mode='lines', line=dict(width=1, color='#888'), hoverinfo='none')
+                            node_trace = go.Scatter(x=[pos[n][0] for n in G.nodes()], y=[pos[n][1] for n in G.nodes()], mode='markers+text', text=[G.nodes[n].get('disp_name', n) if G.nodes[n]['node_type']=='metabolite' else '' for n in G.nodes()], textposition="top center", marker=dict(symbol=['square' if G.nodes[n]['node_type']=='pathway' else 'circle' for n in G.nodes()], color=['#FFD700' if G.nodes[n]['node_type']=='pathway' else ('#CD0000' if G.nodes[n]['fc']>0 else '#00008B') for n in G.nodes()], size=[G.nodes[n]['size'] for n in G.nodes()], line_width=1, line_color='black'))
+                            fig_network = go.Figure(data=[edge_trace, node_trace])
+                            fig_network.update_layout(title={'text': "Mechanism Network", 'y':0.95, 'x':0.5, 'xanchor': 'center'}, showlegend=False, xaxis=dict(showgrid=False, zeroline=False, showticklabels=False), yaxis=dict(showgrid=False, zeroline=False, showticklabels=False), width=900, height=700, plot_bgcolor='white')
 
-            # 🛡️ 确保 25 个参数正确传递
             html_report = generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, Q2, b_q2, out_df, pathway_df, fig_opls, fig_perm, fig_splot, fig_vip, fig_vol, fig_pca, hm_base64, fig_nomogram, fig_pathway, fig_network, vip_show_num, pw_show_num, nomo_num)
             prompt_md = generate_ai_prompt(case, ctrl, norm_m, scale_m, R2Y, Q2, b_q2, p_th, fc_th, out_df, pathway_df)
 
@@ -441,7 +470,7 @@ if submit_button:
             with st.expander("点击查看详细报错日志"): st.code(traceback.format_exc())
 
 # ==========================================
-# 5. UI 展示层 (彻底恢复黄金排版布局)
+# 5. UI 展示层 
 # ==========================================
 if 'analysis_res' in st.session_state:
     res = st.session_state['analysis_res']
