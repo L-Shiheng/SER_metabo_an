@@ -354,13 +354,14 @@ def parse_metdna_file(file_buffer, file_name, valid_samples=None):
                   'base_peak', 'num_peaks', 'cons_formula_pred', 'id_kegg', 
                   'id_hmdb', 'id_metacyc', 'stereo_isomer_id', 'stereo_isomer_name'}
     
-    # 提取纯净的样本列
+    # 提取纯净的样本列 (强力清洗匹配，防止标点符号不同导致错判)
     sample_cols = [c for c in df.columns if str(c).strip().lower() not in known_meta and str(c).strip() != '']
     if valid_samples and len(valid_samples) > 0:
-        valid_lower = [str(s).strip().lower() for s in valid_samples]
-        sample_cols = [c for c in sample_cols if str(c).strip().lower() in valid_lower]
+        valid_clean = [re.sub(r'[^a-zA-Z0-9]', '', str(s)).lower() for s in valid_samples]
+        sample_cols = [c for c in sample_cols if re.sub(r'[^a-zA-Z0-9]', '', str(c)).lower() in valid_clean]
             
-    if not sample_cols: return None, None, "未找到有效的样本数据列。请检查 Info 表是否匹配。"
+    if not sample_cols: 
+        return None, None, "未在数据表中找到与 Info 表匹配的样本列名。(请确保两张表里的样本名称字母/数字一致)"
 
     file_tag = os.path.splitext(os.path.basename(file_name))[0]
     clean_tag = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', file_tag)
@@ -368,7 +369,12 @@ def parse_metdna_file(file_buffer, file_name, valid_samples=None):
     if 'name' not in df.columns: df['name'] = ""
     if 'confidence_level' not in df.columns: df['confidence_level'] = 'Unknown'
     if 'total_score' not in df.columns: df['total_score'] = 0
-    if 'peak_name' not in df.columns: df['peak_name'] = [f"M{mz}_RT{rt}" for mz, rt in zip(df.get('mz', df.index), df.get('rt', df.index))]
+    
+    # 防止有些表没有 peak_name
+    if 'peak_name' not in df.columns: 
+        mz_vals = df['mz'] if 'mz' in df.columns else pd.Series([""] * len(df))
+        rt_vals = df['rt'] if 'rt' in df.columns else df.index.astype(str)
+        df['peak_name'] = [f"M{mz}_RT{rt}" for mz, rt in zip(mz_vals, rt_vals)]
     
     df['name'] = df['name'].fillna("").astype(str).str.strip()
     mask_annotated = (df['name'] != "") & (df['name'].str.lower() != "nan")
