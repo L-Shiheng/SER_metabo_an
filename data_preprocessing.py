@@ -369,7 +369,6 @@ def parse_metdna_file(file_buffer, file_name, valid_samples=None):
         rt_vals = df['rt'] if 'rt' in df.columns else df.index.astype(str)
         df['peak_name'] = [f"M{mz}_RT{rt}" for mz, rt in zip(mz_vals, rt_vals)]
     
-    # 🌟 核心防污染架构：在底层赋予全局唯一标识（防止异表同名峰发生错误相杀）
     final_ids = df['peak_name'].astype(str).str.strip() + "_" + clean_tag
     final_ids = make_unique(final_ids)
     
@@ -383,7 +382,6 @@ def parse_metdna_file(file_buffer, file_name, valid_samples=None):
     meta_df = pd.DataFrame({
         "Peak_Name": final_ids, 
         "Original_Name": df['name'], 
-        # 🌟 核心分流架构：已知物去竞争唯一的Clean_Name，未知物直接保留唯一的全球身份不参与竞争
         "Clean_Name": np.where(mask_annotated, clean_names, final_ids), 
         "Confidence_Level": df['confidence_level'], 
         "Total_Score": pd.to_numeric(df['total_score'], errors='coerce').fillna(0),
@@ -428,7 +426,6 @@ def merge_multiple_dfs(results_list):
             score = m_row['Total_Score']
             area = intensities.get(peak_name, 0)
             
-            # 三级漏斗竞争机制
             rank_val = rank_confidence(conf)
             current_tuple = (rank_val, -score, -area)
             
@@ -457,7 +454,6 @@ def merge_multiple_dfs(results_list):
     
     final_ids = [fid for f_list in files_features_to_keep.values() for fid in f_list]
     
-    # 🛡️ 安全组合元数据（杜绝Pandas Hash错误）
     merged_meta = pd.concat([res[1] for res in results_list])
     merged_meta = merged_meta[~merged_meta.index.duplicated(keep='first')]
     merged_meta = merged_meta.loc[final_ids]
