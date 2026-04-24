@@ -45,7 +45,6 @@ except ImportError as e:
     st.error(f"❌ 严重错误：未找到核心依赖文件。详情: {e}")
     st.stop()
 
-# 检测是否安装了 SERRF 模块
 has_serrf = False
 try:
     from serrf_module import serrf_normalization
@@ -76,7 +75,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. 极简侧边栏数据流控制台 (恢复 SERRF 完整参数)
+# 1. 极简侧边栏数据流控制台
 # ==========================================
 if 'raw_df' not in st.session_state: st.session_state.raw_df = None
 if 'feature_meta' not in st.session_state: st.session_state.feature_meta = None
@@ -90,7 +89,7 @@ with st.sidebar:
         "选择数据流模式", 
         ["1. MA 标准单表 (自带分组)", "2. 拟靶向 MRM 宽表 (需后缀)", "3. MetDNA 原始宽表"], 
         index=0,
-        help="【MA 单表】：第一行样本，第二行分组，无需Info表。\n【MRM 宽表】：仪器原始导出表，列名包含特定后缀。\n【MetDNA】：原始结果表。"
+        help="【MA 单表】：第一行样本，第二行分组。\n【MRM 宽表】：仪器原始导出表，列名包含特定后缀。\n【MetDNA】：原始结果表。"
     )
     
     info_df = None; candidate_samples = []; user_sample_col = None; user_group_col = None
@@ -115,9 +114,8 @@ with st.sidebar:
                 st.caption(f"✅ 已加载 {len(info_df)} 行")
             except Exception as e: st.error(f"Info 读取失败: {e}")
             
-        excluded_samples = st.multiselect("2. 样本剔除 (黑名单)", options=candidate_samples, default=[], help="从分析中彻底移除异常样本。")
+        excluded_samples = st.multiselect("2. 样本剔除 (黑名单)", options=candidate_samples, default=[], help="移除异常样本。")
         
-        # 恢复 SERRF UI
         use_serrf = st.checkbox("3. 启用 SERRF 批次校正", value=False)
         if use_serrf:
             if not has_serrf: st.warning("⚠️ 缺失 serrf_module.py，请检查依赖。")
@@ -166,11 +164,11 @@ with st.sidebar:
     
     if data_source == "1. MA 标准单表 (自带分组)":
         dict_files = st.file_uploader("关联 MetDNA 字典 (可选)", type=["csv", "xlsx"], accept_multiple_files=True, key="dict_files")
-        uploaded_files = st.file_uploader("上传 MA 格式单表 (支持多选自动合并)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
+        uploaded_files = st.file_uploader("上传 MA 格式单表 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
     elif data_source == "2. 拟靶向 MRM 宽表 (需后缀)":
         suffix = st.text_input("提取指标后缀", value=" : 面积", help="代码将按此后缀寻找数据列。")
         dict_files = st.file_uploader("关联 MetDNA 字典 (可选)", type=["csv", "xlsx"], accept_multiple_files=True, key="dict_files")
-        uploaded_files = st.file_uploader("上传 MRM 宽表 (支持多选最大响应保留)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
+        uploaded_files = st.file_uploader("上传 MRM 宽表 (支持多选)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
     else:
         feature_scope = st.radio("特征范围", ["仅已注释特征", "全部特征"], index=0)
         uploaded_files = st.file_uploader("上传 MetDNA 结果表", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
@@ -178,7 +176,7 @@ with st.sidebar:
     start_process = st.container().button("📥 加载数据矩阵", use_container_width=True, type="primary")
 
 # ==========================================
-# 2. 核心路由与解析引擎调用 (恢复 SERRF 逻辑)
+# 2. 核心路由与解析引擎调用
 # ==========================================
 if start_process:
     if 'analysis_res' in st.session_state: del st.session_state['analysis_res']
@@ -211,15 +209,15 @@ if start_process:
                             df_t['Group'] = info_aligned[user_group_col].fillna('Unknown').values
                         final_df, final_meta = df_t, meta
 
-        # 引擎 C：MetDNA 原始
+        # 引擎 C：MetDNA 原始 (Sprint 1 更新点：传入 valid_samples 净化提取)
         else:
             if info_df is None: st.error("⚠️ 必须先上传 Sample Info 表格以映射分组！")
             else:
-                with st.spinner("正在启动 MetDNA 解析引擎..."):
+                with st.spinner("正在启动 MetDNA 解析引擎 (三级漏斗去重)..."):
                     parsed_results = []
                     for i, file in enumerate(uploaded_files):
                         unique_name = f"{os.path.splitext(file.name)[0]}_{i}{os.path.splitext(file.name)[1]}"
-                        df_t, meta, err = parse_metdna_file(file, unique_name)
+                        df_t, meta, err = parse_metdna_file(file, unique_name, valid_samples=candidate_samples)
                         if not err: parsed_results.append((df_t, meta, unique_name))
                         progress_bar.progress((i + 1) / len(uploaded_files))
                     
@@ -459,6 +457,7 @@ if submit_button:
                             fig_network = go.Figure(data=[edge_trace, node_trace])
                             fig_network.update_layout(title={'text': "Mechanism Network", 'y':0.95, 'x':0.5, 'xanchor': 'center'}, showlegend=False, xaxis=dict(showgrid=False, zeroline=False, showticklabels=False), yaxis=dict(showgrid=False, zeroline=False, showticklabels=False), width=900, height=700, plot_bgcolor='white')
 
+            # ======================== 25 参数正确传递 ========================
             html_report = generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, Q2, b_q2, out_df, pathway_df, fig_opls, fig_perm, fig_splot, fig_vip, fig_vol, fig_pca, hm_base64, fig_nomogram, fig_pathway, fig_network, vip_show_num, pw_show_num, nomo_num)
             prompt_md = generate_ai_prompt(case, ctrl, norm_m, scale_m, R2Y, Q2, b_q2, p_th, fc_th, out_df, pathway_df)
 
@@ -477,16 +476,16 @@ if submit_button:
             with st.expander("点击查看详细报错日志 (供排查)"): st.code(error_details)
 
 # ==========================================
-# 5. UI 展示层 (彻底恢复黄金比例排版布局)
+# 5. UI 展示层
 # ==========================================
 if 'analysis_res' in st.session_state:
     res = st.session_state['analysis_res']
     
     st.title("📊 综合代谢组学分析报告")
     st.markdown(f"**对比**: {res['case']} vs {res['ctrl']} &nbsp;&nbsp;|&nbsp;&nbsp; **模型**: R²Y = `{res['R2Y']:.3f}` &nbsp;&nbsp;|&nbsp;&nbsp; Q² = `{res['Q2']:.3f}`")
+    
     b_q2_val = res['b_q2']
     q2_val = res['Q2']
-    
     if b_q2_val < 0.05 and q2_val > 0.5:
         st.success(f"✅ OPLS-DA 模型预测能力强，且未发生过拟合 (Q²={q2_val:.3f}, 截距={b_q2_val:.3f})")
     elif b_q2_val < 0.05 and q2_val <= 0.5:
@@ -498,66 +497,40 @@ if 'analysis_res' in st.session_state:
     
     with tabs[0]:
         c1, c2 = st.columns([1, 4])
-        with c2: 
-            if res['fig_opls']: st.plotly_chart(res['fig_opls']) 
-            else: st.warning("图表生成失败")
-            
+        with c2: st.plotly_chart(res['fig_opls']) if res['fig_opls'] else st.warning("图表生成失败")
     with tabs[1]:
         c1, c2 = st.columns([1, 4])
-        with c2: 
-            if res['fig_perm']: st.plotly_chart(res['fig_perm'])
-            else: st.warning("图表生成失败")
-            
+        with c2: st.plotly_chart(res['fig_perm']) if res['fig_perm'] else st.warning("图表生成失败")
     with tabs[2]:
         c1, c2 = st.columns([1, 4])
-        with c2: 
-            if res['fig_splot']: st.plotly_chart(res['fig_splot'])
-            else: st.warning("图表生成失败")
-            
+        with c2: st.plotly_chart(res['fig_splot']) if res['fig_splot'] else st.warning("图表生成失败")
     with tabs[3]:
         c1, c2 = st.columns([1, 6])
-        with c2: 
-            if res['fig_vip']: st.plotly_chart(res['fig_vip'])
-            else: st.warning("图表生成失败")
-            
+        with c2: st.plotly_chart(res['fig_vip']) if res['fig_vip'] else st.warning("图表生成失败")
     with tabs[4]:
         c1, c2 = st.columns([1, 4])
-        with c2: 
-            if res['fig_pca']: st.plotly_chart(res['fig_pca'])
-            else: st.warning("样本不足以绘制PCA")
-            
+        with c2: st.plotly_chart(res['fig_pca']) if res['fig_pca'] else st.warning("样本不足以绘制PCA")
     with tabs[5]:
         c1, c2 = st.columns(2)
-        with c1: 
-            if res['fig_vol']: st.plotly_chart(res['fig_vol'], use_container_width=True)
-        with c2: 
-            if res['hm_fig']: st.pyplot(res['hm_fig']) 
-            else: st.info("无满足要求的差异代谢物")
-            
+        with c1: st.plotly_chart(res['fig_vol'], use_container_width=True) if res['fig_vol'] else None
+        with c2: st.pyplot(res['hm_fig']) if res['hm_fig'] else st.info("无满足要求的差异代谢物")
     with tabs[6]:
         st.markdown("### 🏆 生物标志物清单")
         st.dataframe(res['out_df'][['Name', 'Log2_FC', 'P_Value', 'FDR', 'VIP', 'p_corr']].style.format({"Log2_FC":"{:.2f}", "P_Value":"{:.3e}", "FDR":"{:.3e}", "VIP":"{:.2f}", "p_corr":"{:.2f}"}).background_gradient(subset=['VIP'], cmap="Reds"), use_container_width=True)
-        
     with tabs[7]:
         c1, c2 = st.columns([1, 6])
-        with c2:
-            if res['fig_nomogram']: st.plotly_chart(res['fig_nomogram'])
-            else: st.warning("⚠️ 显著差异代谢物不足 2 个或分组异常，无法构建列线图。")
-            
+        with c2: st.plotly_chart(res['fig_nomogram']) if res['fig_nomogram'] else st.warning("⚠️ 显著差异代谢物不足 2 个或分组异常，无法构建列线图。")
     with tabs[8]:
         if 'filtered_db_df' in res and not res['filtered_db_df'].empty:
-            st.download_button("📥 导出基于本次实验的专属 MA 背景库", res['filtered_db_df'].to_csv(index=False, header=False, quoting=csv.QUOTE_ALL).encode('utf-8'), f"MA_Background_{res['case']}_{res['ctrl']}.csv", "text/csv", type="primary")
+            st.download_button("📥 导出专属 MA 背景库", res['filtered_db_df'].to_csv(index=False, header=False, quoting=csv.QUOTE_ALL).encode('utf-8'), f"MA_Background_{res['case']}_{res['ctrl']}.csv", "text/csv", type="primary")
         c1, c2 = st.columns([1, 6])
         with c2:
             if res['pathway_df'].empty: st.warning("未能匹配到通路。")
             else:
                 if res['fig_pathway']: st.plotly_chart(res['fig_pathway'])
                 st.dataframe(res['pathway_df'].drop(columns=['-Log10_P'], errors='ignore').style.format({"P_Value":"{:.3e}", "FDR":"{:.3e}", "Enrichment_Factor":"{:.2f}"}).background_gradient(subset=['P_Value'], cmap="Reds_r", vmin=0, vmax=0.05), use_container_width=True)
-                
     with tabs[9]:
-        if res['fig_network']: st.plotly_chart(res['fig_network'])
-        else: st.info("没有找到通路与代谢物的有效映射。")
-        
+        st.plotly_chart(res['fig_network']) if res['fig_network'] else st.info("没有找到通路与代谢物的有效映射。")
     with tabs[10]:
         c_rep1, c_rep2 = st.columns(2)
         with c_rep1: st.download_button("📥 下载完整离线网页报告 (.html)", res['html_report'].encode('utf-8'), f"Report_{res['case']}_{res['ctrl']}.html", "text/html")
