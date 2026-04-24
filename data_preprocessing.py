@@ -137,7 +137,6 @@ def make_unique(series):
         seen.add(new_item); result.append(new_item)
     return result
 
-# 🌟 防崩溃文件读取器
 def read_file_robust(file_buffer):
     file_buffer.seek(0)
     if file_buffer.name.endswith('.csv'):
@@ -153,7 +152,6 @@ def read_file_robust(file_buffer):
     else:
         return pd.read_excel(file_buffer, header=None)
 
-# 📚 通用字典构建
 def build_kegg_dictionary(dict_files):
     kegg_mapping = {}
     if not dict_files: return kegg_mapping
@@ -188,7 +186,7 @@ def build_kegg_dictionary(dict_files):
     return kegg_mapping
 
 # ==============================================================================
-# 🚀 引擎 A：MA 极简单表解析器 (针对 lcms_table.csv 这类表)
+# 🚀 引擎 A：MA 极简单表解析器 
 # ==============================================================================
 def parse_universal_single_table(file_list, external_kegg_dict=None):
     if external_kegg_dict is None: external_kegg_dict = {}
@@ -256,7 +254,7 @@ def parse_universal_single_table(file_list, external_kegg_dict=None):
     except Exception as e: return None, None, f"通用表格解析失败: {str(e)}"
 
 # ==============================================================================
-# 🚀 引擎 B：MRM 拟靶向后缀解析器 (针对 RP-N-MRM 等多模式宽表)
+# 🚀 引擎 B：MRM 拟靶向后缀解析器 
 # ==============================================================================
 def parse_manual_targeted_files(file_list, metric_suffix=" : 面积", mode_regex=r'-(P|N|RP-P|RP-N|HILIC-P|HILIC-N|POS|NEG)-', external_kegg_dict=None):
     if external_kegg_dict is None: external_kegg_dict = {}
@@ -294,7 +292,6 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积", mode_regex
         if not all_dfs: return None, None, f"未找到后缀为 '{metric_suffix}' 的数据列！请检查表头。"
             
         combined = pd.concat(all_dfs, ignore_index=True)
-        # 多表自动去重：保留最大响应值
         combined = combined.sort_values('__mean_resp__', ascending=False).drop_duplicates(subset=['__Compound__'])
         combined = combined.drop(columns=['__mean_resp__'])
         combined.set_index('__Compound__', inplace=True)
@@ -314,7 +311,7 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积", mode_regex
         df_t = combined.T
         df_t.index.name = 'SampleID'
         df_t = df_t.reset_index()
-        df_t['Group'] = 'Unknown' # 等待 Info 表对其赋予真实分组
+        df_t['Group'] = 'Unknown' 
         df_t['Source_Files'] = 'MRM_Merged_Matrix'
         
         meta = pd.DataFrame(index=combined.index)
@@ -324,10 +321,25 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积", mode_regex
         return df_t, meta, None
     except Exception as e: return None, None, f"MRM 拟靶向表格解析失败: {str(e)}"
 
+
 # ==============================================================================
-# 🚀 引擎 C：MetDNA 原生管线提取器
+# 🚀 引擎 C：MetDNA 原生管线提取器 ( Sprint 1: 三级漏斗去重重构版 )
 # ==============================================================================
-def parse_metdna_file(file_buffer, file_name):
+def rank_confidence(conf_str):
+    """智能解析注释级别，返回一个排名数字（越小越好）"""
+    s = str(conf_str).upper().strip()
+    if s in ['NAN', 'NONE', '', 'NULL']: return 99
+    
+    digits = re.findall(r'\d+', s)
+    if digits: return int(digits[0])
+    
+    if 'A' in s: return 1
+    if 'B' in s: return 2
+    if 'C' in s: return 3
+    
+    return 99
+
+def parse_metdna_file(file_buffer, file_name, valid_samples=None):
     try:
         df = read_file_robust(file_buffer)
         if df.empty: return None, None, "表格为空"
@@ -335,38 +347,51 @@ def parse_metdna_file(file_buffer, file_name):
         df = df.iloc[1:].reset_index(drop=True)
     except Exception as e: return None, None, f"读取失败: {str(e)}"
 
-    known_meta = {'peak_name', 'mz', 'rt', 'id', 'id_zhulab', 'name', 'formula', 'confidence_level', 'smiles', 'inchikey', 'isotope', 'adduct', 'total_score', 'mz_error', 'rt_error_abs', 'rt_error_rela', 'ms2_score', 'iden_score', 'iden_type', 'peak_group_id', 'base_peak', 'num_peaks', 'cons_formula_pred', 'id_kegg', 'id_hmdb', 'id_metacyc'}
-    sample_cols = [c for c in df.columns if str(c).lower() not in known_meta]
+    known_meta = {'peak_name', 'mz', 'rt', 'id', 'id_zhulab', 'name', 'formula', 
+                  'confidence_level', 'smiles', 'inchikey', 'isotope', 'adduct', 
+                  'total_score', 'mz_error', 'rt_error_abs', 'rt_error_rela', 
+                  'ms2_score', 'iden_score', 'iden_type', 'peak_group_id', 
+                  'base_peak', 'num_peaks', 'cons_formula_pred', 'id_kegg', 
+                  'id_hmdb', 'id_metacyc', 'stereo_isomer_id', 'stereo_isomer_name'}
+    
+    # 提取纯净的样本列
+    sample_cols = [c for c in df.columns if str(c).strip().lower() not in known_meta and str(c).strip() != '']
+    if valid_samples and len(valid_samples) > 0:
+        valid_lower = [str(s).strip().lower() for s in valid_samples]
+        sample_cols = [c for c in sample_cols if str(c).strip().lower() in valid_lower]
             
-    if not sample_cols: return None, None, "未找到样本数据列。"
+    if not sample_cols: return None, None, "未找到有效的样本数据列。请检查 Info 表是否匹配。"
 
     file_tag = os.path.splitext(os.path.basename(file_name))[0]
     clean_tag = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', file_tag)
+    
     if 'name' not in df.columns: df['name'] = ""
     if 'confidence_level' not in df.columns: df['confidence_level'] = 'Unknown'
+    if 'total_score' not in df.columns: df['total_score'] = 0
+    if 'peak_name' not in df.columns: df['peak_name'] = [f"M{mz}_RT{rt}" for mz, rt in zip(df.get('mz', df.index), df.get('rt', df.index))]
     
-    df['name'] = df['name'].fillna("").astype(str)
+    df['name'] = df['name'].fillna("").astype(str).str.strip()
     mask_annotated = (df['name'] != "") & (df['name'].str.lower() != "nan")
-    clean_names = df['name'].str.split(';', expand=True)[0]
-    unannotated_ids = "mz_" + df['mz'].astype(str) + "_rt_" + df['rt'].astype(str) if 'mz' in df.columns and 'rt' in df.columns else df.index.astype(str)
-    final_ids = np.where(mask_annotated, clean_names + "_" + clean_tag, unannotated_ids)
+    clean_names = df['name'].str.split(';', expand=True)[0].str.strip()
+    
+    final_ids = df['peak_name'].astype(str).str.strip()
     final_ids = make_unique(final_ids)
 
     kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
-    if kegg_col is not None:
-        orig_names = [f"{n} | {k}" if str(k).strip() and str(k).lower() not in ['nan', 'none', ''] else str(n) for n, k in zip(df['name'], df[kegg_col].fillna(''))]
-    else:
-        orig_names = df['name']
+    kegg_ids = df[kegg_col].fillna('') if kegg_col else [""] * len(df)
 
+    # 保留所有的核心前世今生信息
     meta_df = pd.DataFrame({
-        "Metabolite_ID": final_ids, 
-        "Original_Name": orig_names, 
+        "Peak_Name": final_ids, 
+        "Original_Name": df['name'], 
         "Clean_Name": np.where(mask_annotated, clean_names, final_ids), 
         "Confidence_Level": df['confidence_level'], 
+        "Total_Score": pd.to_numeric(df['total_score'], errors='coerce').fillna(0),
         "Is_Annotated": mask_annotated, 
-        "Source_File": clean_tag
+        "Source_Mode": clean_tag,
+        "KEGG_ID": kegg_ids
     })
-    meta_df.set_index('Metabolite_ID', inplace=True)
+    meta_df.set_index('Peak_Name', inplace=True)
     
     df_data = df[sample_cols].copy()
     for c in df_data.columns: df_data[c] = pd.to_numeric(df_data[c], errors='coerce').fillna(0)
@@ -381,23 +406,42 @@ def parse_metdna_file(file_buffer, file_name):
 
 def merge_multiple_dfs(results_list):
     if not results_list: return None, None, "无数据"
-    best_features = {}; sample_source_map = {}
+    
+    best_features = {} 
+    sample_source_map = {}
+    
     for file_idx, (df, meta, fname) in enumerate(results_list):
         current_tag = df['Source_Files'].iloc[0]
         for sid in df['SampleID']:
             if sid not in sample_source_map: sample_source_map[sid] = set()
             sample_source_map[sid].add(current_tag)
+            
         numeric_df = df.select_dtypes(include=[np.number])
-        intensities = numeric_df.sum(axis=0)
-        for feat_id in numeric_df.columns:
-            try: clean_name = meta.loc[feat_id, 'Clean_Name']
+        intensities = numeric_df.mean(axis=0) 
+        
+        for peak_name in numeric_df.columns:
+            try: m_row = meta.loc[peak_name]
             except KeyError: continue
-            curr_score = intensities.get(feat_id, 0)
-            if clean_name not in best_features or curr_score > best_features[clean_name][2]:
-                best_features[clean_name] = (file_idx, feat_id, curr_score)
+            
+            clean_name = m_row['Clean_Name']
+            conf = m_row['Confidence_Level']
+            score = m_row['Total_Score']
+            area = intensities.get(peak_name, 0)
+            
+            # 三级漏斗: 级别小 > 分数大 > 面积大
+            rank_val = rank_confidence(conf)
+            current_tuple = (rank_val, -score, -area)
+            
+            if clean_name not in best_features:
+                best_features[clean_name] = (file_idx, peak_name, current_tuple)
+            else:
+                best_tuple = best_features[clean_name][2]
+                if current_tuple < best_tuple:
+                    best_features[clean_name] = (file_idx, peak_name, current_tuple)
     
     files_features_to_keep = {i: [] for i in range(len(results_list))}
-    for c_name, (f_idx, f_id, score) in best_features.items(): files_features_to_keep[f_idx].append(f_id)
+    for c_name, (f_idx, p_name, _) in best_features.items(): 
+        files_features_to_keep[f_idx].append(p_name)
         
     dfs_to_concat = []
     for i, (df, meta, fname) in enumerate(results_list):
@@ -413,6 +457,14 @@ def merge_multiple_dfs(results_list):
     
     final_ids = [fid for f_list in files_features_to_keep.values() for fid in f_list]
     merged_meta = pd.concat([res[1] for res in results_list]).loc[final_ids]
+    
+    rename_map = {fid: merged_meta.loc[fid, 'Clean_Name'] for fid in final_ids}
+    full_df.rename(columns=rename_map, inplace=True)
+    
+    merged_meta.reset_index(inplace=True)
+    merged_meta['Metabolite_ID'] = merged_meta['Peak_Name'].map(lambda x: rename_map.get(x, x))
+    merged_meta.set_index('Metabolite_ID', inplace=True)
+    
     return full_df, merged_meta, None
 
 # ==============================================================================
