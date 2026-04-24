@@ -323,20 +323,16 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积", mode_regex
 
 
 # ==============================================================================
-# 🚀 引擎 C：MetDNA 原生管线提取器 ( Sprint 1: 三级漏斗去重重构版 )
+# 🚀 引擎 C：MetDNA 原生管线提取器 ( Sprint 1: 科学隔离去重版 )
 # ==============================================================================
 def rank_confidence(conf_str):
-    """智能解析注释级别，返回一个排名数字（越小越好）"""
     s = str(conf_str).upper().strip()
     if s in ['NAN', 'NONE', '', 'NULL']: return 99
-    
     digits = re.findall(r'\d+', s)
     if digits: return int(digits[0])
-    
     if 'A' in s: return 1
     if 'B' in s: return 2
     if 'C' in s: return 3
-    
     return 99
 
 def parse_metdna_file(file_buffer, file_name, valid_samples=None):
@@ -354,14 +350,13 @@ def parse_metdna_file(file_buffer, file_name, valid_samples=None):
                   'base_peak', 'num_peaks', 'cons_formula_pred', 'id_kegg', 
                   'id_hmdb', 'id_metacyc', 'stereo_isomer_id', 'stereo_isomer_name'}
     
-    # 提取纯净的样本列 (强力清洗匹配，防止标点符号不同导致错判)
     sample_cols = [c for c in df.columns if str(c).strip().lower() not in known_meta and str(c).strip() != '']
     if valid_samples and len(valid_samples) > 0:
         valid_clean = [re.sub(r'[^a-zA-Z0-9]', '', str(s)).lower() for s in valid_samples]
         sample_cols = [c for c in sample_cols if re.sub(r'[^a-zA-Z0-9]', '', str(c)).lower() in valid_clean]
             
     if not sample_cols: 
-        return None, None, "未在数据表中找到与 Info 表匹配的样本列名。(请确保两张表里的样本名称字母/数字一致)"
+        return None, None, "未在数据表中找到与 Info 表匹配的样本列名。"
 
     file_tag = os.path.splitext(os.path.basename(file_name))[0]
     clean_tag = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', file_tag)
@@ -369,27 +364,26 @@ def parse_metdna_file(file_buffer, file_name, valid_samples=None):
     if 'name' not in df.columns: df['name'] = ""
     if 'confidence_level' not in df.columns: df['confidence_level'] = 'Unknown'
     if 'total_score' not in df.columns: df['total_score'] = 0
-    
-    # 防止有些表没有 peak_name
     if 'peak_name' not in df.columns: 
         mz_vals = df['mz'] if 'mz' in df.columns else pd.Series([""] * len(df))
         rt_vals = df['rt'] if 'rt' in df.columns else df.index.astype(str)
         df['peak_name'] = [f"M{mz}_RT{rt}" for mz, rt in zip(mz_vals, rt_vals)]
     
+    # 🌟 核心防污染架构：在底层赋予全局唯一标识（防止异表同名峰发生错误相杀）
+    final_ids = df['peak_name'].astype(str).str.strip() + "_" + clean_tag
+    final_ids = make_unique(final_ids)
+    
     df['name'] = df['name'].fillna("").astype(str).str.strip()
     mask_annotated = (df['name'] != "") & (df['name'].str.lower() != "nan")
     clean_names = df['name'].str.split(';', expand=True)[0].str.strip()
     
-    final_ids = df['peak_name'].astype(str).str.strip()
-    final_ids = make_unique(final_ids)
-
     kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
     kegg_ids = df[kegg_col].fillna('') if kegg_col else [""] * len(df)
 
-    # 保留所有的核心前世今生信息
     meta_df = pd.DataFrame({
         "Peak_Name": final_ids, 
         "Original_Name": df['name'], 
+        # 🌟 核心分流架构：已知物去竞争唯一的Clean_Name，未知物直接保留唯一的全球身份不参与竞争
         "Clean_Name": np.where(mask_annotated, clean_names, final_ids), 
         "Confidence_Level": df['confidence_level'], 
         "Total_Score": pd.to_numeric(df['total_score'], errors='coerce').fillna(0),
@@ -434,7 +428,7 @@ def merge_multiple_dfs(results_list):
             score = m_row['Total_Score']
             area = intensities.get(peak_name, 0)
             
-            # 三级漏斗: 级别小 > 分数大 > 面积大
+            # 三级漏斗竞争机制
             rank_val = rank_confidence(conf)
             current_tuple = (rank_val, -score, -area)
             
@@ -462,9 +456,13 @@ def merge_multiple_dfs(results_list):
     full_df['Source_Files'] = full_df['SampleID'].apply(lambda sid: "; ".join(sorted(list(sample_source_map.get(sid, set())))))
     
     final_ids = [fid for f_list in files_features_to_keep.values() for fid in f_list]
-    merged_meta = pd.concat([res[1] for res in results_list]).loc[final_ids]
     
-    rename_map = {fid: merged_meta.loc[fid, 'Clean_Name'] for fid in final_ids}
+    # 安全组合元数据（杜绝Pandas Hash错误）
+    merged_meta = pd.concat([res[1] for res in results_list])
+    merged_meta = merged_meta[~merged_meta.index.duplicated(keep='first')]
+    merged_meta = merged_meta.loc[final_ids]
+    
+    rename_map = {fid: str(merged_meta.loc[fid, 'Clean_Name']) for fid in final_ids}
     full_df.rename(columns=rename_map, inplace=True)
     
     merged_meta.reset_index(inplace=True)
