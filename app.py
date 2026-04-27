@@ -221,6 +221,7 @@ if start_process:
                         if err: st.error(err)
                         else:
                             if feature_scope.startswith("仅已注释"):
+                                # 🛡️ 强制纯文本匹配，杜绝Pandas Hash宕机
                                 anno_ids = set(meta[meta['Is_Annotated'] == True].index.astype(str).tolist())
                                 keep_cols = ['SampleID', 'Group', 'Source_Files'] + [c for c in raw_df.columns if str(c) in anno_ids]
                                 raw_df = raw_df[keep_cols]
@@ -300,7 +301,7 @@ with st.form(key='analysis_form'):
     submit_button = st.form_submit_button(label='🚀 执行分析')
 
 # ==========================================
-# 4. 执行核心分析计算
+# 4. 执行核心分析计算与绘图 (已全面恢复所有修饰线)
 # ==========================================
 if submit_button:
     if len(sel_grps) != 2: 
@@ -323,7 +324,7 @@ if submit_button:
      
             stats_df = run_pairwise_statistics(df_sub, group_col, case, ctrl, feats)
             
-            # 🛡️ 核心修复 1：安全整合 KEGG ID 并创建双向撞击靶点 Search_Name
+            # 双重制导匹配逻辑
             if meta is not None and 'Clean_Name' in meta.columns and 'Original_Name' in meta.columns: 
                 merge_cols = ['Clean_Name', 'Original_Name']
                 if 'KEGG_ID' in meta.columns:
@@ -361,17 +362,20 @@ if submit_button:
             stats_df['Is_Biomarker'] = (stats_df['VIP'] > 1.0) & (stats_df['P_Value'] < p_th) & (stats_df['Log2_FC'].abs() > fc_th)
             out_df = stats_df[stats_df['Is_Biomarker']].sort_values('VIP', ascending=False)
 
+            # 🎯 恢复的 OPLS-DA 绘图
             opls_score_df = pd.DataFrame({'t1 (Predictive)': opls.t, 't_ortho (Orthogonal)': opls.t_ortho, 'Group': df_sub[group_col].values})
             fig_opls = px.scatter(opls_score_df, x='t1 (Predictive)', y='t_ortho (Orthogonal)', color='Group', symbol='Group', color_discrete_sequence=GROUP_COLORS)
             for i, g in enumerate(list(sel_grps)):
                 sub_grp = opls_score_df[opls_score_df['Group']==g]
                 if len(sub_grp)>=3:
                     el_x, el_y = get_ellipse_coordinates(sub_grp['t1 (Predictive)'], sub_grp['t_ortho (Orthogonal)'])
-                    if el_x is not None: fig_opls.add_trace(go.Scatter(x=el_x, y=el_y, mode='lines', line=dict(color=GROUP_COLORS[i%len(GROUP_COLORS)], width=2, dash='dash'), showlegend=False, hoverinfo='skip'))
+                    if el_x is not None: 
+                        fig_opls.add_trace(go.Scatter(x=el_x, y=el_y, mode='lines', line=dict(color=GROUP_COLORS[i%len(GROUP_COLORS)], width=2, dash='dash'), showlegend=False, hoverinfo='skip'))
             fig_opls.update_traces(marker=dict(size=14, line=dict(width=1, color='black'), opacity=0.9))
             fig_opls.add_hline(y=0, line_dash="dash", line_color="gray"); fig_opls.add_vline(x=0, line_dash="dash", line_color="gray")
             fig_opls = update_layout_square(fig_opls, "OPLS-DA Score Plot", "t [1]", "to [1]")
 
+            # 🔄 恢复的置换检验绘图
             fig_perm = go.Figure()
             fig_perm.add_trace(go.Scatter(x=corrs, y=r2_perm, mode='markers', name='R2', marker=dict(color='green', symbol='circle-open', size=8)))
             fig_perm.add_trace(go.Scatter(x=corrs, y=q2_perm, mode='markers', name='Q2', marker=dict(color='blue', symbol='square-open', size=8)))
@@ -382,15 +386,21 @@ if submit_button:
             fig_perm.add_trace(go.Scatter(x=x_line, y=m_q2*x_line + b_q2, mode='lines', name=f'Q2 Line (Int: {b_q2:.2f})', line=dict(color='blue', dash='dash')))
             fig_perm.update_layout(template="simple_white", width=600, height=600, title={'text': "Permutation Test", 'y':0.95, 'x':0.5, 'xanchor': 'center'}, xaxis_title="Correlation", yaxis_title="R2 / Q2")
 
+            # 🧬 恢复的 S-Plot
             splot_df = stats_df.copy()
             splot_df['Color'] = np.where(splot_df['Is_Biomarker'], 'VIP>1 & P<0.05', 'NS')
             fig_splot = px.scatter(splot_df, x='Log2_FC', y='p_corr', color='Color', hover_data=['Name', 'VIP'], color_discrete_map={'VIP>1 & P<0.05': '#CD0000', 'NS': '#E0E0E0'})
+            fig_splot.add_hline(y=0.5, line_dash="dash", line_color="gray")
+            fig_splot.add_hline(y=-0.5, line_dash="dash", line_color="gray")
             fig_splot = update_layout_square(fig_splot, "S-Plot", "Log2 Fold Change", "p(corr)")
 
+            # 📊 恢复的 VIP 图
             top_vip_df = stats_df.sort_values('VIP', ascending=True).tail(vip_show_num)
             fig_vip = px.bar(top_vip_df, x="VIP", y="Name", orientation='h', color="VIP", color_continuous_scale="RdBu_r")
+            fig_vip.add_vline(x=1.0, line_dash="dash", line_color="black")
             fig_vip.update_layout(template="simple_white", width=800, height=700, title={'text': f"Top VIP Scores", 'x':0.5, 'xanchor': 'center'}, coloraxis_showscale=False)
 
+            # 🌐 恢复的 PCA 图 (置信椭圆 + 百分比)
             fig_pca = None
             if len(df_proc) >= 3:
                 valid_feats_pca = df_proc[feats].var()[df_proc[feats].var() > 1e-9].index.tolist()
@@ -398,13 +408,28 @@ if submit_button:
                     X_scaled_all = StandardScaler().fit_transform(df_proc[valid_feats_pca])
                     pca_all = PCA(n_components=2).fit(X_scaled_all)
                     pcs_all = pca_all.transform(X_scaled_all)
+                    var_all = pca_all.explained_variance_ratio_
                     pca_df_all = pd.DataFrame({'PC1': pcs_all[:,0], 'PC2': pcs_all[:,1], 'Group': df_proc[group_col].values, 'SampleID': df_proc['SampleID']})
                     fig_pca = px.scatter(pca_df_all, x='PC1', y='PC2', color='Group', symbol='Group', hover_data=['SampleID'], color_discrete_sequence=GROUP_COLORS)
-                    fig_pca = update_layout_square(fig_pca, "PCA Plot", "PC1", "PC2")
+                    for i, g in enumerate(sorted(df_proc[group_col].unique())):
+                        sub_grp = pca_df_all[pca_df_all['Group'] == g]
+                        if len(sub_grp) >= 3:
+                            el_x, el_y = get_ellipse_coordinates(sub_grp['PC1'], sub_grp['PC2'])
+                            if el_x is not None: 
+                                fig_pca.add_trace(go.Scatter(x=el_x, y=el_y, mode='lines', line=dict(color=GROUP_COLORS[i % len(GROUP_COLORS)], width=1, dash='dot'), showlegend=False, hoverinfo='skip'))
+                    fig_pca.update_traces(marker=dict(size=14, line=dict(width=1, color='black'), opacity=0.9))
+                    fig_pca.add_hline(y=0, line_dash="dash", line_color="gray")
+                    fig_pca.add_vline(x=0, line_dash="dash", line_color="gray")
+                    fig_pca = update_layout_square(fig_pca, "PCA Plot", f"PC1 ({var_all[0]:.1%})", f"PC2 ({var_all[1]:.1%})")
 
+            # 🌋 恢复的火山图
             fig_vol = px.scatter(stats_df, x="Log2_FC", y="-Log10_P", color="Sig", color_discrete_map=COLOR_PALETTE, hover_data=['Name', 'VIP'])
-            fig_vol = update_layout_square(fig_vol, "Volcano Plot", "Log2 FC", "-Log10(P)")
+            fig_vol.add_hline(y=-np.log10(p_th), line_dash="dash", line_color="gray")
+            fig_vol.add_vline(x=fc_th, line_dash="dash", line_color="gray")
+            fig_vol.add_vline(x=-fc_th, line_dash="dash", line_color="gray")
+            fig_vol = update_layout_square(fig_vol, "Volcano Plot", "Log2 Fold Change", "-Log10(P-value)")
 
+            # 🌡️ 恢复的热图标签清理
             hm_fig, hm_base64 = None, ""
             sig_mets = out_df['Metabolite'].tolist()
             if sig_mets:
@@ -414,6 +439,8 @@ if submit_button:
                 lut = {g: GROUP_COLORS[i%len(GROUP_COLORS)] for i, g in enumerate(df_sub[group_col].unique())}
                 try:
                     g = sns.clustermap(hm_data.astype(float), z_score=0, cmap="vlag", center=0, col_colors=df_sub[group_col].map(lut), figsize=(8, 8))
+                    g.ax_heatmap.set_xlabel("")
+                    g.ax_heatmap.set_ylabel("")
                     hm_fig = g.fig
                     buf = io.BytesIO(); g.savefig(buf, format='png', bbox_inches='tight'); buf.seek(0); hm_base64 = base64.b64encode(buf.read()).decode('utf-8')
                 except Exception: pass
@@ -423,6 +450,7 @@ if submit_button:
                 try: fig_nomogram = plot_nomogram(df_sub, out_df.head(min(nomo_num, len(out_df)))['Metabolite'].tolist(), out_df.head(min(nomo_num, len(out_df)))['Name'].tolist(), group_col, case)
                 except: pass
 
+            # 🕸️ 恢复的通路气泡图
             pathway_df, filtered_db_df, fig_pathway, fig_network = pd.DataFrame(), pd.DataFrame(), None, None
             sig_mets_fullnames = stats_df[stats_df['Is_Biomarker']]['Search_Name'].tolist()
             if sig_mets_fullnames:
@@ -430,13 +458,14 @@ if submit_button:
                 if not pathway_df.empty:
                     pathway_df['-Log10_P'] = -np.log10(pathway_df['P_Value'].astype(float).clip(lower=1e-10))
                     plot_pw_df = pathway_df[pathway_df['Hits'] > 0].head(pw_show_num)
-                    fig_pathway = px.scatter(plot_pw_df, x='Enrichment_Factor', y='-Log10_P', size='Hits', color='P_Value', hover_name='Pathway')
-                    fig_pathway.update_layout(template="simple_white", width=800, height=600, title={'text': "Pathway Enrichment", 'x':0.5, 'xanchor': 'center'})
+                    fig_pathway = px.scatter(plot_pw_df, x='Enrichment_Factor', y='-Log10_P', size='Hits', color='P_Value', hover_name='Pathway', hover_data={'Hit_Metabolites': True, 'P_Value': ':.4f'}, color_continuous_scale='Reds_r', size_max=40)
+                    fig_pathway.update_traces(marker=dict(line=dict(width=1, color='black'), opacity=0.6))
+                    fig_pathway.add_hline(y=-np.log10(0.05), line_dash="dash", line_color="gray")
+                    fig_pathway.update_layout(template="simple_white", width=800, height=600, title={'text': "Pathway Enrichment", 'x':0.5, 'xanchor': 'center'}, xaxis_title="Enrichment Factor", yaxis_title="-Log10(P)")
                     
                     sig_pws = pathway_df[pathway_df['P_Value'] < 0.05].head(pw_show_num)
                     if not sig_pws.empty:
                         G = nx.Graph()
-                        # 🛡️ 核心修复 2：画网络图字典时，强行剥离 | 后缀，防止 Hit_Metabolites 找不到主匹配！
                         fc_dict = dict(zip(out_df['Search_Name'].apply(lambda x: str(x).split('|')[0].split(';')[0].strip()), out_df['Log2_FC']))
                         for _, row in sig_pws.iterrows():
                             pw_name = row['Pathway']
