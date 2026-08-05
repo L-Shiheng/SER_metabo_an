@@ -144,21 +144,52 @@ with st.sidebar:
     db_filename = f"kegg_{species_code}.csv"
     custom_pathway_file = st.file_uploader("自定义通路库 (.csv)", type=["csv", "gmt"], key="pathway_db")
     
-    if st.button(f"🔄 同步 {species_code} 通路库", width='stretch') or not os.path.exists(db_filename):
-        with st.spinner(f"正在连接 KEGG API..."):
-            try:
-                pw_res = requests.get(f"http://rest.kegg.jp/list/pathway/{species_code}")
-                pw_dict = {re.sub(r'^[a-z]+', '', p.split('\t')[0].replace('path:', '')): p.split('\t')[1] for p in pw_res.text.strip().split('\n') if p}
-                link_res = requests.get("http://rest.kegg.jp/link/cpd/pathway")
-                pw_cpd_map = {}
-                for line in link_res.text.strip().split('\n'):
-                    if line and line.startswith('path:map'):
-                        pw_num, cpd = line.split('\t')[0].replace('path:map', ''), line.split('\t')[1].replace('cpd:', '')
-                        if pw_num not in pw_cpd_map: pw_cpd_map[pw_num] = []
-                        pw_cpd_map[pw_num].append(cpd)
-                pd.DataFrame([{'Pathway': name, 'Compounds': ';'.join(pw_cpd_map[pw_num])} for pw_num, name in pw_dict.items() if pw_num in pw_cpd_map]).to_csv(db_filename, index=False)
-                st.toast(f"✅ 库同步成功！")
-            except Exception as e: st.error("网络请求失败")
+if st.button(f"🔄 同步 {species_code} 通路库", width='stretch') or not os.path.exists(db_filename):
+    with st.spinner(f"正在连接 KEGG API..."):
+        try:
+            import time
+            from collections import defaultdict
+
+            # 1. 获取通路列表
+            pw_res = requests.get(f"http://rest.kegg.jp/list/pathway/{species_code}")
+            pw_dict = {}
+            for p in pw_res.text.strip().split('\n'):
+                if p:
+                    parts = p.split('\t')
+                    pw_id = parts[0].replace('path:', '')
+                    pw_dict[pw_id] = parts[1]
+            time.sleep(0.5)
+
+            # 2. 获取化合物名称（可选，但建议保留用于映射）
+            cpd_res = requests.get("http://rest.kegg.jp/list/compound")
+            cpd_names = {}
+            for c in cpd_res.text.strip().split('\n'):
+                if c:
+                    parts = c.split('\t')
+                    cpd_id = parts[0].replace('cpd:', '')
+                    cpd_names[cpd_id] = parts[1].split(';')[0].strip()
+            time.sleep(0.5)
+
+            # 3. 获取通路-化合物映射（使用正确命令 link/pathway/cpd）
+            link_res = requests.get("http://rest.kegg.jp/link/pathway/cpd")  # ✅ 修复
+            pathway_to_cpds = defaultdict(list)
+            for line in link_res.text.strip().split('\n'):
+                if line:
+                    parts = line.split('\t')
+                    pw_id = parts[0].replace('path:', '')
+                    cpd_id = parts[1].replace('cpd:', '')
+                    if pw_id in pw_dict and cpd_id in cpd_names:
+                        pathway_to_cpds[pw_id].append(cpd_names[cpd_id])
+
+            # 4. 聚合为两列无表头格式（通路名 + 分号分隔的代谢物）
+            with open(db_filename, "w", encoding="utf-8") as f:
+                for pw_id, cpd_list in pathway_to_cpds.items():
+                    unique_cpds = sorted(set(cpd_list))
+                    f.write(pw_dict[pw_id] + "\t" + ";".join(unique_cpds) + "\n")
+
+            st.toast(f"✅ 库同步成功！({len(pathway_to_cpds)} 个通路)")
+        except Exception as e:
+            st.error(f"网络请求失败：{str(e)}")
 
     st.markdown("#### 4. 上传分析数据")
     feature_scope = "全部特征"
