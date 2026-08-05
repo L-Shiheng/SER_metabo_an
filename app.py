@@ -136,7 +136,7 @@ with st.sidebar:
     db_filename = f"kegg_{species_code}.csv"
     custom_pathway_file = st.file_uploader("自定义通路库 (.csv)", type=["csv", "gmt"], key="pathway_db")
     
-    if st.button(f"🔄 同步 {species_code} 通路库", use_container_width=True) or not os.path.exists(db_filename):
+    if st.button(f"🔄 同步 {species_code} 通路库", width='stretch') or not os.path.exists(db_filename):
         with st.spinner(f"正在连接 KEGG API..."):
             try:
                 pw_res = requests.get(f"http://rest.kegg.jp/list/pathway/{species_code}")
