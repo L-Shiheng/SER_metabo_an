@@ -11,7 +11,7 @@ def fetch_kegg_database(species_code):
     # 1. 获取特定物种的通路列表
     print("📥 1/3 正在下载通路列表...")
     pw_names = {}
-    req1 = urllib.request.Request(f"http://rest.kegg.jp/list/pathway/{species_code}", headers=headers)
+    req1 = urllib.request.Request(f"https://rest.kegg.jp/list/pathway/{species_code}", headers=headers)
     with urllib.request.urlopen(req1) as response:
         for line in response:
             parts = line.decode('utf-8').strip().split('\t')
@@ -23,7 +23,7 @@ def fetch_kegg_database(species_code):
     # 2. 获取代谢物字典
     print("📥 2/3 正在下载代谢物字典...")
     cpd_names = {}
-    req2 = urllib.request.Request("http://rest.kegg.jp/list/cpd", headers=headers)
+    req2 = urllib.request.Request("https://rest.kegg.jp/list/cpd", headers=headers)
     with urllib.request.urlopen(req2) as response:
         for line in response:
             parts = line.decode('utf-8').strip().split('\t')
