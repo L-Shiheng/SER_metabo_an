@@ -34,7 +34,7 @@ def fetch_kegg_database(species_code):
     # 3. 获取通路-代谢物映射关系
     print("📥 3/3 正在下载通路-代谢物映射关系...")
     pw_cpd_map = {}
-    req3 = urllib.request.Request("http://rest.kegg.jp/link/cpd/pathway", headers=headers)
+    req3 = urllib.request.Request("https://rest.kegg.jp/link/cpd/pathway", headers=headers)
     with urllib.request.urlopen(req3) as response:
         for line in response:
             parts = line.decode('utf-8').strip().split('\t')
