@@ -146,7 +146,7 @@ with st.sidebar:
     db_filename = f"kegg_{species_code}.csv"
     custom_pathway_file = st.file_uploader("自定义通路库 (.csv)", type=["csv", "gmt"], key="pathway_db")
     
-    if st.button(f"🔄 同步 {species_code} 通路库", width='stretch') or not os.path.exists(db_filename):
+    if st.button(f"🔄 同步 {species_code} 通路库", width='stretch'):
         with st.spinner(f"正在连接 KEGG 官方服务器执行 3 步同步（请等待约 15 秒）..."):
             try:
                 # 1. 获取通路 Map
