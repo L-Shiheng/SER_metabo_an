@@ -11,6 +11,7 @@ def fetch_kegg_database(species_code):
     # 1. 获取特定物种的通路列表
     print("📥 1/3 正在下载通路列表...")
     pw_names = {}
+    # 💡 修复点 1：使用 https
     req1 = urllib.request.Request(f"https://rest.kegg.jp/list/pathway/{species_code}", headers=headers)
     with urllib.request.urlopen(req1) as response:
         for line in response:
@@ -23,6 +24,7 @@ def fetch_kegg_database(species_code):
     # 2. 获取代谢物字典
     print("📥 2/3 正在下载代谢物字典...")
     cpd_names = {}
+    # 💡 修复点 2：使用 https
     req2 = urllib.request.Request("https://rest.kegg.jp/list/cpd", headers=headers)
     with urllib.request.urlopen(req2) as response:
         for line in response:
@@ -34,6 +36,7 @@ def fetch_kegg_database(species_code):
     # 3. 获取通路-代谢物映射关系
     print("📥 3/3 正在下载通路-代谢物映射关系...")
     pw_cpd_map = {}
+    # 💡 修复点 3：使用 https
     req3 = urllib.request.Request("https://rest.kegg.jp/link/cpd/pathway", headers=headers)
     with urllib.request.urlopen(req3) as response:
         for line in response:
