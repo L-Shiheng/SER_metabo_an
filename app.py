@@ -17,23 +17,13 @@ import matplotlib.pyplot as plt
 import networkx as nx
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
-import matplotlib.font_manager as fm
 
 # ==========================================
-# 0. 品牌更新与 UI 配置 (修改后)
+# 0. 品牌更新与 UI 配置
 # ==========================================
 st.set_page_config(page_title="MetaFlow Studio", page_icon="🧬", layout="wide")
 
-# 动态加载根目录下的中文字体文件
-font_path = "simhei.ttf" # 请确保您的 GitHub 根目录已上传此文件
-if os.path.exists(font_path):
-    fm.fontManager.addfont(font_path)
-    font_prop = fm.FontProperties(fname=font_path)
-    plt.rcParams['font.family'] = font_prop.get_name()
-else:
-    # 回退到默认，避免在没有字体的服务器上引发致命报错
-    plt.rcParams['font.sans-serif'] = ['Arial', 'sans-serif']
-
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'PingFang SC', 'Arial Unicode MS', 'sans-serif']
 plt.rcParams['axes.unicode_minus'] = False
 
 try:
@@ -146,46 +136,38 @@ with st.sidebar:
     db_filename = f"kegg_{species_code}.csv"
     custom_pathway_file = st.file_uploader("自定义通路库 (.csv)", type=["csv", "gmt"], key="pathway_db")
     
-    if st.button(f"🔄 同步 {species_code} 通路库", width='stretch'):
-        with st.spinner(f"正在连接 KEGG 官方服务器执行 3 步同步（请等待约 15 秒）..."):
+    db_sync_msg = st.session_state.get('_db_sync_msg', '')
+    if st.button(f"🔄 同步 {species_code} 通路库", width='stretch') or not os.path.exists(db_filename):
+        with st.spinner(f"正在连接 KEGG API（最长等待 60 秒）..."):
             try:
-                # 💡 增加浏览器伪装 Header，绕过 KEGG 反爬虫
-                kegg_headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'}
-                
-                pw_res = requests.get(f"http://rest.kegg.jp/list/pathway/{species_code}", headers=kegg_headers, timeout=30)
+                pw_res = requests.get(f"http://rest.kegg.jp/list/pathway/{species_code}", timeout=30)
                 pw_res.raise_for_status()
                 pw_dict = {re.sub(r'^[a-z]+', '', p.split('\t')[0].replace('path:', '')): p.split('\t')[1] for p in pw_res.text.strip().split('\n') if p}
-                
-                cpd_res = requests.get("http://rest.kegg.jp/list/cpd", headers=kegg_headers, timeout=60)
-                cpd_res.raise_for_status()
-                cpd_names = {}
-                for line in cpd_res.text.strip().split('\n'):
-                    if line:
-                        parts = line.split('\t')
-                        if len(parts) >= 2:
-                            cpd_names[parts[0].replace('cpd:', '')] = parts[1].split(';')[0].strip()
-                            
-                link_res = requests.get("http://rest.kegg.jp/link/cpd/pathway", headers=kegg_headers, timeout=60)
+                if not pw_dict: raise RuntimeError("KEGG 返回空通路列表")
+                link_res = requests.get("http://rest.kegg.jp/link/cpd/pathway", timeout=60)
                 link_res.raise_for_status()
                 pw_cpd_map = {}
                 for line in link_res.text.strip().split('\n'):
                     if line and line.startswith('path:map'):
-                        pw_num = line.split('\t')[0].replace('path:map', '')
-                        cpd_id = line.split('\t')[1].replace('cpd:', '')
-                        cpd_name = cpd_names.get(cpd_id, cpd_id)
+                        pw_num, cpd = line.split('\t')[0].replace('path:map', ''), line.split('\t')[1].replace('cpd:', '')
                         if pw_num not in pw_cpd_map: pw_cpd_map[pw_num] = []
-                        pw_cpd_map[pw_num].append(cpd_name)
-                        
+                        pw_cpd_map[pw_num].append(cpd)
                 out_df_kegg = pd.DataFrame([{'Pathway': name, 'Compounds': ';'.join(pw_cpd_map[pw_num])} for pw_num, name in pw_dict.items() if pw_num in pw_cpd_map])
-                
-                if out_df_kegg.empty: raise RuntimeError("通路-化合物映射为空")
+                if out_df_kegg.empty: raise RuntimeError("通路-化合物映射为空，可能是 KEGG 接口变更")
                 out_df_kegg.to_csv(db_filename, index=False)
                 st.session_state['_db_sync_msg'] = f"✅ {species_code} 库同步成功：{len(out_df_kegg)} 条通路"
                 st.toast(f"✅ 库同步成功！")
-                st.rerun()
             except Exception as e:
                 st.session_state['_db_sync_msg'] = f"❌ 同步失败：{str(e)}"
                 st.error(f"❌ KEGG 同步失败：{str(e)}")
+    if db_sync_msg:
+        if db_sync_msg.startswith('✅'): st.success(db_sync_msg)
+        else: st.error(db_sync_msg)
+    if os.path.exists(db_filename):
+        st.caption(f"📦 当前库：`{db_filename}`（{sum(1 for _ in open(db_filename, encoding='utf-8'))-1} 条通路）")
+    else:
+        st.caption(f"⚠️ 未找到 `{db_filename}`，通路富集将无结果！")
+        st.caption("💡 解决方案：① 点击上方同步按钮；② 或在命令行运行 `python get_kegg_db.py {species_code}` 生成该文件；③ 或上传自定义通路库（KEGG ID 格式）")
 
     st.markdown("#### 4. 上传分析数据")
     feature_scope = "全部特征"
@@ -367,7 +349,9 @@ if submit_button:
                 stats_df['Name'] = stats_df['Clean_Name'].fillna(stats_df['Metabolite'])
                 
                 if 'KEGG_ID' in stats_df.columns:
-                    stats_df['Search_Name'] = stats_df['Original_Name'].astype(str) + "|" + stats_df['KEGG_ID'].astype(str).replace('nan', '')
+                    kegg_str = stats_df['KEGG_ID'].fillna('').astype(str).replace('nan', '').replace('None', '')
+                    orig_str = stats_df['Original_Name'].fillna(stats_df['Metabolite']).astype(str)
+                    stats_df['Search_Name'] = np.where(kegg_str != '', orig_str + '|' + kegg_str, orig_str)
                 else:
                     stats_df['Search_Name'] = stats_df['Original_Name'].fillna(stats_df['Metabolite'])
             else:
@@ -478,7 +462,7 @@ if submit_button:
             sig_mets_fullnames = stats_df[stats_df['Is_Biomarker']]['Search_Name'].tolist()
             if sig_mets_fullnames:
                 pathway_df, filtered_db_df = run_pathway_enrichment(sig_mets_fullnames, stats_df['Search_Name'].tolist(), custom_db_source=custom_pathway_file if custom_pathway_file else db_filename)
-                if not pathway_df.empty:
+                if not pathway_df.empty and 'Error' not in pathway_df.columns:
                     pathway_df['-Log10_P'] = -np.log10(pathway_df['P_Value'].astype(float).clip(lower=1e-10))
                     plot_pw_df = pathway_df[pathway_df['Hits'] > 0].head(pw_show_num)
                     fig_pathway = px.scatter(plot_pw_df, x='Enrichment_Factor', y='-Log10_P', size='Hits', color='P_Value', hover_name='Pathway', hover_data={'Hit_Metabolites': True, 'P_Value': ':.4f'}, color_continuous_scale='Reds_r', size_max=40)
@@ -595,6 +579,9 @@ if 'analysis_res' in st.session_state:
         c1, c2 = st.columns([1, 6])
         with c2:
             if res['pathway_df'].empty: st.warning("未能匹配到通路。")
+            elif 'Error' in res['pathway_df'].columns:
+                st.error(f"❌ {res['pathway_df'].iloc[0]['Error']}")
+                st.info("💡 建议：1) 在侧边栏点击「同步通路库」按钮并等待完成；2) 检查网络能否访问 rest.kegg.jp；3) 或上传自定义通路库 (.csv)。")
             else:
                 if res['fig_pathway']: st.plotly_chart(res['fig_pathway'])
                 st.dataframe(res['pathway_df'].drop(columns=['-Log10_P'], errors='ignore').style.format({"P_Value":"{:.3e}", "FDR":"{:.3e}", "Enrichment_Factor":"{:.2f}"}).background_gradient(subset=['P_Value'], cmap="Reds_r", vmin=0, vmax=0.05), width='stretch')
