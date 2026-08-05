@@ -17,13 +17,23 @@ import matplotlib.pyplot as plt
 import networkx as nx
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
+import matplotlib.font_manager as fm
 
 # ==========================================
-# 0. 品牌更新与 UI 配置
+# 0. 品牌更新与 UI 配置 (修改后)
 # ==========================================
 st.set_page_config(page_title="MetaFlow Studio", page_icon="🧬", layout="wide")
 
-plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'PingFang SC', 'Arial Unicode MS', 'sans-serif']
+# 动态加载根目录下的中文字体文件
+font_path = "simhei.ttf" # 请确保您的 GitHub 根目录已上传此文件
+if os.path.exists(font_path):
+    fm.fontManager.addfont(font_path)
+    font_prop = fm.FontProperties(fname=font_path)
+    plt.rcParams['font.family'] = font_prop.get_name()
+else:
+    # 回退到默认，避免在没有字体的服务器上引发致命报错
+    plt.rcParams['font.sans-serif'] = ['Arial', 'sans-serif']
+
 plt.rcParams['axes.unicode_minus'] = False
 
 try:
