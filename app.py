@@ -14,10 +14,18 @@ import plotly.express as px
 import plotly.graph_objects as go
 import seaborn as sns
 import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
 import networkx as nx
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
+# 动态加载仓库根目录下的中文字体文件
+font_path = "simhei.ttf"
+if os.path.exists(font_path):
+    fm.fontManager.addfont(font_path)
+    font_prop = fm.FontProperties(fname=font_path)
+    plt.rcParams['font.family'] = font_prop.get_name()
+    plt.rcParams['axes.unicode_minus'] = False  # 正常显示负号
 # ==========================================
 # 0. 品牌更新与 UI 配置
 # ==========================================
