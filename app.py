@@ -332,9 +332,7 @@ if submit_button:
                 stats_df['Name'] = stats_df['Clean_Name'].fillna(stats_df['Metabolite'])
                 
                 if 'KEGG_ID' in stats_df.columns:
-                    kegg_str = stats_df['KEGG_ID'].fillna('').astype(str).replace('nan', '').replace('None', '')
-                    orig_str = stats_df['Original_Name'].fillna(stats_df['Metabolite']).astype(str)
-                    stats_df['Search_Name'] = np.where(kegg_str != '', orig_str + '|' + kegg_str, orig_str)
+                    stats_df['Search_Name'] = stats_df['Original_Name'].astype(str) + "|" + stats_df['KEGG_ID'].astype(str).replace('nan', '')
                 else:
                     stats_df['Search_Name'] = stats_df['Original_Name'].fillna(stats_df['Metabolite'])
             else:
