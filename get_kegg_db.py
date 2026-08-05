@@ -11,7 +11,6 @@ def fetch_kegg_database(species_code):
     # 1. 获取特定物种的通路列表
     print("📥 1/3 正在下载通路列表...")
     pw_names = {}
-    # 💡 修复点 1：使用 https
     req1 = urllib.request.Request(f"https://rest.kegg.jp/list/pathway/{species_code}", headers=headers)
     with urllib.request.urlopen(req1) as response:
         for line in response:
@@ -24,7 +23,6 @@ def fetch_kegg_database(species_code):
     # 2. 获取代谢物字典
     print("📥 2/3 正在下载代谢物字典...")
     cpd_names = {}
-    # 💡 修复点 2：使用 https
     req2 = urllib.request.Request("https://rest.kegg.jp/list/cpd", headers=headers)
     with urllib.request.urlopen(req2) as response:
         for line in response:
@@ -33,16 +31,17 @@ def fetch_kegg_database(species_code):
                 cpd_id = parts[0].replace('cpd:', '')
                 cpd_names[cpd_id] = parts[1].split(';')[0].strip()
 
-    # 3. 获取通路-代谢物映射关系
-    print("📥 3/3 正在下载通路-代谢物映射关系...")
+    # 3. 获取通路-代谢物映射关系 (核心修复区)
+    print(f"📥 3/3 正在下载通路-代谢物映射关系 (限定 {species_code} 物种范围)...")
     pw_cpd_map = {}
-    # 💡 修复点 3：使用 https
-    req3 = urllib.request.Request("https://rest.kegg.jp/link/cpd/pathway", headers=headers)
+    # 💡 修复点：不再请求庞大的全库 pathway，而是精准请求当前 species_code，避开 400 拦截
+    req3 = urllib.request.Request(f"https://rest.kegg.jp/link/cpd/{species_code}", headers=headers)
     with urllib.request.urlopen(req3) as response:
         for line in response:
             parts = line.decode('utf-8').strip().split('\t')
-            if len(parts) == 2 and parts[0].startswith('path:map'):
-                pw_num = parts[0].replace('path:map', '')
+            # 兼容解析，支持 path:hsa00010 等格式
+            if len(parts) == 2 and parts[0].startswith('path:'):
+                pw_num = re.sub(r'^[a-z]+', '', parts[0].replace('path:', ''))
                 cpd_id = parts[1].replace('cpd:', '')
                 
                 # 翻译为具体名称
