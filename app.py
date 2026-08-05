@@ -137,37 +137,37 @@ with st.sidebar:
     custom_pathway_file = st.file_uploader("自定义通路库 (.csv)", type=["csv", "gmt"], key="pathway_db")
     
     db_sync_msg = st.session_state.get('_db_sync_msg', '')
-    if st.button(f"🔄 同步 {species_code} 通路库", width='stretch') or not os.path.exists(db_filename):
-        with st.spinner(f"正在连接 KEGG API（最长等待 60 秒）..."):
+    
+    # 注意：这里去掉了 or not os.path.exists() 的兜底，防止无限死循环触发
+    if st.button(f"🔄 同步 {species_code} 通路库", width='stretch'):
+        with st.spinner(f"⏳ 正在后台运行独立脚本抓取 {species_code} 通路（约需 1-2 分钟，请勿关闭网页）..."):
+            import subprocess
+            import sys
+            import datetime
             try:
-                pw_res = requests.get(f"http://rest.kegg.jp/list/pathway/{species_code}", timeout=30)
-                pw_res.raise_for_status()
-                pw_dict = {re.sub(r'^[a-z]+', '', p.split('\t')[0].replace('path:', '')): p.split('\t')[1] for p in pw_res.text.strip().split('\n') if p}
-                if not pw_dict: raise RuntimeError("KEGG 返回空通路列表")
-                link_res = requests.get("http://rest.kegg.jp/link/cpd/pathway", timeout=60)
-                link_res.raise_for_status()
-                pw_cpd_map = {}
-                for line in link_res.text.strip().split('\n'):
-                    if line and line.startswith('path:map'):
-                        pw_num, cpd = line.split('\t')[0].replace('path:map', ''), line.split('\t')[1].replace('cpd:', '')
-                        if pw_num not in pw_cpd_map: pw_cpd_map[pw_num] = []
-                        pw_cpd_map[pw_num].append(cpd)
-                out_df_kegg = pd.DataFrame([{'Pathway': name, 'Compounds': ';'.join(pw_cpd_map[pw_num])} for pw_num, name in pw_dict.items() if pw_num in pw_cpd_map])
-                if out_df_kegg.empty: raise RuntimeError("通路-化合物映射为空，可能是 KEGG 接口变更")
-                out_df_kegg.to_csv(db_filename, index=False)
-                st.session_state['_db_sync_msg'] = f"✅ {species_code} 库同步成功：{len(out_df_kegg)} 条通路"
-                st.toast(f"✅ 库同步成功！")
+                # 核心：调用 get_kegg_db.py，并将下拉菜单选择的物种代码（如 'hsa'）传给它
+                res = subprocess.run([sys.executable, "get_kegg_db.py", species_code], capture_output=True, text=True)
+                
+                if res.returncode == 0:
+                    st.session_state['_db_sync_msg'] = f"✅ {species_code} 库同步成功！\n*(更新时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})*"
+                    st.toast(f"✅ 库同步成功！")
+                    st.rerun() # 同步成功后刷新界面，让软件读取新文件
+                else:
+                    # 如果脚本内部报错，把错误信息打印到网页上
+                    st.session_state['_db_sync_msg'] = f"❌ 更新脚本执行报错:\n{res.stderr}"
+                    st.error(f"❌ 更新脚本执行报错:\n{res.stderr}")
             except Exception as e:
-                st.session_state['_db_sync_msg'] = f"❌ 同步失败：{str(e)}"
-                st.error(f"❌ KEGG 同步失败：{str(e)}")
+                st.session_state['_db_sync_msg'] = f"❌ 无法启动更新程序: {str(e)}"
+                st.error(f"❌ 无法启动更新程序: {str(e)}")
+                
     if db_sync_msg:
         if db_sync_msg.startswith('✅'): st.success(db_sync_msg)
         else: st.error(db_sync_msg)
+        
     if os.path.exists(db_filename):
         st.caption(f"📦 当前库：`{db_filename}`（{sum(1 for _ in open(db_filename, encoding='utf-8'))-1} 条通路）")
     else:
-        st.caption(f"⚠️ 未找到 `{db_filename}`，通路富集将无结果！")
-        st.caption("💡 解决方案：① 点击上方同步按钮；② 或在命令行运行 `python get_kegg_db.py {species_code}` 生成该文件；③ 或上传自定义通路库（KEGG ID 格式）")
+        st.caption(f"⚠️ 未找到 `{db_filename}`，通路富集将无结果！请点击上方同步按钮。")
 
     st.markdown("#### 4. 上传分析数据")
     feature_scope = "全部特征"
