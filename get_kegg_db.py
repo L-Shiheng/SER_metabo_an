@@ -1,64 +1,69 @@
 import urllib.request
-import time
 import pandas as pd
+import sys
+import re
 
-def fetch_kegg_database():
-    print("⏳ 正在连接 KEGG 官方服务器...")
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+def fetch_kegg_database(species_code):
+    print(f"⏳ 正在连接 KEGG 官方服务器 (物种: {species_code})...")
+    # 核心：保留完美的浏览器伪装
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'}
     
-    # 1. 获取所有代谢通路 (Map)
+    # 1. 获取特定物种的通路列表
     print("📥 1/3 正在下载通路列表...")
-    req1 = urllib.request.Request("http://rest.kegg.jp/list/pathway/map", headers=headers)
+    pw_names = {}
+    req1 = urllib.request.Request(f"http://rest.kegg.jp/list/pathway/{species_code}", headers=headers)
     with urllib.request.urlopen(req1) as response:
-        pw_names = {}
         for line in response:
             parts = line.decode('utf-8').strip().split('\t')
             if len(parts) == 2:
-                pw_id = parts[0].replace('path:', '')
+                # 提取纯数字ID，兼容不同物种前缀，例如 hsa00010 -> 00010
+                pw_id = re.sub(r'^[a-z]+', '', parts[0].replace('path:', ''))
                 pw_names[pw_id] = parts[1]
-    time.sleep(0.5)  # 避免请求过快
 
-    # 2. 获取所有化合物 (Compound)
+    # 2. 获取代谢物字典
     print("📥 2/3 正在下载代谢物字典...")
-    req2 = urllib.request.Request("http://rest.kegg.jp/list/compound", headers=headers)
+    cpd_names = {}
+    req2 = urllib.request.Request("http://rest.kegg.jp/list/cpd", headers=headers)
     with urllib.request.urlopen(req2) as response:
-        cpd_names = {}
         for line in response:
             parts = line.decode('utf-8').strip().split('\t')
             if len(parts) == 2:
                 cpd_id = parts[0].replace('cpd:', '')
-                first_name = parts[1].split(';')[0].strip()
-                cpd_names[cpd_id] = first_name
-    time.sleep(0.5)
+                cpd_names[cpd_id] = parts[1].split(';')[0].strip()
 
-    # 3. 获取 通路-化合物 映射关系 (关键修复点)
+    # 3. 获取通路-代谢物映射关系
     print("📥 3/3 正在下载通路-代谢物映射关系...")
-    # 修复：将命令从 "cpd/pathway" 改为 "pathway/cpd"
-    req3 = urllib.request.Request("http://rest.kegg.jp/link/pathway/cpd", headers=headers) 
+    pw_cpd_map = {}
+    req3 = urllib.request.Request("http://rest.kegg.jp/link/cpd/pathway", headers=headers)
     with urllib.request.urlopen(req3) as response:
-        links = []
         for line in response:
             parts = line.decode('utf-8').strip().split('\t')
-            if len(parts) == 2:
-                # 注意：顺序也变了，第一个是通路，第二个是化合物
-                pw_id = parts[0].replace('path:', '') 
+            if len(parts) == 2 and parts[0].startswith('path:map'):
+                pw_num = parts[0].replace('path:map', '')
                 cpd_id = parts[1].replace('cpd:', '')
                 
-                if pw_id in pw_names and cpd_id in cpd_names:
-                    links.append({
-                        "Pathway": pw_names[pw_id], 
-                        "Metabolite": cpd_names[cpd_id]
-                    })
+                # 翻译为具体名称
+                cpd_name = cpd_names.get(cpd_id, cpd_id)
+                if pw_num not in pw_cpd_map:
+                    pw_cpd_map[pw_num] = []
+                pw_cpd_map[pw_num].append(cpd_name)
 
-    if not links:
-        print("❌ 错误：未能拼装成功，请检查网络和命令。")
-        return
-
+    # 4. 组装并保存
     print("💾 正在整理并保存...")
+    links = []
+    for pw_num, name in pw_names.items():
+        if pw_num in pw_cpd_map:
+            links.append({
+                "Pathway": name,
+                "Compounds": ';'.join(pw_cpd_map[pw_num])
+            })
+            
     df = pd.DataFrame(links)
-    df = df.dropna()
-    df.to_csv("kegg_pathways.csv", index=False)
-    print(f"✅ 大功告成！已成功抓取 {len(df['Pathway'].unique())} 条通路，涵盖 {len(df)} 个代谢物映射节点。")
+    filename = f"kegg_{species_code}.csv"
+    df.to_csv(filename, index=False)
+    print(f"✅ 大功告成！已成功抓取 {len(df)} 条通路，文件已保存为: {filename}")
 
 if __name__ == "__main__":
-    fetch_kegg_database()
+    # 接收来自 app.py 传过来的物种参数，如果没有则默认 hsa
+    species = sys.argv[1] if len(sys.argv) > 1 else "hsa"
+    fetch_kegg_database(species)
