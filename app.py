@@ -167,7 +167,7 @@ with st.sidebar:
         feature_scope = st.radio("特征范围", ["仅已注释特征", "全部特征"], index=0)
         uploaded_files = st.file_uploader("上传 MetDNA 结果表", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
         
-    start_process = st.container().button("📥 加载数据矩阵", use_container_width=True, type="primary")
+    start_process = st.container().button("📥 加载数据矩阵", width='stretch', type="primary")
 
 # ==========================================
 # 2. 核心路由与解析引擎调用
@@ -541,14 +541,14 @@ if 'analysis_res' in st.session_state:
     with tabs[5]:
         c1, c2 = st.columns(2)
         with c1: 
-            if res['fig_vol']: st.plotly_chart(res['fig_vol'], use_container_width=True)
+            if res['fig_vol']: st.plotly_chart(res['fig_vol'], width='stretch')
         with c2: 
             if res['hm_fig']: st.pyplot(res['hm_fig']) 
             else: st.info("无满足要求的差异代谢物")
             
     with tabs[6]:
         st.markdown("### 🏆 生物标志物清单")
-        st.dataframe(res['out_df'][['Name', 'Log2_FC', 'P_Value', 'FDR', 'VIP', 'p_corr']].style.format({"Log2_FC":"{:.2f}", "P_Value":"{:.3e}", "FDR":"{:.3e}", "VIP":"{:.2f}", "p_corr":"{:.2f}"}).background_gradient(subset=['VIP'], cmap="Reds"), use_container_width=True)
+        st.dataframe(res['out_df'][['Name', 'Log2_FC', 'P_Value', 'FDR', 'VIP', 'p_corr']].style.format({"Log2_FC":"{:.2f}", "P_Value":"{:.3e}", "FDR":"{:.3e}", "VIP":"{:.2f}", "p_corr":"{:.2f}"}).background_gradient(subset=['VIP'], cmap="Reds"), width='stretch')
         
     with tabs[7]:
         c1, c2 = st.columns([1, 6])
@@ -564,7 +564,7 @@ if 'analysis_res' in st.session_state:
             if res['pathway_df'].empty: st.warning("未能匹配到通路。")
             else:
                 if res['fig_pathway']: st.plotly_chart(res['fig_pathway'])
-                st.dataframe(res['pathway_df'].drop(columns=['-Log10_P'], errors='ignore').style.format({"P_Value":"{:.3e}", "FDR":"{:.3e}", "Enrichment_Factor":"{:.2f}"}).background_gradient(subset=['P_Value'], cmap="Reds_r", vmin=0, vmax=0.05), use_container_width=True)
+                st.dataframe(res['pathway_df'].drop(columns=['-Log10_P'], errors='ignore').style.format({"P_Value":"{:.3e}", "FDR":"{:.3e}", "Enrichment_Factor":"{:.2f}"}).background_gradient(subset=['P_Value'], cmap="Reds_r", vmin=0, vmax=0.05), width='stretch')
                 
     with tabs[9]:
         if res['fig_network']: st.plotly_chart(res['fig_network'])
