@@ -1,152 +1,130 @@
-#!/usr/bin/env python3
-"""
-KEGG 通路-化合物数据抓取脚本（符合 KEGG API 使用规范）
-用法: python get_kegg_db.py [物种代码]   # 默认 hsa
-输出: kegg_<物种代码>.csv
-"""
-
-import requests
+import urllib.request
 import pandas as pd
-import sys
 import re
+import sys
 import time
-import json
-import os
-from urllib.parse import urlparse
+import xml.etree.ElementTree as ET
 
-# ---------- 配置 ----------
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-REQUEST_DELAY = 1.0          # 每次请求后等待秒数（远低于 3 req/s 限制）
-MAX_RETRIES = 5              # 最大重试次数
-CACHE_FILE = "kegg_cpd_names.json"  # 化合物字典缓存文件
+SPECIES_MAP = {
+    "hsa": "Human (Homo sapiens)",
+    "mmu": "Mouse (Mus musculus)",
+    "rno": "Rat (Rattus norvegicus)",
+    "map": "General (reference pathway)",
+}
+METABOLISM_MAX_NUM = 2000
+MAX_RETRY = 3
 
-# ---------- 工具函数 ----------
-def safe_request(url, retries=MAX_RETRIES, timeout=30):
-    """
-    带重试机制的 GET 请求，遇到错误时指数退避
-    """
-    for attempt in range(1, retries + 1):
+def parse_kgml_compounds(species_code, pw_num, headers):
+    """从 KGML 文件中解析化合物 KEGG ID（C number）"""
+    # 💡 强制使用 https 避免 400 报错
+    url = f"https://rest.kegg.jp/get/{species_code}{pw_num}/kgml"
+    compounds = set()
+    for attempt in range(1, MAX_RETRY + 1):
         try:
-            headers = {'User-Agent': USER_AGENT}
-            resp = requests.get(url, headers=headers, timeout=timeout)
-            resp.raise_for_status()  # 非 2xx 状态码抛出异常
-            return resp.text
-        except requests.exceptions.RequestException as e:
-            print(f"⚠️  请求失败 (尝试 {attempt}/{retries}): {e}")
-            if attempt == retries:
-                raise  # 重试耗尽，向上抛出
-            # 指数退避：2^attempt 秒，但最多 30 秒
-            sleep_time = min(2 ** attempt, 30)
-            time.sleep(sleep_time)
-    raise RuntimeError(f"无法获取 {url}")
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=30) as response:
+                xml_data = response.read()
+            root = ET.fromstring(xml_data)
+            for entry in root.findall('entry'):
+                if entry.get('type') == 'compound':
+                    name_attr = entry.get('name', '')
+                    for name in name_attr.split():
+                        if name.startswith('cpd:'):
+                            compounds.add(name.replace('cpd:', ''))
+            return compounds
+        except Exception as e:
+            if attempt < MAX_RETRY:
+                time.sleep(2)
+            else:
+                return compounds
+    return compounds
 
-def download_cpd_names(force_refresh=False):
-    """
-    下载或从缓存加载化合物字典
-    返回 dict: {cpd_id: compound_name}
-    """
-    if not force_refresh and os.path.exists(CACHE_FILE):
-        print(f"📂 发现缓存文件 {CACHE_FILE}，正在加载...")
-        with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
+def fetch_kegg_database(species_code="map"):
+    if species_code == "all":
+        for code in SPECIES_MAP:
+            fetch_kegg_database(code)
+        return
 
-    print("📥 正在下载全库化合物字典（约 2 万条，可能需要数十秒）...")
-    text = safe_request("https://rest.kegg.jp/list/cpd")
-    cpd_names = {}
-    for line in text.strip().split('\n'):
-        if not line:
-            continue
-        parts = line.split('\t')
-        if len(parts) == 2:
-            cpd_id = parts[0].replace('cpd:', '')
-            # 取第一个分号前的名称（通常是通用名）
-            name = parts[1].split(';')[0].strip()
-            cpd_names[cpd_id] = name
+    if species_code not in SPECIES_MAP:
+        print(f"❌ 未知物种代码: {species_code}，可选: {', '.join(SPECIES_MAP)}")
+        return
 
-    # 保存到缓存
-    with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(cpd_names, f, ensure_ascii=False, indent=2)
-    print(f"✅ 化合物字典已缓存到 {CACHE_FILE}")
-    return cpd_names
+    species_name = SPECIES_MAP[species_code]
+    print(f"⏳ 正在连接 KEGG 官方服务器（{species_name} [{species_code}]）...")
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'}
+    out_filename = f"kegg_{species_code}.csv"
 
-def fetch_kegg_database(species_code):
-    print(f"⏳ 开始获取物种 {species_code} 的 KEGG 通路-化合物数据...")
-    # 为避免触发限流，统一在每次请求后休眠
-    def req_and_delay(url):
-        text = safe_request(url)
-        time.sleep(REQUEST_DELAY)
-        return text
+    # 1. 获取该物种的通路列表，只保留 Metabolism 大类
+    print("📥 1/3 正在下载代谢通路列表...")
+    pw_names_all = {}
+    req1 = urllib.request.Request(f"https://rest.kegg.jp/list/pathway/{species_code}", headers=headers)
+    with urllib.request.urlopen(req1, timeout=30) as response:
+        for line in response:
+            parts = line.decode('utf-8').strip().split('\t')
+            if len(parts) == 2:
+                pw_id = parts[0].replace('path:', '')
+                pw_num = re.sub(r'^[a-z]+', '', pw_id)
+                pw_names_all[pw_num] = parts[1]
 
-    # 1. 获取该物种的通路列表
-    print("📥 1/3 获取通路列表...")
-    text1 = req_and_delay(f"https://rest.kegg.jp/list/pathway/{species_code}")
     pw_names = {}
-    for line in text1.strip().split('\n'):
-        if not line:
+    for pw_num, pw_name in pw_names_all.items():
+        try:
+            if int(pw_num) < METABOLISM_MAX_NUM:
+                pw_names[pw_num] = pw_name
+        except ValueError:
             continue
-        parts = line.split('\t')
-        if len(parts) == 2:
-            pw_id = parts[0].replace('path:', '')   # 如 'hsa00010'
-            # 保存完整ID，同时提取数字部分用于后续映射键
-            pw_names[pw_id] = parts[1]
+    print(f"   → 筛选后保留 {len(pw_names)} 条纯代谢通路")
 
-    # 2. 获取化合物字典（优先缓存）
-    print("📥 2/3 获取化合物字典...")
-    cpd_names = download_cpd_names()
-    # 字典下载已经包含了请求，但我们也应该在此处延迟（已自带，但再确保）
-    time.sleep(REQUEST_DELAY)
+    # 2. 获取全局代谢物字典 (用于名称映射)
+    print("📥 2/3 正在下载全局代谢物名称字典...")
+    cpd_dict = {}
+    req2 = urllib.request.Request("https://rest.kegg.jp/list/cpd", headers=headers)
+    with urllib.request.urlopen(req2, timeout=30) as response:
+        for line in response:
+            parts = line.decode('utf-8').strip().split('\t')
+            if len(parts) == 2:
+                c_id = parts[0].replace('cpd:', '')
+                cpd_dict[c_id] = parts[1].split(';')[0].strip()
 
-    # 3. 获取全库通路-化合物映射，并按物种过滤
-    print("📥 3/3 获取全库通路-化合物映射，并筛选目标物种...")
-    text3 = req_and_delay("https://rest.kegg.jp/link/cpd/pathway")
-    pw_cpd_map = {}  # key: 数字ID (如 '00010'), value: 化合物名称列表
+    # 3. 逐条解析 KGML 文件获取物种特异的化合物列表
+    pw_nums = list(pw_names.keys())
+    total = len(pw_nums)
+    print(f"📥 3/3 正在解析 KGML 树获取物种特异化合物（共 {total} 条通路）...")
 
-    for line in text3.strip().split('\n'):
-        if not line:
-            continue
-        parts = line.split('\t')
-        if len(parts) != 2:
-            continue
-        # 格式: cpd:C00001 \t path:hsa00010
-        cpd_part = parts[0]
-        path_part = parts[1]
-        if not path_part.startswith('path:'):
-            continue
-        pw_full = path_part.replace('path:', '')   # 'hsa00010'
-        # 只处理属于目标物种的通路
-        if not pw_full.startswith(species_code):
-            continue
-        # 提取数字部分，如 '00010'
-        pw_num = re.sub(r'^[a-z]+', '', pw_full)
-        cpd_id = cpd_part.replace('cpd:', '')
-        cpd_name = cpd_names.get(cpd_id, cpd_id)   # 若缺失则用ID本身
-        pw_cpd_map.setdefault(pw_num, []).append(cpd_name)
-
-    # 4. 组装结果（只保留在通路列表中有映射的通路）
-    print("💾 正在组装数据并保存...")
-    links = []
-    for pw_id, name in pw_names.items():
-        pw_num = re.sub(r'^[a-z]+', '', pw_id)
-        if pw_num in pw_cpd_map:
-            # 去重（有些化合物可能在同一条通路重复出现，但一般不会）
-            compounds = list(dict.fromkeys(pw_cpd_map[pw_num]))  # 保持顺序去重
-            links.append({
-                "Pathway": name,
-                "Compounds": ';'.join(compounds)
+    records = []
+    fail_count = 0
+    for idx, pw_num in enumerate(pw_nums):
+        pw_name = pw_names[pw_num]
+        compounds = parse_kgml_compounds(species_code, pw_num, headers)
+        if compounds:
+            # 💡 将 C number 映射为 "名称|C number" 格式，兼容双向匹配
+            translated_cpds = []
+            for c in compounds:
+                name = cpd_dict.get(c, "")
+                translated_cpds.append(f"{name}|{c}" if name else c)
+                
+            records.append({
+                "Pathway": pw_name,
+                "Compounds": ";".join(sorted(translated_cpds))
             })
+        else:
+            fail_count += 1
 
-    # 排序（可选：按通路ID排序）
-    # links.sort(key=lambda x: x["Pathway"])
+        if (idx + 1) % 10 == 0 or idx + 1 == total:
+            print(f"   → 进度: {idx+1}/{total}（成功 {len(records)}，失败 {fail_count}）")
 
-    df = pd.DataFrame(links)
-    filename = f"kegg_{species_code}.csv"
-    df.to_csv(filename, index=False, encoding='utf-8-sig')  # 支持Excel中文
-    print(f"✅ 大功告成！共抓取 {len(df)} 条含化合物的通路，文件已保存为: {filename}")
+    if not records:
+        print("❌ 错误：未能从 KGML 解析到任何化合物，请检查网络连接。")
+        return
+
+    print("💾 正在整理并保存...")
+    df = pd.DataFrame(records)
+    df.to_csv(out_filename, index=False)
+
+    total_cpds = sum(len(r["Compounds"].split(";")) for r in records)
+    print(f"✅ {species_name}: 已抓取 {len(df)} 条代谢通路，涵盖 {total_cpds} 个 KEGG 化合物映射节点。")
+    print(f"📁 文件已保存: {out_filename}")
 
 if __name__ == "__main__":
-    species = sys.argv[1] if len(sys.argv) > 1 else "hsa"
-    # 检查是否是合法物种代码（简单检查，只允许字母数字）
-    if not re.match(r'^[a-zA-Z0-9]+$', species):
-        print(f"❌ 物种代码 '{species}' 不合法，仅允许字母数字")
-        sys.exit(1)
-    fetch_kegg_database(species)
+    code = sys.argv[1] if len(sys.argv) > 1 else "map"
+    fetch_kegg_database(code)
