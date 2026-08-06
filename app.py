@@ -139,22 +139,23 @@ with st.sidebar:
     db_sync_msg = st.session_state.get('_db_sync_msg', '')
     
     # 注意：这里去掉了 or not os.path.exists() 的兜底，防止无限死循环触发
+    db_sync_msg = st.session_state.get('_db_sync_msg', '')
+    
     if st.button(f"🔄 同步 {species_code} 通路库", width='stretch'):
-        with st.spinner(f"⏳ 正在后台运行独立脚本抓取 {species_code} 通路（约需 1-2 分钟，请勿关闭网页）..."):
+        with st.spinner(f"⏳ 正在后台解析 KGML 抓取 {species_code} 代谢通路（约需 1-3 分钟，请勿关闭网页）..."):
             import subprocess
             import sys
             import datetime
             try:
-                # 核心：调用 get_kegg_db.py，并将下拉菜单选择的物种代码（如 'hsa'）传给它
+                # 动态调用同目录下的 get_kegg_db.py，并传入下拉菜单选中的物种代码
                 res = subprocess.run([sys.executable, "get_kegg_db.py", species_code], capture_output=True, text=True)
                 
                 if res.returncode == 0:
                     st.session_state['_db_sync_msg'] = f"✅ {species_code} 库同步成功！\n*(更新时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})*"
                     st.toast(f"✅ 库同步成功！")
-                    st.rerun() # 同步成功后刷新界面，让软件读取新文件
+                    st.rerun() 
                 else:
-                    # 如果脚本内部报错，把错误信息打印到网页上
-                    st.session_state['_db_sync_msg'] = f"❌ 更新脚本执行报错:\n{res.stderr}"
+                    st.session_state['_db_sync_msg'] = f"❌ 更新脚本执行报错:\n```text\n{res.stderr}\n```"
                     st.error(f"❌ 更新脚本执行报错:\n{res.stderr}")
             except Exception as e:
                 st.session_state['_db_sync_msg'] = f"❌ 无法启动更新程序: {str(e)}"
@@ -168,6 +169,7 @@ with st.sidebar:
         st.caption(f"📦 当前库：`{db_filename}`（{sum(1 for _ in open(db_filename, encoding='utf-8'))-1} 条通路）")
     else:
         st.caption(f"⚠️ 未找到 `{db_filename}`，通路富集将无结果！请点击上方同步按钮。")
+
 
     st.markdown("#### 4. 上传分析数据")
     feature_scope = "全部特征"
