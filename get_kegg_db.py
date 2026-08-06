@@ -2,8 +2,6 @@ import urllib.request
 import pandas as pd
 import re
 import sys
-import time
-import xml.etree.ElementTree as ET
 
 SPECIES_MAP = {
     "hsa": "Human (Homo sapiens)",
@@ -12,96 +10,101 @@ SPECIES_MAP = {
     "map": "General (reference pathway)",
 }
 METABOLISM_MAX_NUM = 2000
-MAX_RETRY = 3
 
-def parse_kgml_compounds(species_code, pw_num, headers):
-    """从 KGML 文件中解析化合物 KEGG ID（纯 C number）"""
-    url = f"https://rest.kegg.jp/get/{species_code}{pw_num}/kgml"
-    compounds = set()
-    for attempt in range(1, MAX_RETRY + 1):
-        try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=30) as response:
-                xml_data = response.read()
-            root = ET.fromstring(xml_data)
-            for entry in root.findall('entry'):
-                if entry.get('type') == 'compound':
-                    name_attr = entry.get('name', '')
-                    for name in name_attr.split():
-                        if name.startswith('cpd:'):
-                            compounds.add(name.replace('cpd:', ''))
-            return compounds
-        except Exception:
-            if attempt < MAX_RETRY:
-                time.sleep(2)
-            else:
-                return compounds
-    return compounds
+def fetch_api(url):
+    """通用的 HTTPS 请求函数，带完美伪装"""
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'}
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=60) as response:
+        return [line for line in response.read().decode('utf-8').strip().split('\n') if line]
 
 def fetch_kegg_database(species_code="map"):
     if species_code == "all":
-        for code in SPECIES_MAP:
+        for code in SPECIES_MAP: 
             fetch_kegg_database(code)
         return
 
     if species_code not in SPECIES_MAP:
-        print(f"❌ 未知物种代码: {species_code}，可选: {', '.join(SPECIES_MAP)}")
+        print(f"❌ 未知物种代码: {species_code}")
         return
 
-    species_name = SPECIES_MAP[species_code]
-    print(f"⏳ 正在连接 KEGG 官方服务器（{species_name} [{species_code}]）...")
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'}
-    out_filename = f"kegg_{species_code}.csv"
+    print(f"⏳ 正在连接 KEGG 服务器，执行严谨生物学链路抓取（{SPECIES_MAP[species_code]}）...")
 
-    print("📥 1/2 正在下载代谢通路列表...")
-    pw_names_all = {}
-    req1 = urllib.request.Request(f"https://rest.kegg.jp/list/pathway/{species_code}", headers=headers)
-    with urllib.request.urlopen(req1, timeout=30) as response:
-        for line in response:
-            parts = line.decode('utf-8').strip().split('\t')
-            if len(parts) == 2:
-                pw_id = parts[0].replace('path:', '')
-                pw_num = re.sub(r'^[a-z]+', '', pw_id)
-                pw_names_all[pw_num] = parts[1]
-
+    # 1. 获取代谢通路列表
     pw_names = {}
-    for pw_num, pw_name in pw_names_all.items():
-        try:
-            if int(pw_num) < METABOLISM_MAX_NUM:
-                pw_names[pw_num] = pw_name
-        except ValueError:
-            continue
-    print(f"   → 筛选后保留 {len(pw_names)} 条纯代谢通路")
+    for line in fetch_api(f"https://rest.kegg.jp/list/pathway/{species_code}"):
+        parts = line.split('\t')
+        if len(parts) == 2:
+            pw_num = re.sub(r'^[a-z]+', '', parts[0].replace('path:', ''))
+            try:
+                if int(pw_num) < METABOLISM_MAX_NUM:
+                    pw_names[pw_num] = parts[1]
+            except ValueError:
+                pass
+    print(f"📥 1/4 提取代谢通路总数: {len(pw_names)} 条")
 
-    pw_nums = list(pw_names.keys())
-    total = len(pw_nums)
-    print(f"📥 2/2 正在解析 KGML 树获取纯 KEGG ID 集合（共 {total} 条通路）...")
+    # 2. 获取该物种特异性的“合法反应”集合
+    species_valid_rns = set()
+    if species_code != "map":
+        for line in fetch_api(f"https://rest.kegg.jp/link/rn/{species_code}"):
+            parts = line.split('\t')
+            if len(parts) == 2:
+                species_valid_rns.add(parts[1].replace('rn:', ''))
+        print(f"📥 2/4 提取物种基因特异性化学反应: {len(species_valid_rns)} 个")
+    else:
+        print("📥 2/4 参考库模式 (保留所有化学反应)")
 
+    # 3. 获取所有 通路 -> 反应 的映射关系
+    pw_to_rn = {}
+    for line in fetch_api("https://rest.kegg.jp/link/rn/pathway"):
+        parts = line.split('\t')
+        if len(parts) == 2:
+            pw_num = re.sub(r'^[a-z]+', '', parts[0].replace('path:', ''))
+            rn = parts[1].replace('rn:', '')
+            if pw_num not in pw_to_rn:
+                pw_to_rn[pw_num] = []
+            pw_to_rn[pw_num].append(rn)
+    print(f"📥 3/4 构建 通路(Pathway) -> 反应(Reaction) 映射图")
+
+    # 4. 获取所有 反应 -> 化合物 的映射关系
+    rn_to_cpd = {}
+    for line in fetch_api("https://rest.kegg.jp/link/cpd/rn"):
+        parts = line.split('\t')
+        if len(parts) == 2:
+            rn = parts[0].replace('rn:', '')
+            cpd = parts[1].replace('cpd:', '')
+            if rn not in rn_to_cpd:
+                rn_to_cpd[rn] = []
+            rn_to_cpd[rn].append(cpd)
+    print(f"📥 4/4 构建 反应(Reaction) -> 化合物(Compound) 映射图")
+
+    # 5. 核心逻辑：生物学严谨组装
+    print("💾 正在执行生物学约束组装并保存...")
     records = []
-    fail_count = 0
-    for idx, pw_num in enumerate(pw_nums):
-        pw_name = pw_names[pw_num]
-        compounds = parse_kgml_compounds(species_code, pw_num, headers)
-        if compounds:
-            # 💡 核心修正：仅保留纯粹的 C number，确保在 app.py 交叉比对时 100% 精确咬合
+    for pw_num, name in pw_names.items():
+        valid_cpds = set()
+        for rn in pw_to_rn.get(pw_num, []):
+            # 💡 黄金防线：仅当该反应存在于当前物种基因组中时，才提取该反应下的化合物
+            if species_code == "map" or rn in species_valid_rns:
+                valid_cpds.update(rn_to_cpd.get(rn, []))
+        
+        if valid_cpds:
             records.append({
-                "Pathway": pw_name,
-                "Compounds": ";".join(sorted(compounds))
+                "Pathway": name,
+                "Compounds": ";".join(sorted(valid_cpds))
             })
-        else:
-            fail_count += 1
-
-        if (idx + 1) % 10 == 0 or idx + 1 == total:
-            print(f"   → 进度: {idx+1}/{total}（成功 {len(records)}，失败 {fail_count}）")
 
     if not records:
-        print("❌ 错误：未能解析到化合物，请重试。")
+        print("❌ 错误：未能映射出任何物种特异性化合物。")
         return
 
-    print("💾 正在整理并保存...")
     df = pd.DataFrame(records)
+    out_filename = f"kegg_{species_code}.csv"
     df.to_csv(out_filename, index=False)
-    print(f"✅ {species_name}: 已抓取 {len(df)} 条代谢通路。")
+    
+    total_cpds = sum(len(r["Compounds"].split(";")) for r in records)
+    print(f"✅ {SPECIES_MAP[species_code]}: 已抓取 {len(df)} 条通路，严格过滤保留了 {total_cpds} 个物种特异性映射节点。")
+    print(f"📁 文件已保存: {out_filename}")
 
 if __name__ == "__main__":
     code = sys.argv[1] if len(sys.argv) > 1 else "map"
