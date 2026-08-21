@@ -139,7 +139,7 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
         <h2>🔥 4. 差异代谢物热图</h2>
         <div class="plot-container" style="text-align:center;">
             {f'''
-            < img src="data:image/png;base64,{hm_base64}" class="heatmap-img" alt="Heatmap">
+            <img src="data:image/png;base64,{hm_base64}" class="heatmap-img" alt="Heatmap">
             <br><br>
             <a href=" " download="Heatmap_HighRes.png" 
                style="display:inline-block; padding:8px 15px; background-color:#2a5298; color:white; text-decoration:none; border-radius:4px; font-size:14px; font-weight:bold;">
