@@ -1,11 +1,8 @@
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-import plotly.io as pio
-import base64
 
 def generate_ai_prompt(case, ctrl, norm_m, scale_m, R2Y, Q2, b_q2, p_th, fc_th, out_df, pathway_df):
-    """生成用于大模型交互分析的 Markdown 提示词 (Prompt)"""
+    """生成用于大模型交互分析的 Markdown 提示词"""
     if b_q2 < 0.05 and Q2 > 0.5:
         model_eval_text = f"OPLS-DA 模型预测能力强，且未发生过拟合 (Q²={Q2:.3f}, 截距={b_q2:.3f})。提示两组间存在显著且广泛的全局代谢轮廓差异。"
     elif b_q2 < 0.05 and Q2 <= 0.5:
@@ -45,15 +42,24 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
                          out_df, pathway_df, fig_opls, fig_perm, fig_splot, fig_vip, fig_vol, fig_pca,
                          hm_base64, fig_nomogram, fig_pathway, fig_network,
                          vip_show_num, pw_show_num, nomo_num):
-    """生成独立离线 HTML 报告，包含所有分析图表及科学解读"""
+    """生成独立离线 HTML 报告，所有 Plotly 图表支持高清 PNG 导出"""
     
-    # ------------------- 辅助函数：安全地将 Plotly 图转为 HTML 片段 -------------------
+    # ------------------- 辅助函数：安全地将 Plotly 图转为 HTML 片段，并配置高清导出 -------------------
     def safe_plotly_html(fig, default_msg="<p style='color:#999;text-align:center;'>图表生成失败或无数据</p>"):
         if fig is None:
             return default_msg
         try:
-            # 使用 include_plotlyjs='cdn' 可在头部统一加载，此处不重复引入
-            return fig.to_html(full_html=False, include_plotlyjs=False, default_height=600, default_width=700)
+            config = {
+                'displayModeBar': True,
+                'toImageButtonOptions': {
+                    'format': 'png',
+                    'scale': 3,          # 3 倍缩放，适合印刷
+                    'filename': 'plot'
+                }
+            }
+            return fig.to_html(full_html=False, include_plotlyjs=False,
+                               default_height=600, default_width=700,
+                               config=config)
         except Exception as e:
             return f"<p style='color:red;text-align:center;'>图表渲染错误: {str(e)}</p>"
     
@@ -73,7 +79,6 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MetaFlow Studio 综合代谢组学分析报告 ({case} vs {ctrl})</title>
-    <!-- 统一加载 Plotly 库 (CDN) -->
     <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
     <style>
         body {{ font-family: 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 1300px; margin: 0 auto; padding: 20px; background-color: #f8f9fa; }}
