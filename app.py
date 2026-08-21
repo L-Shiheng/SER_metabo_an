@@ -444,16 +444,30 @@ if submit_button:
             sig_mets = out_df['Metabolite'].tolist()
             if sig_mets:
                 hm_feats = out_df.head(50)['Metabolite'].tolist()
-                hm_data = df_sub.set_index(group_col)[hm_feats].T
+                
+                # 💡 修改 1：先对样本按组别进行排序，保证热图的 X 轴是按物理顺序排列的
+                df_sub_sorted = df_sub.sort_values(group_col)
+                hm_data = df_sub_sorted.set_index(group_col)[hm_feats].T
                 hm_data.index = [meta.loc[f, 'Clean_Name'] if (meta is not None and f in meta.index) else f for f in hm_data.index]
-                lut = {g: GROUP_COLORS[i%len(GROUP_COLORS)] for i, g in enumerate(df_sub[group_col].unique())}
+                
+                # 确保顶部颜色标签与排好序的组别一一对应
+                lut = {g: GROUP_COLORS[i%len(GROUP_COLORS)] for i, g in enumerate(df_sub_sorted[group_col].unique())}
                 try:
-                    g = sns.clustermap(hm_data.astype(float), z_score=0, cmap="vlag", center=0, col_colors=df_sub[group_col].map(lut), figsize=(8, 8))
+                    # 💡 修改 2：加入 col_cluster=False 取消组别方向的聚类
+                    g = sns.clustermap(hm_data.astype(float), z_score=0, cmap="vlag", center=0, 
+                                       col_colors=df_sub_sorted[group_col].map(lut), figsize=(8, 8),
+                                       col_cluster=False)
                     g.ax_heatmap.set_xlabel("")
                     g.ax_heatmap.set_ylabel("")
                     hm_fig = g.fig
-                    buf = io.BytesIO(); g.savefig(buf, format='png', bbox_inches='tight'); buf.seek(0); hm_base64 = base64.b64encode(buf.read()).decode('utf-8')
-                except Exception: pass
+                    
+                    buf = io.BytesIO()
+                    # 💡 修改 3：加入 dpi=300，输出出版级高清图片
+                    g.savefig(buf, format='png', dpi=300, bbox_inches='tight')
+                    buf.seek(0)
+                    hm_base64 = base64.b64encode(buf.read()).decode('utf-8')
+                except Exception as e: 
+                    pass # 若热图生成失败则静默通过
 
             fig_nomogram = None
             if len(out_df) >= 2:
