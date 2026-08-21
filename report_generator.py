@@ -141,7 +141,7 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
             {f'''
             <img src="data:image/png;base64,{hm_base64}" class="heatmap-img" alt="Heatmap">
             <br><br>
-            <a href=" " download="Heatmap_HighRes.png" 
+            <a href="data:image/png;base64,{hm_base64}" download="Heatmap_HighRes.png" 
                style="display:inline-block; padding:8px 15px; background-color:#2a5298; color:white; text-decoration:none; border-radius:4px; font-size:14px; font-weight:bold;">
                📸 下载高清热图 (PNG)
             </a >
