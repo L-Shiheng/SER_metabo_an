@@ -107,6 +107,20 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
                 <div class="plot-container" style="width: 48%;">{get_plotly_html(fig_splot)}</div>
             </div>
             
+            <!-- 💡 核心修复 4：将刚刚在 app.py 算好的高清热图，真实塞进网页里[span_9](start_span)[span_9](end_span) -->
+            <div class="plot-container">
+                <h3 style="text-align:center;">差异标志物表达热图</h3>
+                <div style="text-align:center;">
+                    {hm_base64 if hm_base64 else "<p style='color:#999;text-align:center;'>图表生成失败或无显著差异特征</p >"}
+                </div>
+            </div>
+            
+            <div class="plot-container">
+                <h3 style="text-align:center;">Top 差异代谢物 VIP 排序</h3>
+                {get_plotly_html(fig_vip)}
+            </div>
+
+            
             <div class="plot-container">
                 <h3 style="text-align:center;">Top 差异代谢物 VIP 排序</h3>
                 {get_plotly_html(fig_vip)}
