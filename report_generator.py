@@ -79,7 +79,7 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MetaFlow Studio 综合代谢组学分析报告 ({case} vs {ctrl})</title>
-    <script src="https://cdn.bootcdn.net/ajax/libs/plotly.js/2.27.0/plotly.min.js"></script>
+    <script src="http://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <style>
         body {{ font-family: 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 1300px; margin: 0 auto; padding: 20px; background-color: #f8f9fa; }}
         .container {{ background-color: #fff; padding: 40px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
