@@ -45,7 +45,7 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
     """生成独立离线 HTML 报告，所有 Plotly 图表支持高清 PNG 导出"""
     
     # ------------------- 辅助函数：安全地将 Plotly 图转为 HTML 片段，并配置高清导出 -------------------
-    def safe_plotly_html(fig, default_msg="<p style='color:#999;text-align:center;'>图表生成失败或无数据</p>"):
+    def safe_plotly_html(fig, default_msg="<p style='color:#999;text-align:center;'>图表生成失败或无数据</p >"):
         if fig is None:
             return default_msg
         try:
@@ -53,15 +53,16 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
                 'displayModeBar': True,
                 'toImageButtonOptions': {
                     'format': 'png',
-                    'scale': 3,          # 3 倍缩放，适合印刷
+                    'scale': 3,          # 3 倍缩放，确保导出图片为 300DPI 印刷级
                     'filename': 'plot'
                 }
             }
-            return fig.to_html(full_html=False, include_plotlyjs=False,
+            # 💡 核心修复：将 include_plotlyjs 设为 'cdn'，让 Plotly 自动获取官方安全依赖，告别白屏！
+            return fig.to_html(full_html=False, include_plotlyjs='cdn',
                                default_height=600, default_width=700,
                                config=config)
         except Exception as e:
-            return f"<p style='color:red;text-align:center;'>图表渲染错误: {str(e)}</p>"
+            return f"<p style='color:red;text-align:center;'>图表渲染错误: {str(e)}</p >"
     
     # ------------------- 模型评价动态文本 -------------------
     if b_q2 < 0.05 and Q2 > 0.5:
@@ -79,7 +80,7 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MetaFlow Studio 综合代谢组学分析报告 ({case} vs {ctrl})</title>
-    <script src="http://cdn.bootcdn.net/ajax/libs/plotly.js/2.27.0/plotly.min.js"></script>
+    <!-- 删除了错误的外部 JS 链接，交由 Plotly 自行管理 -->
     <style>
         body {{ font-family: 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 1300px; margin: 0 auto; padding: 20px; background-color: #f8f9fa; }}
         .container {{ background-color: #fff; padding: 40px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
@@ -137,12 +138,12 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
 
         <h2>🔥 4. 差异代谢物热图</h2>
         <div class="plot-container" style="text-align:center;">
-            {f'<img src="data:image/png;base64,{hm_base64}" class="heatmap-img" alt="Heatmap">' if hm_base64 else '<p style="color:#999;">无热图数据</p>'}
+            {f'< img src="data:image/png;base64,{hm_base64}" class="heatmap-img" alt="Heatmap">' if hm_base64 else '<p style="color:#999;">无热图数据</p >'}
         </div>
 
         <h2>📏 5. 诊断列线图 (Nomogram)</h2>
         <div class="plot-container">
-            {safe_plotly_html(fig_nomogram, default_msg="<p style='color:#999;text-align:center;'>显著差异代谢物不足或无法构建列线图</p>")}
+            {safe_plotly_html(fig_nomogram, default_msg="<p style='color:#999;text-align:center;'>显著差异代谢物不足或无法构建列线图</p >")}
         </div>
 
         <h2>🕸️ 6. 通路富集分析 (KEGG)</h2>
@@ -156,11 +157,11 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
 
         <h2>📑 7. 显著差异代谢物清单</h2>
         <div style="overflow-x:auto;">
-            {out_df[['Name', 'Log2_FC', 'P_Value', 'FDR', 'VIP', 'p_corr']].head(30).to_html(index=False, classes='summary-table', float_format=lambda x: f'{x:.4g}') if not out_df.empty else '<p>无显著差异代谢物</p>'}
+            {out_df[['Name', 'Log2_FC', 'P_Value', 'FDR', 'VIP', 'p_corr']].head(30).to_html(index=False, classes='summary-table', float_format=lambda x: f'{x:.4g}') if not out_df.empty else '<p>无显著差异代谢物</p >'}
         </div>
 
         <div class="footer">
-            <p>报告生成时间: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')} | 由 MetaFlow Studio Pro 生成</p>
+            <p>报告生成时间: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')} | 由 MetaFlow Studio Pro 生成</p >
         </div>
     </div>
 </body>
