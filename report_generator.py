@@ -138,7 +138,7 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
 
         <h2>🔥 4. 差异代谢物热图</h2>
         <div class="plot-container" style="text-align:center;">
-            {f'< img src="data:image/png;base64,{hm_base64}" class="heatmap-img" alt="Heatmap">' if hm_base64 else '<p style="color:#999;">无热图数据</p >'}
+            {f'<img src="data:image/png;base64,{hm_base64}" class="heatmap-img" alt="Heatmap">' if hm_base64 else '<p style="color:#999;">无热图数据</p >'}
         </div>
 
         <h2>📏 5. 诊断列线图 (Nomogram)</h2>
