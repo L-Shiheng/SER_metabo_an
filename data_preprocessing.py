@@ -308,7 +308,7 @@ def parse_universal_single_table(file_list, external_kegg_dict=None):
         df_t.index.name = 'SampleID'
         df_t = df_t.reset_index()
         df_t['Group'] = df_t['SampleID'].map(sample_groups).fillna('Unknown')
-        df_t['Source_Files'] = 'MA_Single_Matrix'
+        df_t['Source_Files'] = 'MA_Single'
         
         meta = pd.DataFrame(index=combined_df.index)
         meta['Clean_Name'] = [str(n).split(' | ')[0].split(';')[0].strip() for n in combined_df.index]
@@ -380,7 +380,7 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积", mode_regex
         df_t.index.name = 'SampleID'
         df_t = df_t.reset_index()
         df_t['Group'] = 'Unknown' 
-        df_t['Source_Files'] = 'MRM_Merged_Matrix'
+        df_t['Source_Files'] = 'MRM_Targeted'
         
         meta = pd.DataFrame(index=combined.index)
         meta['Clean_Name'] = [str(n).split(' | ')[0].split(';')[0].strip() for n in combined.index]
@@ -392,7 +392,7 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积", mode_regex
     except Exception as e: return None, None, f"MRM 拟靶向表格解析失败: {str(e)}"
 
 # ==============================================================================
-# 🚀 引擎 C：MetDNA 原生管线提取器 (支持单模式内去重 + 双模式合并)
+# 🚀 引擎 C：MetDNA 原生管线提取器 (支持自定义模式标签 RP+/RP-/HILIC+/HILIC-)
 # ==============================================================================
 def rank_confidence(conf_str):
     s = str(conf_str).upper().strip()
@@ -404,7 +404,7 @@ def rank_confidence(conf_str):
     if 'C' in s: return 3
     return 99
 
-def parse_metdna_file(file_buffer, file_name, valid_samples=None, dedup_within_file=True):
+def parse_metdna_file(file_buffer, file_name, valid_samples=None, dedup_within_file=True, custom_mode_tag=None):
     try:
         df = read_file_robust(file_buffer)
         if df.empty: return None, None, "表格为空"
@@ -427,10 +427,14 @@ def parse_metdna_file(file_buffer, file_name, valid_samples=None, dedup_within_f
     if not sample_cols: 
         return None, None, "未在数据表中找到与 Info 表匹配的样本列名。"
 
-    # 去除文件名末尾的 _0, _1 临时编号以获得干净的模式标签 (如 RP_POS, HILIC_NEG)
-    base_raw = os.path.splitext(os.path.basename(file_name))[0]
-    base_raw = re.sub(r'_\d+$', '', base_raw)
-    clean_tag = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', base_raw)
+    # 优先使用用户在侧边栏指定的模式名称 (如 RP+, RP-, HILIC+, HILIC-)，彻底杜绝同名文件互相覆盖
+    if custom_mode_tag and str(custom_mode_tag).strip():
+        clean_tag = str(custom_mode_tag).strip()
+    else:
+        base_raw = os.path.splitext(os.path.basename(file_name))[0]
+        clean_tag = re.sub(r'[^a-zA-Z0-9_\-\.\+]', '_', base_raw)
+    
+    safe_id_suffix = re.sub(r'[^a-zA-Z0-9_\-]', '_', clean_tag.replace('+', 'POS').replace('-', 'NEG'))
     
     if 'name' not in df.columns: df['name'] = ""
     if 'confidence_level' not in df.columns: df['confidence_level'] = 'Unknown'
@@ -440,7 +444,7 @@ def parse_metdna_file(file_buffer, file_name, valid_samples=None, dedup_within_f
         rt_vals = df['rt'] if 'rt' in df.columns else df.index.astype(str)
         df['peak_name'] = [f"M{mz}_RT{rt}" for mz, rt in zip(mz_vals, rt_vals)]
     
-    final_ids = df['peak_name'].astype(str).str.strip() + "_" + clean_tag
+    final_ids = df['peak_name'].astype(str).str.strip() + "_" + safe_id_suffix
     final_ids = make_unique(final_ids)
     
     df['name'] = df['name'].fillna("").astype(str).str.strip()
@@ -449,7 +453,6 @@ def parse_metdna_file(file_buffer, file_name, valid_samples=None, dedup_within_f
     
     kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
     if kegg_col:
-        # 严格提取首位主注释的 KEGG C-number，避免分号后的次要候选污染通路富集
         kegg_ids = df[kegg_col].fillna('').astype(str).apply(lambda s: s.split(';')[0].strip() if s.lower() not in ['nan', 'none'] else '')
     else:
         kegg_ids = pd.Series([""] * len(df))
@@ -501,7 +504,7 @@ def merge_multiple_dfs(results_list):
     all_detected_modes = {}
     
     for file_idx, (df, meta, fname) in enumerate(results_list):
-        current_tag = str(df['Source_Files'].iloc[0]) if 'Source_Files' in df.columns and not df.empty else f"Mode_{file_idx+1}"
+        current_tag = str(fname) if fname else (str(df['Source_Files'].iloc[0]) if 'Source_Files' in df.columns and not df.empty else f"Mode_{file_idx+1}")
         for sid in df['SampleID']:
             if sid not in sample_source_map: sample_source_map[sid] = set()
             sample_source_map[sid].add(current_tag)
@@ -582,11 +585,6 @@ OVERVIEW_PATHWAYS = {
 }
 
 def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_source=None, bg_mode="reference"):
-    """
-    bg_mode:
-      - "reference": 以当前物种 KEGG 库中的所有代谢物作为超几何分布背景 N (与 MetaboAnalyst 默认一致，灵敏度高)
-      - "experimental": 仅以本次实验检出且比对上 KEGG 的代谢物作为背景 N (严格实测背景)
-    """
     db = pd.DataFrame()
     if custom_db_source is not None:
         try:
@@ -605,7 +603,6 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
     else:
         return pd.DataFrame(), pd.DataFrame() 
 
-    # 解析数据库中的所有通路，剔除 01100~01299 全局总览通路
     parsed_pathways = []
     all_db_comps = set()
     for _, row in db.iterrows():
@@ -626,20 +623,17 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
         return pd.DataFrame(), pd.DataFrame()
 
     def extract_primary_id_and_name(full_str):
-        """提取物质显示名称与首选匹配 ID（优先使用唯一 KEGG C-number）"""
         parts = str(full_str).split('|')
         disp_name = parts[0].split(';')[0].strip()
         if len(parts) > 1 and parts[1].strip():
             kegg_c = re.sub(r'[^a-z0-9]', '', parts[1].split(';')[0].lower())
             if kegg_c in all_db_comps:
                 return disp_name, kegg_c
-        # 若无 KEGG ID，则尝试用首个名称匹配自定义库
         name_clean = re.sub(r'[^a-z0-9]', '', disp_name.lower())
         if name_clean in all_db_comps:
             return disp_name, name_clean
         return disp_name, None
 
-    # 将背景代谢物与显著差异代谢物统一映射到唯一化合物 ID 空间 (避免多特征同 ID 导致 k > M)
     exp_id_to_name = {}
     for bg_item in background_metabolites:
         d_name, cid = extract_primary_id_and_name(bg_item)
@@ -654,7 +648,6 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
             if cid not in exp_id_to_name:
                 exp_id_to_name[cid] = d_name
 
-    # 判断使用物种参考全库背景还是实验实测背景 (若上传的仅是差异物列表，自动切换为参考全库背景防止 P=1.0)
     use_ref_bg = (bg_mode == "reference") or (len(exp_id_to_name) <= len(sig_id_to_name))
     universe_ids = all_db_comps if use_ref_bg else set(exp_id_to_name.keys())
     
@@ -667,7 +660,6 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
     
     results, filtered_db_records = [], []
     for pw_name, pw_comps in parsed_pathways:
-        # 导出专属 MA 背景库记录 (基于实验检出集)
         exp_in_pw = pw_comps.intersection(set(exp_id_to_name.keys()))
         if len(exp_in_pw) >= 1:
             filtered_db_records.append({
