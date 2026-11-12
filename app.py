@@ -107,7 +107,6 @@ def format_hm_row_label(name_str, mode_str, max_chem_len=46):
     """格式化热图行标签：对超长化学名做优雅截断，确保末尾 [模式] 标识绝不被裁切"""
     clean_n = str(name_str).strip()
     clean_m = str(mode_str).strip()
-    # 去除原本可能已经拼接在末尾的 [Mode] 防止重复
     if clean_m and clean_n.endswith(f"[{clean_m}]"):
         clean_n = clean_n[:-len(f"[{clean_m}]")].strip()
     if len(clean_n) > max_chem_len:
@@ -187,12 +186,19 @@ with st.sidebar:
         else: st.error(db_sync_msg)
         
     if os.path.exists(db_filename):
-        st.caption(f"📦 当前库：`{db_filename}`（{sum(1 for _ in open(db_filename, encoding='utf-8'))-1} 条核心代谢通路）")
+        try:
+            _kegg_df = pd.read_csv(db_filename)
+            _n_pws = len(_kegg_df)
+            _n_cpds = sum(len(str(c).split(';')) for c in _kegg_df['Compounds'].dropna())
+            st.caption(f"📦 当前库：`{db_filename}`（{_n_pws} 条通路 | {_n_cpds} 个物种特异反应节点）")
+        except Exception:
+            st.caption(f"📦 当前库：`{db_filename}`")
     else:
         st.caption(f"⚠️ 未找到 `{db_filename}`，请点击上方同步按钮。")
 
     st.markdown("#### 4. 上传分析数据")
     feature_scope = "全部特征"
+    dedup_within_file = True
     dict_files = None
     custom_mode_tags = []
     
@@ -205,6 +211,11 @@ with st.sidebar:
         uploaded_files = st.file_uploader("上传 MRM 宽表", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
     else:
         feature_scope = st.radio("特征范围", ["仅已注释特征", "全部特征"], index=0)
+        dedup_within_file = st.checkbox(
+            "单模式内同名化合物去重 (合并同分异构体/加合离子)",
+            value=True,
+            help="开启后，单个模式文件内注释为同一名称的多个色谱峰将按三级漏斗保留最优峰；若需与未去重的原始峰表直接对比特征数，可取消勾选。"
+        )
         uploaded_files = st.file_uploader("上传 MetDNA 结果表 (支持 4 模式同时上传)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
         if uploaded_files:
             st.markdown("##### 📌 采集模式标识 (用于图表与清单溯源)")
@@ -294,7 +305,7 @@ if start_process:
                         assigned_tag = custom_mode_tags[i] if i < len(custom_mode_tags) else infer_default_mode_name(file.name, i)
                         df_t, meta, err = parse_metdna_file(
                             file, file.name, valid_samples=candidate_samples,
-                            dedup_within_file=True, custom_mode_tag=assigned_tag
+                            dedup_within_file=dedup_within_file, custom_mode_tag=assigned_tag
                         )
                         
                         if not err:
@@ -334,7 +345,7 @@ if start_process:
             st.rerun()
 
 # ==========================================
-# 3. 统计与可视化参数设置 (含双模式开关与双背景开关)
+# 3. 统计与可视化参数设置 (全面对齐 MetaboAnalyst 标准)
 # ==========================================
 if not st.session_state.data_loaded:
     st.info("👈 请在左侧控制台按对应数据格式上传数据。")
@@ -381,14 +392,46 @@ with st.form(key='analysis_form'):
             help="物种全库参考背景以当前物种 KEGG 代谢网络全集为 N；实验实测背景以本次上传表格中检出的 KEGG 代谢物为 N。"
         )
     
-    with st.expander("数据预处理", expanded=False):
-        c_p1, c_p2 = st.columns(2)
-        miss_th = c_p1.slider("缺失率过滤", 0.0, 1.0, 0.20)
-        impute_m = c_p2.selectbox("缺失值填充", ["KNN", "min", "mean", "zero"], index=0)
-        c_p3, c_p4 = st.columns(2)
-        norm_m = c_p3.selectbox("样本归一化 (单模式内独立执行)", ["PQN", "Median", "Sum", "None"], index=0)
-        scale_m = c_p4.selectbox("特征缩放", ["Pareto", "Auto", "None"], index=0)
-        do_log = st.checkbox("Log2 对数转化", value=True)
+    with st.expander("数据预处理与统计检验配置 (已对齐 MetaboAnalyst 默认标准)", expanded=True):
+        c_p1, c_p2, c_p3 = st.columns(3)
+        miss_th = c_p1.slider(
+            "缺失率过滤阈值 (MetaboAnalyst 默认为 0.50)",
+            0.0, 1.0, 0.50, step=0.05,
+            help="仅在所选的两个对比组样本中计算缺失率，无关组不会连坐误删特征。"
+        )
+        miss_filter_rule = c_p2.selectbox(
+            "缺失率评估规则",
+            [
+                "组内修正过滤 (任一对比组内缺失率 ≤ 阈值即保留，推荐)",
+                "对比组全局过滤 (同 MetaboAnalyst 默认)"
+            ],
+            index=0,
+            help="『组内修正过滤』可完美保留在某一组 100% 检出、另一组未检出的全有/全无型特异生物标志物。"
+        )
+        impute_label = c_p3.selectbox(
+            "缺失值填充方法",
+            [
+                "1/5 Min (LoD, 同 MetaboAnalyst 默认)",
+                "1/2 Min",
+                "KNN (K近邻插补)",
+                "mean (均值)",
+                "zero (极小常数)"
+            ],
+            index=0
+        )
+        
+        c_p4, c_p5, c_p6 = st.columns(3)
+        norm_m = c_p4.selectbox("样本归一化 (单模式内独立执行)", ["PQN", "Median", "Sum", "None"], index=0)
+        scale_m = c_p5.selectbox("多变量特征缩放", ["Pareto", "Auto", "None"], index=0)
+        ttest_var_label = c_p6.selectbox(
+            "T 检验方差假设",
+            [
+                "Student's t-test (方差齐性, 同 MetaboAnalyst 默认)",
+                "Welch's t-test (方差不齐)"
+            ],
+            index=0
+        )
+        do_log = st.checkbox("Log2 对数转化 (Log2_FC 严格在归一化线性尺度计算算术均值比值，与 MetaboAnalyst 一致)", value=True)
 
     with st.expander("图表设置", expanded=False):
         c_t1, c_t2, c_t3 = st.columns(3)
@@ -400,11 +443,12 @@ with st.form(key='analysis_form'):
     default_grps = [g for g in cur_grps if 'qc' not in g.lower()][:2]
     if len(default_grps) < 2: default_grps = cur_grps[:2]
     sel_grps = st.multiselect("选择对比组 (限 2 组)", cur_grps, default=default_grps)
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     case = c1.selectbox("Case 组 (分子)", list(sel_grps), index=0 if sel_grps else None)
     ctrl = c2.selectbox("Control 组 (分母)", list(sel_grps), index=1 if len(sel_grps)>1 else 0)
     p_th = c3.number_input("P-value 阈值", value=0.05, step=0.01)
-    fc_th = c4.number_input("Log2 FC 阈值", value=0.58, step=0.10)
+    fc_th = c4.number_input("Log2 FC 阈值", value=0.58, step=0.10, help="0.58 对应 1.5 倍变化，1.0 对应 2.0 倍变化")
+    vip_th = c5.number_input("VIP 阈值 (设0仅看P与FC)", value=1.0, min_value=0.0, step=0.10, help="默认 1.0；若设为 0.0 则与 MetaboAnalyst 单变量火山图筛选标准完全一致")
     submit_button = st.form_submit_button(label='🚀 执行分析')
 
 
@@ -474,14 +518,6 @@ def generate_custom_heatmap(
     scope_mode="pairwise", hm_type="sample_sorted",
     top_n=40, show_row_mode=True, show_cell_values=False
 ):
-    """
-    返回值: (png_bytes, pdf_bytes, err_msg)
-    采用动态坐标隔离技术：
-      1. 颜色条 (cbar) 独立安置于左侧行聚类树外侧，刻度朝左，绝不触碰分组色条与热图；
-      2. 图例 (legend) 动态悬停于最高绘图轴正上方空白区，自适应多行；
-      3. 清除 row_colors 底部 'Mode' 文字并启用 X 轴标签 rotation_mode='anchor' 锚点对齐，彻底消除左下角文字重叠；
-      4. 超长化合物名称智能省略中间部分，100% 保留末尾 [采集模式] 标签。
-    """
     if out_df is None or out_df.empty:
         return None, None, "当前筛选阈值下无显著差异代谢物。"
 
@@ -495,7 +531,6 @@ def generate_custom_heatmap(
     modes_list = sub_out.get('Source_Mode', pd.Series(['Global']*len(hm_feats), index=hm_feats)).astype(str).tolist()
     display_names = make_unique([format_hm_row_label(n, m, max_chem_len=48) for n, m in zip(raw_names, modes_list)])
 
-    # 1. 根据样本范围筛选数据行
     df_scope = df_all_unscaled.copy()
     if scope_mode == "pairwise":
         df_scope = df_scope[df_scope[group_col].isin(sel_grps)].copy()
@@ -510,7 +545,6 @@ def generate_custom_heatmap(
     df_scope['__grp_order__'] = df_scope[group_col].astype(str).map({g: idx for idx, g in enumerate(ordered_grps)})
     df_scope = df_scope.sort_values(by=['__grp_order__', 'SampleID']).drop(columns=['__grp_order__']).reset_index(drop=True)
 
-    # 构建左侧采集模式颜色条 (不设置 Series.name，避免底部打印 'Mode' 与样本名重叠)
     unique_modes = list(dict.fromkeys(modes_list))
     mode_lut = {m: MODE_COLORS[i % len(MODE_COLORS)] for i, m in enumerate(unique_modes)}
     row_colors_series = pd.Series([mode_lut[m] for m in modes_list], index=display_names) if (show_row_mode and len(unique_modes) > 1) else None
@@ -585,7 +619,6 @@ def generate_custom_heatmap(
                 legend_handles += [mpatches.Patch(color=mode_lut[m], label=f"Mode: {m}") for m in unique_modes]
 
         else:
-            # 类型 1 & 2：单样本明细热图 (使用纯净 SampleID，顶部颜色条已清晰标识分组)
             sample_col_labels = make_unique(df_scope['SampleID'].astype(str).tolist())
             hm_raw = df_scope[hm_feats].T.astype(float)
             hm_raw.columns = sample_col_labels
@@ -616,7 +649,6 @@ def generate_custom_heatmap(
                 annot=(show_cell_values and n_samps <= 15 and len(hm_feats) <= 25), fmt=".1f"
             )
             
-            # 样本较多时自动采用 60° 锚点对齐旋转，彻底杜绝相邻样本名粘连
             rot_angle = 45 if n_samps <= 18 else (60 if n_samps <= 36 else 90)
             ha_mode = "right" if rot_angle < 90 else "center"
             plt.setp(
@@ -631,7 +663,6 @@ def generate_custom_heatmap(
             if row_colors_series is not None:
                 legend_handles += [mpatches.Patch(color=mode_lut[m], label=f"Mode: {m}") for m in unique_modes]
 
-        # 清理热图与色条上的冗余坐标轴标签，彻底消除左下角 'Mode' 与样本名重叠
         g.ax_heatmap.set_xlabel("")
         g.ax_heatmap.set_ylabel("")
         if getattr(g, 'ax_row_colors', None) is not None:
@@ -643,7 +674,6 @@ def generate_custom_heatmap(
         if not do_col_cluster and getattr(g, 'ax_col_dendrogram', None) is not None:
             g.ax_col_dendrogram.set_visible(False)
 
-        # 强制刷新画布以获取各组件的真实物理坐标
         g.fig.canvas.draw()
         hm_box = g.ax_heatmap.get_position()
         left_edge = g.ax_row_dendrogram.get_position().x0 if (do_row_cluster and getattr(g, 'ax_row_dendrogram', None) is not None) else hm_box.x0
@@ -654,7 +684,6 @@ def generate_custom_heatmap(
         if do_col_cluster and getattr(g, 'ax_col_dendrogram', None) is not None:
             top_edge = max(top_edge, g.ax_col_dendrogram.get_position().y1)
 
-        # 1. 将 Z-Score 颜色条移至左侧聚类树最左方独立区域（垂直居中，刻度与标题朝左）
         if getattr(g, 'ax_cbar', None) is not None:
             cbar_w = 0.016
             cbar_h = min(0.26, hm_box.height * 0.42)
@@ -666,7 +695,6 @@ def generate_custom_heatmap(
             g.ax_cbar.yaxis.set_label_position('left')
             g.ax_cbar.tick_params(labelsize=8.5)
 
-        # 2. 将分组与模式图例安置于最高组件正上方的独立空白区，绝不遮挡任何色条或散点
         if legend_handles:
             ncol_leg = min(5, max(2, len(legend_handles)))
             g.fig.legend(
@@ -680,7 +708,6 @@ def generate_custom_heatmap(
                 fontsize=9
             )
 
-        # 同时导出 300 DPI PNG 与 出版级矢量 PDF 二进制流 (pad_inches 留出舒适白边)
         buf_png = io.BytesIO()
         g.savefig(buf_png, format='png', dpi=300, bbox_inches='tight', pad_inches=0.25)
         png_bytes = buf_png.getvalue()
@@ -697,17 +724,27 @@ def generate_custom_heatmap(
 
 
 # ==========================================
-# 辅助函数 3：单矩阵统计建模与图表生成
+# 辅助函数 3：单矩阵统计建模与图表生成 (对齐 MetaboAnalyst Log2_FC 与 T 检验)
 # ==========================================
-def run_single_matrix_modeling(df_proc, df_unscaled_log2, feats, meta, group_col, sel_grps, case, ctrl, p_th, fc_th, vip_show_num, mode_title=""):
+def run_single_matrix_modeling(
+    df_proc, df_unscaled_log2, feats, meta, group_col,
+    sel_grps, case, ctrl, p_th, fc_th, vip_th, vip_show_num,
+    equal_var=True, mode_title=""
+):
     prefix = f"[{mode_title}] " if mode_title else ""
     df_sub = df_proc[df_proc[group_col].isin(sel_grps)].copy()
     df_log_sub = df_unscaled_log2[df_unscaled_log2[group_col].isin(sel_grps)].copy()
     
+    linear_full = df_unscaled_log2.attrs.get('linear_norm_df', None)
+    df_lin_sub = linear_full[linear_full[group_col].isin(sel_grps)].copy() if linear_full is not None else None
+    
     if len(df_sub) < 4: raise ValueError(f"{prefix}样本数太少 ({len(df_sub)}个)，无法建模。")
     if len(feats) < 2: raise ValueError(f"{prefix}有效特征太少 ({len(feats)}个)，无法建模。")
 
-    stats_df = run_pairwise_statistics(df_sub, group_col, case, ctrl, feats, df_unscaled_log2=df_log_sub)
+    stats_df = run_pairwise_statistics(
+        df_sub, group_col, case, ctrl, feats,
+        equal_var=equal_var, df_unscaled_log2=df_log_sub, df_linear_norm=df_lin_sub
+    )
     
     if meta is not None and 'Clean_Name' in meta.columns: 
         merge_cols = [c for c in ['Clean_Name', 'Original_Name', 'KEGG_ID', 'Source_Mode', 'Detected_Modes'] if c in meta.columns]
@@ -751,7 +788,7 @@ def run_single_matrix_modeling(df_proc, df_unscaled_log2, feats, meta, group_col
     vip_df = pd.DataFrame({'Metabolite': feats, 'VIP': opls.vip, 'p_corr': opls.p_corr})
     stats_df = stats_df.merge(vip_df, on='Metabolite')
     stats_df['Name_With_Mode'] = stats_df['Name'].astype(str) + " [" + stats_df['Source_Mode'].astype(str) + "]"
-    stats_df['Is_Biomarker'] = (stats_df['VIP'] > 1.0) & (stats_df['P_Value'] < p_th) & (stats_df['Log2_FC'].abs() > fc_th)
+    stats_df['Is_Biomarker'] = (stats_df['VIP'] >= vip_th) & (stats_df['P_Value'] < p_th) & (stats_df['Log2_FC'].abs() > fc_th)
     out_df = stats_df[stats_df['Is_Biomarker']].sort_values('VIP', ascending=False).copy()
 
     # 1. OPLS-DA 得分图
@@ -779,11 +816,12 @@ def run_single_matrix_modeling(df_proc, df_unscaled_log2, feats, meta, group_col
 
     # 3. S-Plot
     splot_df = stats_df.copy()
-    splot_df['Color'] = np.where(splot_df['Is_Biomarker'], f'VIP>1 & P<{p_th}', 'NS')
+    sig_label_str = f'VIP≥{vip_th} & P<{p_th}'
+    splot_df['Color'] = np.where(splot_df['Is_Biomarker'], sig_label_str, 'NS')
     fig_splot = px.scatter(
         splot_df, x='Log2_FC', y='p_corr', color='Color',
         hover_name='Name_With_Mode', hover_data=['Source_Mode', 'VIP', 'P_Value'],
-        color_discrete_map={f'VIP>1 & P<{p_th}': '#CD0000', 'NS': '#E0E0E0'}
+        color_discrete_map={sig_label_str: '#CD0000', 'NS': '#E0E0E0'}
     )
     fig_splot.add_hline(y=0.5, line_dash="dash", line_color="gray"); fig_splot.add_hline(y=-0.5, line_dash="dash", line_color="gray")
     fig_splot = update_layout_square(fig_splot, f"{prefix}S-Plot", "Log2 Fold Change", "p(corr)")
@@ -792,7 +830,8 @@ def run_single_matrix_modeling(df_proc, df_unscaled_log2, feats, meta, group_col
     top_vip_df = stats_df.sort_values('VIP', ascending=True).tail(vip_show_num).copy()
     top_vip_df['VIP_Label'] = make_unique(top_vip_df['Name_With_Mode'].tolist())
     fig_vip = px.bar(top_vip_df, x="VIP", y="VIP_Label", orientation='h', color="VIP", hover_data=['Source_Mode', 'Log2_FC', 'P_Value'], color_continuous_scale="RdBu_r")
-    fig_vip.add_vline(x=1.0, line_dash="dash", line_color="black")
+    if vip_th > 0:
+        fig_vip.add_vline(x=vip_th, line_dash="dash", line_color="black")
     fig_vip.update_layout(template="simple_white", width=820, height=700, title={'text': f"{prefix}Top VIP Scores", 'x':0.5, 'xanchor': 'center'}, yaxis_title="Metabolite [Mode]", coloraxis_showscale=False)
 
     # 5. PCA 图
@@ -837,6 +876,16 @@ if submit_button:
     plt.close('all')
     use_mode_b = integration_mode.startswith("模式 B") and (len(mode_datasets) > 1)
     bg_mode_key = "reference" if kegg_bg_option.startswith("物种全库") else "experimental"
+    filter_mode_code = 'per_group' if miss_filter_rule.startswith("组内修正") else 'global'
+    equal_var_flag = ttest_var_label.startswith("Student")
+    impute_code_map = {
+        "1/5 Min (LoD, 同 MetaboAnalyst 默认)": "lod_1_5",
+        "1/2 Min": "min",
+        "KNN (K近邻插补)": "KNN",
+        "mean (均值)": "mean",
+        "zero (极小常数)": "zero"
+    }
+    impute_m = impute_code_map.get(impute_label, "lod_1_5")
 
     with st.spinner("正在运行代谢组学统计与通路分析引擎..."):
         try:
@@ -854,7 +903,8 @@ if submit_button:
                         m_norm, m_feats = data_cleaning_pipeline(
                             m_df, group_col, missing_thresh=miss_th,
                             impute_method=impute_m, norm_method=norm_m,
-                            log_transform=False, scale_method='None'
+                            log_transform=False, scale_method='None',
+                            target_groups=sel_grps, filter_mode=filter_mode_code
                         )
                         m_meta_sub = m_meta.loc[m_meta.index.intersection(m_feats)].copy()
                         normed_mode_list.append((m_norm, m_meta_sub, m_tag))
@@ -865,8 +915,9 @@ if submit_button:
                     merged_norm_df[group_col] = merged_norm_df['SampleID'].map(grp_map).fillna('Unknown')
                     df_proc, feats, df_unscaled_log2 = data_cleaning_pipeline(
                         merged_norm_df, group_col, missing_thresh=1.0,
-                        impute_method='zero', norm_method='None',
-                        log_transform=do_log, scale_method=scale_m, return_unscaled=True
+                        impute_method=impute_m, norm_method='None',
+                        log_transform=do_log, scale_method=scale_m,
+                        return_unscaled=True, target_groups=sel_grps, filter_mode=filter_mode_code
                     )
                 else:
                     raw_df = st.session_state.raw_df
@@ -874,12 +925,14 @@ if submit_button:
                     df_proc, feats, df_unscaled_log2 = data_cleaning_pipeline(
                         raw_df, group_col, missing_thresh=miss_th, 
                         impute_method=impute_m, norm_method=norm_m, 
-                        log_transform=do_log, scale_method=scale_m, return_unscaled=True
+                        log_transform=do_log, scale_method=scale_m,
+                        return_unscaled=True, target_groups=sel_grps, filter_mode=filter_mode_code
                     )
 
                 global_res = run_single_matrix_modeling(
                     df_proc, df_unscaled_log2, feats, meta, group_col,
-                    sel_grps, case, ctrl, p_th, fc_th, vip_show_num
+                    sel_grps, case, ctrl, p_th, fc_th, vip_th, vip_show_num,
+                    equal_var=equal_var_flag
                 )
                 df_sub = global_res['df_sub']
                 df_all_unscaled = df_unscaled_log2.copy()
@@ -903,14 +956,17 @@ if submit_button:
                 unscaled_all_dfs = []
 
                 for m_df, m_meta, m_tag in mode_datasets:
+                    n_raw_m = len([c for c in m_df.columns if c not in ['SampleID', 'Group', 'Source_Files']])
                     m_proc, m_feats, m_unscaled_log2 = data_cleaning_pipeline(
                         m_df, group_col, missing_thresh=miss_th,
                         impute_method=impute_m, norm_method=norm_m,
-                        log_transform=do_log, scale_method=scale_m, return_unscaled=True
+                        log_transform=do_log, scale_method=scale_m,
+                        return_unscaled=True, target_groups=sel_grps, filter_mode=filter_mode_code
                     )
                     m_res = run_single_matrix_modeling(
                         m_proc, m_unscaled_log2, m_feats, m_meta, group_col,
-                        sel_grps, case, ctrl, p_th, fc_th, vip_show_num, mode_title=m_tag
+                        sel_grps, case, ctrl, p_th, fc_th, vip_th, vip_show_num,
+                        equal_var=equal_var_flag, mode_title=m_tag
                     )
                     mode_results[m_tag] = m_res
                     
@@ -919,7 +975,8 @@ if submit_button:
                     diag_str = "优秀" if (m_res['b_q2'] < 0.05 and m_res['Q2'] > 0.5) else ("局部差异(未过拟合)" if m_res['b_q2'] < 0.05 else "过拟合风险")
                     mode_summary_rows.append({
                         '采集模式': m_tag,
-                        '特征数': len(m_feats),
+                        '原始特征数': n_raw_m,
+                        '清洗保留特征数': len(m_feats),
                         '显著差异物总数': len(m_res['out_df']),
                         '上调 (Up)': n_up,
                         '下调 (Down)': n_down,
@@ -972,7 +1029,8 @@ if submit_button:
                     top_vip_merged = out_df.sort_values('VIP', ascending=True).tail(vip_show_num).copy()
                     top_vip_merged['Display_Name'] = make_unique(top_vip_merged['Name_With_Mode'].tolist())
                     fig_vip = px.bar(top_vip_merged, x="VIP", y="Display_Name", orientation='h', color="VIP", hover_data=['Detected_Modes', 'Log2_FC', 'P_Value'], color_continuous_scale="RdBu_r")
-                    fig_vip.add_vline(x=1.0, line_dash="dash", line_color="black")
+                    if vip_th > 0:
+                        fig_vip.add_vline(x=vip_th, line_dash="dash", line_color="black")
                     fig_vip.update_layout(template="simple_white", width=820, height=700, title={'text': "Merged Top Biomarkers VIP (Across Modes)", 'x':0.5, 'xanchor': 'center'}, yaxis_title="Metabolite [Best Mode]", coloraxis_showscale=False)
                 else:
                     fig_vip = mode_results[best_m]['fig_vip']
@@ -1075,6 +1133,10 @@ if submit_button:
                             fig_network = go.Figure(data=[edge_trace, node_trace])
                             fig_network.update_layout(title={'text': "Mechanism Network (Pathway - Metabolite [Mode])", 'y':0.95, 'x':0.5, 'xanchor': 'center'}, showlegend=False, xaxis=dict(showgrid=False, zeroline=False, showticklabels=False), yaxis=dict(showgrid=False, zeroline=False, showticklabels=False), width=900, height=700, plot_bgcolor='white')
 
+            # 为 report_generator 兼容保留 '特征数' 别名列
+            if mode_summary_df is not None and '清洗保留特征数' in mode_summary_df.columns:
+                mode_summary_df['特征数'] = mode_summary_df['清洗保留特征数']
+
             html_report = generate_offline_html(
                 case, ctrl, feats if not use_mode_b else [], p_th, fc_th, norm_m, scale_m, R2Y, Q2, b_q2,
                 out_df, pathway_df, fig_opls, fig_perm, fig_splot, fig_vip, fig_vol, fig_pca,
@@ -1087,7 +1149,8 @@ if submit_button:
 
             st.session_state['analysis_res'] = {
                 'case': case, 'ctrl': ctrl, 'sel_grps': sel_grps, 'group_col': group_col,
-                'p_th': p_th, 'fc_th': fc_th,
+                'p_th': p_th, 'fc_th': fc_th, 'vip_th': vip_th,
+                'retained_count': len(stats_df),
                 'R2Y': R2Y, 'Q2': Q2, 'b_q2': b_q2,
                 'use_mode_b': use_mode_b, 'mode_results': mode_results, 'mode_summary_df': mode_summary_df,
                 'stats_df': stats_df, 'combined_all_stats': combined_all_stats,
@@ -1114,9 +1177,15 @@ if 'analysis_res' in st.session_state:
     st.title("📊 综合代谢组学分析报告")
     if res.get('use_mode_b') and res.get('mode_summary_df') is not None:
         st.markdown(f"**对比**: `{res['case']}` vs `{res['ctrl']}` &nbsp;&nbsp;|&nbsp;&nbsp; **整合流派**: `模式 B (各采集模式独立统计建模 ➔ 差异物去重富集)` &nbsp;&nbsp;|&nbsp;&nbsp; **去重后总差异代谢物**: `{len(res['out_df'])}` 个")
-        st.dataframe(res['mode_summary_df'].style.format({"R2Y": "{:.3f}", "Q2": "{:.3f}", "Q2截距": "{:.3f}"}), width='stretch')
+        disp_sum_df = res['mode_summary_df'].drop(columns=['特征数'], errors='ignore')
+        st.dataframe(disp_sum_df.style.format({"R2Y": "{:.3f}", "Q2": "{:.3f}", "Q2截距": "{:.3f}"}), width='stretch')
     else:
-        st.markdown(f"**对比**: `{res['case']}` vs `{res['ctrl']}` &nbsp;&nbsp;|&nbsp;&nbsp; **模型**: R²Y = `{res['R2Y']:.3f}` &nbsp;&nbsp;|&nbsp;&nbsp; Q² = `{res['Q2']:.3f}` &nbsp;&nbsp;|&nbsp;&nbsp; **显著差异物**: `{len(res['out_df'])}` 个")
+        st.markdown(
+            f"**对比**: `{res['case']}` vs `{res['ctrl']}` &nbsp;&nbsp;|&nbsp;&nbsp; "
+            f"**清洗后保留特征**: `{res.get('retained_count', len(res['stats_df']))}` 个 &nbsp;&nbsp;|&nbsp;&nbsp; "
+            f"**模型**: R²Y = `{res['R2Y']:.3f}` &nbsp;|&nbsp; Q² = `{res['Q2']:.3f}` &nbsp;&nbsp;|&nbsp;&nbsp; "
+            f"**显著差异物**: `{len(res['out_df'])}` 个"
+        )
         b_q2_val, q2_val = res['b_q2'], res['Q2']
         if b_q2_val < 0.05 and q2_val > 0.5:
             st.success(f"✅ OPLS-DA 模型预测能力强，且未发生过拟合 (Q²={q2_val:.3f}, 截距={b_q2_val:.3f})")
@@ -1349,12 +1418,17 @@ if 'analysis_res' in st.session_state:
                         st.download_button(f"📥 导出 [{m}] 显著差异代谢物 (.csv)", m_out[m_cols].to_csv(index=False).encode('utf-8-sig'), f"Biomarkers_{safe_m}_{safe_case_str}_vs_{safe_ctrl_str}.csv", "text/csv", key=f"dl_sig_{m}")
                     with c_dl2:
                         st.download_button(f"📥 导出 [{m}] 全特征完整统计表 (.csv)", m_stats[m_cols].to_csv(index=False).encode('utf-8-sig'), f"All_Stats_{safe_m}_{safe_case_str}_vs_{safe_ctrl_str}.csv", "text/csv", key=f"dl_all_{m}")
-                    with st.expander(f"展开查看模式 `{m}` 全部 {len(m_stats)} 个特征的统计结果"):
+                    with st.expander(f"展开查看模式 `{m}` 全部 {len(m_stats)} 个清洗后特征的统计结果"):
                         st.dataframe(m_stats[m_cols].style.format({"Log2_FC":"{:.2f}", "P_Value":"{:.3e}", "FDR":"{:.3e}", "VIP":"{:.2f}", "p_corr":"{:.2f}"}), width='stretch')
         else:
-            st.markdown("### 🏆 显著差异生物标志物清单")
+            st.markdown(f"### 🏆 显著差异生物标志物清单 (共 {len(res['out_df'])} 个 / 清洗后背景特征 {len(res['stats_df'])} 个)")
             st.dataframe(res['out_df'][show_cols].style.format({"Log2_FC":"{:.2f}", "P_Value":"{:.3e}", "FDR":"{:.3e}", "VIP":"{:.2f}", "p_corr":"{:.2f}"}).background_gradient(subset=['VIP'], cmap="Reds"), width='stretch')
-            st.download_button("📥 导出差异代谢物清单 (.csv)", res['out_df'][show_cols].to_csv(index=False).encode('utf-8-sig'), f"Biomarkers_{safe_case_str}_vs_{safe_ctrl_str}.csv", "text/csv", key="dl_single_bio")
+            c_s1, c_s2 = st.columns(2)
+            with c_s1:
+                st.download_button("📥 导出显著差异代谢物清单 (.csv)", res['out_df'][show_cols].to_csv(index=False).encode('utf-8-sig'), f"Biomarkers_{safe_case_str}_vs_{safe_ctrl_str}.csv", "text/csv", key="dl_single_bio")
+            with c_s2:
+                all_cols = [c for c in ['Name', 'Source_Mode', 'Detected_Modes', 'Log2_FC', 'P_Value', 'FDR', 'VIP', 'p_corr', 'Sig'] if c in res['stats_df'].columns]
+                st.download_button("📥 导出全特征完整统计表 (.csv)", res['stats_df'][all_cols].to_csv(index=False).encode('utf-8-sig'), f"All_Stats_{safe_case_str}_vs_{safe_ctrl_str}.csv", "text/csv", key="dl_single_all")
         
     with tabs[8]:
         c1, c2 = st.columns([1, 6])
