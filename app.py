@@ -375,7 +375,7 @@ with st.form(key='analysis_form'):
     with st.expander("图表设置", expanded=False):
         c_t1, c_t2, c_t3, c_t4 = st.columns(4)
         vip_show_num = c_t1.slider("VIP 展示数", 10, 50, 25)
-        vol_label_num = c_t2.slider("火山图直接标注数", 0, 30, 12, help="在火山图上直接显示『化合物名 [模式]』文字标签的 Top 差异物数量")
+        vol_label_num = c_t2.slider("火山图直接标注数", 0, 30, 10, help="在火山图上直接显示『化合物名 [模式]』文字标签的 Top 差异物数量")
         nomo_num = c_t3.slider("列线图标志物数", 2, 8, 4)
         pw_show_num = c_t4.slider("网络图通路数", 5, 30, 15)
 
@@ -394,7 +394,7 @@ with st.form(key='analysis_form'):
 # ==========================================
 # 辅助函数：构建带模式标注与形状区分的火山图
 # ==========================================
-def build_volcano_figure(stats_df, p_th, fc_th, title="Volcano Plot", top_label_n=12):
+def build_volcano_figure(stats_df, p_th, fc_th, title="Volcano Plot", top_label_n=10):
     plot_df = stats_df.copy()
     if 'Source_Mode' not in plot_df.columns:
         plot_df['Source_Mode'] = 'Global'
@@ -426,29 +426,33 @@ def build_volcano_figure(stats_df, p_th, fc_th, title="Volcano Plot", top_label_
 
     # 在火山图上直接为 Top 显著差异标志物标注 "化合物名 [采集模式]"
     if top_label_n > 0:
-        sig_sub = plot_df[plot_df.get('Is_Biomarker', plot_df['Sig'] != 'NS')].copy()
+        if 'Is_Biomarker' in plot_df.columns:
+            sig_sub = plot_df[plot_df['Is_Biomarker'] == True].copy()
+        else:
+            sig_sub = plot_df[plot_df['Sig'] != 'NS'].copy()
         if sig_sub.empty:
             sig_sub = plot_df[plot_df['Sig'] != 'NS'].copy()
         if not sig_sub.empty:
-            top_annot = sig_sub.sort_values(['P_Value', 'VIP'], ascending=[True, False]).head(top_label_n)
+            top_annot = sig_sub.sort_values(['P_Value', 'VIP'], ascending=[True, False]).head(int(top_label_n))
             for _, r in top_annot.iterrows():
                 fig_vol.add_annotation(
-                    x=r['Log2_FC'], y=r['-Log10_P'],
-                    text=f"<b>{r['Name']}</b> [{r['Source_Mode']}]",
+                    x=float(r['Log2_FC']), y=float(r['-Log10_P']),
+                    text=f"{r['Name']} [{r['Source_Mode']}]",
                     showarrow=True, arrowhead=1, arrowsize=0.8, arrowwidth=1,
-                     arrowcolor="#555", ax=0, ay=-22,
+                    arrowcolor="#555", ax=0, ay=-20,
                     font=dict(size=10, color="#222"),
-                    bgcolor="rgba(255,255,255,0.75)"
+                    bgcolor="rgba(255,255,255,0.8)"
                 )
 
     fig_vol = update_layout_square(fig_vol, title, "Log2 FC", "-Log10(P)")
+    fig_vol.update_layout(width=720, height=650)
     return fig_vol
 
 
 # ==========================================
 # 辅助函数：单矩阵统计建模与图表生成
 # ==========================================
-def run_single_matrix_modeling(df_proc, df_unscaled_log2, feats, meta, group_col, sel_grps, case, ctrl, p_th, fc_th, vip_show_num, vol_label_num=12, mode_title=""):
+def run_single_matrix_modeling(df_proc, df_unscaled_log2, feats, meta, group_col, sel_grps, case, ctrl, p_th, fc_th, vip_show_num, vol_label_num=10, mode_title=""):
     prefix = f"[{mode_title}] " if mode_title else ""
     df_sub = df_proc[df_proc[group_col].isin(sel_grps)].copy()
     df_log_sub = df_unscaled_log2[df_unscaled_log2[group_col].isin(sel_grps)].copy()
@@ -680,7 +684,7 @@ if submit_button:
                     if not m_res['out_df'].empty:
                         all_mode_out_dfs.append(m_res['out_df'])
                     
-                    m_sub_idx = m_res['df_sub'].set_index('SampleID')
+                    m_sub_idx = m_res['df_sub'].drop_duplicates(subset=['SampleID']).set_index('SampleID')
                     scaled_sub_dfs.append((m_sub_idx, m_feats))
 
                 # 构建模式 B 跨模式汇总火山图 (展示所有模式的特征分布及模式来源)
@@ -729,22 +733,20 @@ if submit_button:
             mode_summary_df = pd.DataFrame(mode_summary_rows) if mode_summary_rows else None
 
             # ==========================================================
-            # 公共下游 1：300 DPI 高清聚类热图 (修复 col_colors 重复索引崩溃 Bug，行名附带模式标签)
+            # 公共下游 1：300 DPI 高清聚类热图 (生成稳定 Base64 PNG 二进制流，独立标签页展示)
             # ==========================================================
-            hm_fig, hm_base64 = None, ""
+            hm_base64 = ""
             sig_mets = [m for m in out_df['Metabolite'].tolist() if m in df_sub.columns]
             if sig_mets:
                 hm_feats = sig_mets[:50]
                 label_lookup = dict(zip(out_df['Metabolite'], out_df.get('Name_With_Mode', out_df['Name'])))
                 df_sub_sorted = df_sub.sort_values(by=[group_col, 'SampleID']).reset_index(drop=True)
                 
-                # 使用唯一的样本标签作为热图列名，彻底解决 Seaborn col_colors 因重复 Group 索引报错的问题
                 sample_col_labels = make_unique([f"{sid} ({grp})" for sid, grp in zip(df_sub_sorted['SampleID'], df_sub_sorted[group_col])])
                 hm_raw = df_sub_sorted[hm_feats].T.astype(float)
                 hm_raw.columns = sample_col_labels
                 hm_raw.index = make_unique([str(label_lookup.get(f, f)) for f in hm_raw.index])
                 
-                # 手动安全执行行方向 Z-score 标准化，避免常数行导致 clustermap 除以 0 崩溃
                 row_mean = hm_raw.mean(axis=1)
                 row_std = hm_raw.std(axis=1).replace(0, 1.0)
                 hm_z = hm_raw.sub(row_mean, axis=0).div(row_std, axis=0).replace([np.inf, -np.inf], np.nan).fillna(0)
@@ -758,22 +760,23 @@ if submit_button:
                 )
                 
                 try:
+                    plt.close('all')
                     g = sns.clustermap(
                         hm_z, z_score=None, cmap="vlag", center=0, 
                         col_colors=col_colors_series,
-                        figsize=(9, max(6, min(14, len(hm_feats) * 0.28 + 3))),
+                        figsize=(10, max(6.5, min(16, len(hm_feats) * 0.30 + 3))),
                         row_cluster=(len(hm_feats) >= 2), col_cluster=False
                     )
                     g.ax_heatmap.set_xlabel("")
                     g.ax_heatmap.set_ylabel("")
                     plt.setp(g.ax_heatmap.get_xticklabels(), rotation=45, ha="right", fontsize=9)
                     plt.setp(g.ax_heatmap.get_yticklabels(), fontsize=9)
-                    hm_fig = g.fig
                     
                     buf = io.BytesIO()
                     g.savefig(buf, format='png', dpi=300, bbox_inches='tight')
                     buf.seek(0)
                     hm_base64 = base64.b64encode(buf.read()).decode('utf-8')
+                    plt.close(g.fig)
                 except Exception as hm_err:
                     st.warning(f"⚠️ 热图渲染提示: {str(hm_err)}")
 
@@ -874,7 +877,7 @@ if submit_button:
                 'fig_vol_merged_b': fig_vol_merged_b,
                 'fig_opls': fig_opls, 'fig_perm': fig_perm, 'fig_splot': fig_splot,
                 'fig_vip': fig_vip, 'fig_pca': fig_pca, 'fig_vol': fig_vol,
-                'hm_fig': hm_fig, 'out_df': out_df, 'pathway_df': pathway_df,
+                'hm_base64': hm_base64, 'out_df': out_df, 'pathway_df': pathway_df,
                 'filtered_db_df': filtered_db_df, 
                 'fig_nomogram': fig_nomogram, 'fig_pathway': fig_pathway, 'fig_network': fig_network,
                 'html_report': html_report, 'prompt_md': prompt_md
@@ -884,7 +887,7 @@ if submit_button:
             with st.expander("点击查看详细报错日志"): st.code(traceback.format_exc())
 
 # ==========================================
-# 5. UI 展示层 (自动适配单模型与分模式独立图表及四表展示)
+# 5. UI 展示层 (火山图与聚类热图拆分为独立全宽标签页)
 # ==========================================
 if 'analysis_res' in st.session_state:
     res = st.session_state['analysis_res']
@@ -910,11 +913,11 @@ if 'analysis_res' in st.session_state:
             if include_merged_vol and res.get('fig_vol_merged_b') is not None:
                 sub_tabs = st.tabs(["🌐 四模式汇总火山图"] + [f"🔬 {m}" for m in m_names])
                 with sub_tabs[0]:
-                    st.plotly_chart(res['fig_vol_merged_b'], key="vol_merged_all_modes", width='stretch')
+                    st.plotly_chart(res['fig_vol_merged_b'], key="vol_merged_all_modes")
                 for idx, m in enumerate(m_names):
                     with sub_tabs[idx + 1]:
                         fig_obj = res['mode_results'][m].get(fig_key)
-                        if fig_obj: st.plotly_chart(fig_obj, key=f"{fig_key}_{m}", width='stretch')
+                        if fig_obj: st.plotly_chart(fig_obj, key=f"{fig_key}_{m}")
                         else: st.warning("图表生成失败")
             else:
                 sub_tabs = st.tabs([f"🔬 {m}" for m in m_names])
@@ -927,18 +930,32 @@ if 'analysis_res' in st.session_state:
             if res.get(fig_key): st.plotly_chart(res[fig_key], key=f"{fig_key}_global")
             else: st.warning("图表生成失败")
 
-    tabs = st.tabs(["🎯 OPLS-DA", "🔄 置换检验", "🧬 S-Plot", "📊 VIP", "🌐 PCA", "🌋 火山/热图", "📑 清单", "📏 列线图", "🕸️ 通路富集", "🔗 机制网络图", "📄 导出报告"])
+    # 拆分为 12 个独立标签页：火山图 (tabs[5]) 与 聚类热图 (tabs[6]) 完全分开显示
+    tabs = st.tabs([
+        "🎯 OPLS-DA",
+        "🔄 置换检验",
+        "🧬 S-Plot",
+        "📊 VIP",
+        "🌐 PCA",
+        "🌋 火山图",
+        "🔥 聚类热图",
+        "📑 清单",
+        "📏 列线图",
+        "🕸️ 通路富集",
+        "🔗 机制网络图",
+        "📄 导出报告"
+    ])
     
     with tabs[0]:
-        c1, c2 = st.columns([1, 4])
+        c1, c2 = st.columns([1, 5])
         with c2: render_mode_chart('fig_opls')
             
     with tabs[1]:
-        c1, c2 = st.columns([1, 4])
+        c1, c2 = st.columns([1, 5])
         with c2: render_mode_chart('fig_perm')
             
     with tabs[2]:
-        c1, c2 = st.columns([1, 4])
+        c1, c2 = st.columns([1, 5])
         with c2: render_mode_chart('fig_splot')
             
     with tabs[3]:
@@ -958,18 +975,35 @@ if 'analysis_res' in st.session_state:
                 else: st.warning("图表生成失败")
             
     with tabs[4]:
-        c1, c2 = st.columns([1, 4])
+        c1, c2 = st.columns([1, 5])
         with c2: render_mode_chart('fig_pca')
             
+    # 独立标签页 1：🌋 火山图 (全宽展示，带模式形状与化合物[模式]标签)
     with tabs[5]:
-        c1, c2 = st.columns(2)
-        with c1: render_mode_chart('fig_vol', include_merged_vol=True)
-        with c2: 
-            st.markdown("##### 🔥 显著差异代谢物聚类热图 (含来源模式标识)")
-            if res['hm_fig']: st.pyplot(res['hm_fig']) 
-            else: st.info("无满足要求的显著差异代谢物")
+        c1, c2 = st.columns([1, 6])
+        with c2:
+            render_mode_chart('fig_vol', include_merged_vol=True)
             
+    # 独立标签页 2：🔥 聚类热图 (全宽展示 Base64 PNG 二进制图，永不丢失，自带 300DPI 下载按钮)
     with tabs[6]:
+        st.markdown("#### 🔥 显著差异代谢物分层聚类热图 (Top 50, 附带来源模式标识)")
+        hm_b64_str = res.get('hm_base64', '')
+        if hm_b64_str:
+            hm_bytes = base64.b64decode(hm_b64_str)
+            st.download_button(
+                "📸 下载 300 DPI 出版级高清热图 (.png)",
+                data=hm_bytes,
+                file_name=f"Heatmap_{res['case']}_vs_{res['ctrl']}_300DPI.png",
+                mime="image/png",
+                type="primary"
+            )
+            c_h1, c_h2, c_h3 = st.columns([1, 5, 1])
+            with c_h2:
+                st.image(hm_bytes, caption=f"Top Significant Differential Metabolites Heatmap ({res['case']} vs {res['ctrl']})")
+        else:
+            st.info("当前筛选阈值下无显著差异代谢物，无法生成聚类热图。")
+            
+    with tabs[7]:
         show_cols = [c for c in ['Name', 'Source_Mode', 'Detected_Modes', 'Log2_FC', 'P_Value', 'FDR', 'VIP', 'p_corr'] if c in res['out_df'].columns]
         if res.get('use_mode_b') and res.get('mode_results'):
             m_names = list(res['mode_results'].keys())
@@ -1001,13 +1035,13 @@ if 'analysis_res' in st.session_state:
             st.dataframe(res['out_df'][show_cols].style.format({"Log2_FC":"{:.2f}", "P_Value":"{:.3e}", "FDR":"{:.3e}", "VIP":"{:.2f}", "p_corr":"{:.2f}"}).background_gradient(subset=['VIP'], cmap="Reds"), width='stretch')
             st.download_button("📥 导出差异代谢物清单 (.csv)", res['out_df'][show_cols].to_csv(index=False).encode('utf-8-sig'), f"Biomarkers_{res['case']}_vs_{res['ctrl']}.csv", "text/csv", key="dl_single_bio")
         
-    with tabs[7]:
+    with tabs[8]:
         c1, c2 = st.columns([1, 6])
         with c2:
             if res['fig_nomogram']: st.plotly_chart(res['fig_nomogram'], key="nomo_main")
             else: st.warning("⚠️ 显著差异代谢物不足 2 个或分组异常，无法构建列线图。")
             
-    with tabs[8]:
+    with tabs[9]:
         if 'filtered_db_df' in res and not res['filtered_db_df'].empty:
             st.download_button("📥 导出专属 MA 背景库", res['filtered_db_df'].to_csv(index=False, header=False, quoting=csv.QUOTE_ALL).encode('utf-8'), f"MA_Background_{res['case']}_{res['ctrl']}.csv", "text/csv", type="primary")
         c1, c2 = st.columns([1, 6])
@@ -1017,11 +1051,11 @@ if 'analysis_res' in st.session_state:
                 if res['fig_pathway']: st.plotly_chart(res['fig_pathway'], key="pw_main")
                 st.dataframe(res['pathway_df'].drop(columns=['-Log10_P'], errors='ignore').style.format({"P_Value":"{:.3e}", "FDR":"{:.3e}", "Enrichment_Factor":"{:.2f}"}).background_gradient(subset=['P_Value'], cmap="Reds_r", vmin=0, vmax=0.05), width='stretch')
                 
-    with tabs[9]:
+    with tabs[10]:
         if res['fig_network']: st.plotly_chart(res['fig_network'], key="net_main")
         else: st.info("没有找到通路与代谢物的有效映射。")
         
-    with tabs[10]:
+    with tabs[11]:
         c_rep1, c_rep2 = st.columns(2)
         with c_rep1: st.download_button("📥 离线网页报告 (.html)", res['html_report'].encode('utf-8'), f"Report_{res['case']}_{res['ctrl']}.html", "text/html")
         with c_rep2: st.download_button("📥 AI Prompt (.md)", res['prompt_md'].encode('utf-8'), f"Prompt_{res['case']}_{res['ctrl']}.md", "text/markdown")
