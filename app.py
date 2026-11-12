@@ -103,6 +103,17 @@ def safe_filename_part(s):
     cleaned = re.sub(r'[^a-zA-Z0-9_\-\u4e00-\u9fa5]', '_', str(s).strip())
     return cleaned if cleaned else "Group"
 
+def format_hm_row_label(name_str, mode_str, max_chem_len=46):
+    """格式化热图行标签：对超长化学名做优雅截断，确保末尾 [模式] 标识绝不被裁切"""
+    clean_n = str(name_str).strip()
+    clean_m = str(mode_str).strip()
+    # 去除原本可能已经拼接在末尾的 [Mode] 防止重复
+    if clean_m and clean_n.endswith(f"[{clean_m}]"):
+        clean_n = clean_n[:-len(f"[{clean_m}]")].strip()
+    if len(clean_n) > max_chem_len:
+        clean_n = clean_n[:max_chem_len - 3].rstrip() + "..."
+    return f"{clean_n} [{clean_m}]" if clean_m else clean_n
+
 with st.sidebar:
     st.header("🛠️ 数据控制台")
     
@@ -430,7 +441,6 @@ def build_volcano_figure(stats_df, p_th, fc_th, title="Volcano Plot", show_label
     fig_vol.add_vline(x=fc_th, line_dash="dash", line_color="gray")
     fig_vol.add_vline(x=-fc_th, line_dash="dash", line_color="gray")
 
-    # 仅在用户开启“显示化合物名称”时绘制文字标签，关闭时保持散点图干净无遮挡
     if show_labels and top_label_n > 0:
         if 'Is_Biomarker' in plot_df.columns:
             sig_sub = plot_df[plot_df['Is_Biomarker'] == True].copy()
@@ -457,7 +467,7 @@ def build_volcano_figure(stats_df, p_th, fc_th, title="Volcano Plot", show_label
 
 
 # ==========================================
-# 辅助函数 2：出版级全功能热图生成器 (支持 3 种样本范围 x 4 种热图类型 + 双格式导出)
+# 辅助函数 2：出版级全功能热图生成器 (零重叠精准坐标布局)
 # ==========================================
 def generate_custom_heatmap(
     df_all_unscaled, out_df, group_col, sel_grps,
@@ -466,15 +476,11 @@ def generate_custom_heatmap(
 ):
     """
     返回值: (png_bytes, pdf_bytes, err_msg)
-    scope_mode:
-      - "pairwise": 仅当前对比两组 (Case vs Control)
-      - "all_no_qc": 全部实验组别 (自动剔除 QC 样本)
-      - "all_with_qc": 全部样本 (含 QC 样本)
-    hm_type:
-      - "sample_sorted": 单样本明细热图 (按组别物理顺序排列, col_cluster=False)
-      - "sample_clustered": 双向无监督聚类热图 (开启样本与代谢物双向聚类, col_cluster=True)
-      - "group_mean": 各组均值汇总热图 (Group-Averaged, 每组一列, 适合论文主图)
-      - "correlation": 差异代谢物自相关热图 (Pearson 共调控相关系数矩阵)
+    采用动态坐标隔离技术：
+      1. 颜色条 (cbar) 独立安置于左侧行聚类树外侧，刻度朝左，绝不触碰分组色条与热图；
+      2. 图例 (legend) 动态悬停于最高绘图轴正上方空白区，自适应多行；
+      3. 清除 row_colors 底部 'Mode' 文字并启用 X 轴标签 rotation_mode='anchor' 锚点对齐，彻底消除左下角文字重叠；
+      4. 超长化合物名称智能省略中间部分，100% 保留末尾 [采集模式] 标签。
     """
     if out_df is None or out_df.empty:
         return None, None, "当前筛选阈值下无显著差异代谢物。"
@@ -485,8 +491,9 @@ def generate_custom_heatmap(
 
     hm_feats = valid_mets[:min(int(top_n), len(valid_mets))]
     sub_out = out_df.set_index('Metabolite').loc[hm_feats]
-    display_names = make_unique(sub_out.get('Name_With_Mode', sub_out['Name']).astype(str).tolist())
+    raw_names = sub_out['Name'].astype(str).tolist()
     modes_list = sub_out.get('Source_Mode', pd.Series(['Global']*len(hm_feats), index=hm_feats)).astype(str).tolist()
+    display_names = make_unique([format_hm_row_label(n, m, max_chem_len=48) for n, m in zip(raw_names, modes_list)])
 
     # 1. 根据样本范围筛选数据行
     df_scope = df_all_unscaled.copy()
@@ -498,83 +505,88 @@ def generate_custom_heatmap(
     if len(df_scope) < 2:
         return None, None, "所选样本范围内有效样本数不足 2 个，无法绘制热图。"
 
-    # 按组别排序（优先将 Case 和 Control 排在前面，其余实验组按字母序排列）
     all_present_grps = df_scope[group_col].astype(str).unique().tolist()
     ordered_grps = [g for g in sel_grps if g in all_present_grps] + sorted([g for g in all_present_grps if g not in sel_grps])
     df_scope['__grp_order__'] = df_scope[group_col].astype(str).map({g: idx for idx, g in enumerate(ordered_grps)})
     df_scope = df_scope.sort_values(by=['__grp_order__', 'SampleID']).drop(columns=['__grp_order__']).reset_index(drop=True)
 
-    # 构建左侧采集模式颜色条 (row_colors)
+    # 构建左侧采集模式颜色条 (不设置 Series.name，避免底部打印 'Mode' 与样本名重叠)
     unique_modes = list(dict.fromkeys(modes_list))
     mode_lut = {m: MODE_COLORS[i % len(MODE_COLORS)] for i, m in enumerate(unique_modes)}
-    row_colors_series = pd.Series([mode_lut[m] for m in modes_list], index=display_names, name="Mode") if (show_row_mode and len(unique_modes) > 1) else None
+    row_colors_series = pd.Series([mode_lut[m] for m in modes_list], index=display_names) if (show_row_mode and len(unique_modes) > 1) else None
 
     plt.close('all')
     try:
+        do_row_cluster = (len(hm_feats) >= 2)
+        do_col_cluster = False
+        legend_handles = []
+        cbar_title = "Z-Score"
+
         if hm_type == "correlation":
-            # 类型 4：差异代谢物 Pearson 相关性热图 (对称方阵)
             if len(hm_feats) < 2:
                 return None, None, "至少需要 2 个差异代谢物才能计算相关性热图。"
             mat_vals = df_scope[hm_feats].astype(float)
             mat_vals.columns = display_names
             corr_df = mat_vals.corr(method='pearson').fillna(0)
             
-            fig_side = max(7.5, min(16.0, len(hm_feats) * 0.32 + 3.0))
+            do_row_cluster = (len(hm_feats) >= 3)
+            do_col_cluster = (len(hm_feats) >= 3)
+            cbar_title = "Pearson r"
+            fig_side = max(8.0, min(16.5, len(hm_feats) * 0.34 + 3.2))
+            
             g = sns.clustermap(
                 corr_df, cmap="RdBu_r", vmin=-1.0, vmax=1.0, center=0,
                 row_colors=row_colors_series, col_colors=row_colors_series,
                 figsize=(fig_side, fig_side),
-                row_cluster=(len(hm_feats) >= 3), col_cluster=(len(hm_feats) >= 3),
-                annot=(show_cell_values and len(hm_feats) <= 25), fmt=".2f",
-                cbar_kws={"label": "Pearson r"}
+                row_cluster=do_row_cluster, col_cluster=do_col_cluster,
+                dendrogram_ratio=(0.11, 0.11),
+                colors_ratio=0.022,
+                annot=(show_cell_values and len(hm_feats) <= 25), fmt=".2f"
             )
-            g.ax_heatmap.set_xlabel("")
-            g.ax_heatmap.set_ylabel("")
-            plt.setp(g.ax_heatmap.get_xticklabels(), rotation=45, ha="right", fontsize=8.5)
-            plt.setp(g.ax_heatmap.get_yticklabels(), fontsize=8.5)
+            plt.setp(
+                g.ax_heatmap.get_xticklabels(),
+                rotation=45 if len(hm_feats) <= 22 else 60,
+                ha="right", rotation_mode="anchor", fontsize=8.5
+            )
+            plt.setp(g.ax_heatmap.get_yticklabels(), rotation=0, fontsize=8.5)
 
             if row_colors_series is not None:
-                mode_patches = [mpatches.Patch(color=mode_lut[m], label=f"Mode: {m}") for m in unique_modes]
-                g.fig.legend(handles=mode_patches, loc='upper left', bbox_to_anchor=(0.02, 0.98), frameon=True, fontsize=9, title="采集模式")
+                legend_handles = [mpatches.Patch(color=mode_lut[m], label=f"Mode: {m}") for m in unique_modes]
 
         elif hm_type == "group_mean":
-            # 类型 3：各组均值汇总热图 (Group-Averaged Heatmap)
             grp_means = df_scope.groupby(group_col, sort=False)[hm_feats].mean()
             grp_means = grp_means.loc[[g for g in ordered_grps if g in grp_means.index]]
             hm_raw = grp_means.T.astype(float)
             hm_raw.index = display_names
             
-            # 跨组均值做行 Z-score 标准化 (若只有 2 组则直接展现标准化差值)
             row_mean = hm_raw.mean(axis=1)
             row_std = hm_raw.std(axis=1).replace(0, 1.0)
             hm_z = hm_raw.sub(row_mean, axis=0).div(row_std, axis=0).replace([np.inf, -np.inf], np.nan).fillna(0)
 
             grp_lut = {g: GROUP_COLORS[i % len(GROUP_COLORS)] for i, g in enumerate(ordered_grps)}
-            col_colors_series = pd.Series([grp_lut[g] for g in hm_z.columns], index=hm_z.columns, name="Group")
+            col_colors_series = pd.Series([grp_lut[g] for g in hm_z.columns], index=hm_z.columns)
 
-            fig_w = max(6.5, min(14.0, len(ordered_grps) * 1.2 + 4.0))
-            fig_h = max(6.5, min(16.0, len(hm_feats) * 0.30 + 3.0))
+            fig_w = max(7.0, min(14.0, len(ordered_grps) * 1.15 + 3.8))
+            fig_h = max(6.8, min(16.5, len(hm_feats) * 0.32 + 2.8))
             g = sns.clustermap(
                 hm_z, z_score=None, cmap="vlag", center=0,
                 col_colors=col_colors_series, row_colors=row_colors_series,
                 figsize=(fig_w, fig_h),
-                row_cluster=(len(hm_feats) >= 2), col_cluster=False,
-                annot=show_cell_values, fmt=".2f",
-                cbar_kws={"label": "Relative Z-Score"}
+                row_cluster=do_row_cluster, col_cluster=False,
+                dendrogram_ratio=(0.12, 0.01),
+                colors_ratio=0.025,
+                annot=show_cell_values, fmt=".2f"
             )
-            g.ax_heatmap.set_xlabel("")
-            g.ax_heatmap.set_ylabel("")
             plt.setp(g.ax_heatmap.get_xticklabels(), rotation=0, ha="center", fontsize=10, fontweight='bold')
-            plt.setp(g.ax_heatmap.get_yticklabels(), fontsize=9)
+            plt.setp(g.ax_heatmap.get_yticklabels(), rotation=0, fontsize=9)
 
             legend_handles = [mpatches.Patch(color=grp_lut[grp], label=f"Group: {grp}") for grp in ordered_grps]
             if row_colors_series is not None:
                 legend_handles += [mpatches.Patch(color=mode_lut[m], label=f"Mode: {m}") for m in unique_modes]
-            g.fig.legend(handles=legend_handles, loc='upper left', bbox_to_anchor=(0.02, 0.98), ncol=min(3, len(legend_handles)), frameon=True, fontsize=8.5)
 
         else:
-            # 类型 1 & 2：单样本明细热图 (按组物理排序 或 双向无监督聚类)
-            sample_col_labels = make_unique([f"{sid} ({grp})" for sid, grp in zip(df_scope['SampleID'], df_scope[group_col])])
+            # 类型 1 & 2：单样本明细热图 (使用纯净 SampleID，顶部颜色条已清晰标识分组)
+            sample_col_labels = make_unique(df_scope['SampleID'].astype(str).tolist())
             hm_raw = df_scope[hm_feats].T.astype(float)
             hm_raw.columns = sample_col_labels
             hm_raw.index = display_names
@@ -586,39 +598,95 @@ def generate_custom_heatmap(
             grp_lut = {g: GROUP_COLORS[i % len(GROUP_COLORS)] for i, g in enumerate(ordered_grps)}
             col_colors_series = pd.Series(
                 [grp_lut[str(g)] for g in df_scope[group_col]],
-                index=sample_col_labels,
-                name="Group"
+                index=sample_col_labels
             )
             
-            do_col_cluster = (hm_type == "sample_clustered") and (len(sample_col_labels) >= 3)
-            fig_w = max(8.5, min(18.0, len(sample_col_labels) * 0.35 + 4.0))
-            fig_h = max(6.5, min(16.0, len(hm_feats) * 0.30 + 3.0))
+            n_samps = len(sample_col_labels)
+            do_col_cluster = (hm_type == "sample_clustered") and (n_samps >= 3)
+            fig_w = max(8.5, min(19.0, n_samps * 0.34 + 4.2))
+            fig_h = max(6.8, min(16.5, len(hm_feats) * 0.32 + 2.8))
             
             g = sns.clustermap(
                 hm_z, z_score=None, cmap="vlag", center=0, 
                 col_colors=col_colors_series, row_colors=row_colors_series,
                 figsize=(fig_w, fig_h),
-                row_cluster=(len(hm_feats) >= 2), col_cluster=do_col_cluster,
-                annot=(show_cell_values and len(sample_col_labels) <= 15 and len(hm_feats) <= 25), fmt=".1f",
-                cbar_kws={"label": "Z-Score"}
+                row_cluster=do_row_cluster, col_cluster=do_col_cluster,
+                dendrogram_ratio=(0.11, 0.10 if do_col_cluster else 0.01),
+                colors_ratio=0.024,
+                annot=(show_cell_values and n_samps <= 15 and len(hm_feats) <= 25), fmt=".1f"
             )
-            g.ax_heatmap.set_xlabel("")
-            g.ax_heatmap.set_ylabel("")
-            plt.setp(g.ax_heatmap.get_xticklabels(), rotation=45, ha="right", fontsize=8.5)
-            plt.setp(g.ax_heatmap.get_yticklabels(), fontsize=9)
+            
+            # 样本较多时自动采用 60° 锚点对齐旋转，彻底杜绝相邻样本名粘连
+            rot_angle = 45 if n_samps <= 18 else (60 if n_samps <= 36 else 90)
+            ha_mode = "right" if rot_angle < 90 else "center"
+            plt.setp(
+                g.ax_heatmap.get_xticklabels(),
+                rotation=rot_angle, ha=ha_mode,
+                rotation_mode="anchor" if rot_angle < 90 else None,
+                fontsize=8.5 if n_samps <= 28 else 7.5
+            )
+            plt.setp(g.ax_heatmap.get_yticklabels(), rotation=0, fontsize=9)
 
             legend_handles = [mpatches.Patch(color=grp_lut[grp], label=f"Group: {grp}") for grp in ordered_grps]
             if row_colors_series is not None:
                 legend_handles += [mpatches.Patch(color=mode_lut[m], label=f"Mode: {m}") for m in unique_modes]
-            g.fig.legend(handles=legend_handles, loc='upper left', bbox_to_anchor=(0.02, 0.98), ncol=min(4, len(legend_handles)), frameon=True, fontsize=8.5)
 
-        # 同时导出 300 DPI PNG 与 出版级矢量 PDF 二进制流
+        # 清理热图与色条上的冗余坐标轴标签，彻底消除左下角 'Mode' 与样本名重叠
+        g.ax_heatmap.set_xlabel("")
+        g.ax_heatmap.set_ylabel("")
+        if getattr(g, 'ax_row_colors', None) is not None:
+            g.ax_row_colors.set_xticks([])
+            g.ax_row_colors.set_xlabel("")
+        if getattr(g, 'ax_col_colors', None) is not None:
+            g.ax_col_colors.set_yticks([])
+            g.ax_col_colors.set_ylabel("")
+        if not do_col_cluster and getattr(g, 'ax_col_dendrogram', None) is not None:
+            g.ax_col_dendrogram.set_visible(False)
+
+        # 强制刷新画布以获取各组件的真实物理坐标
+        g.fig.canvas.draw()
+        hm_box = g.ax_heatmap.get_position()
+        left_edge = g.ax_row_dendrogram.get_position().x0 if (do_row_cluster and getattr(g, 'ax_row_dendrogram', None) is not None) else hm_box.x0
+        
+        top_edge = hm_box.y1
+        if getattr(g, 'ax_col_colors', None) is not None:
+            top_edge = max(top_edge, g.ax_col_colors.get_position().y1)
+        if do_col_cluster and getattr(g, 'ax_col_dendrogram', None) is not None:
+            top_edge = max(top_edge, g.ax_col_dendrogram.get_position().y1)
+
+        # 1. 将 Z-Score 颜色条移至左侧聚类树最左方独立区域（垂直居中，刻度与标题朝左）
+        if getattr(g, 'ax_cbar', None) is not None:
+            cbar_w = 0.016
+            cbar_h = min(0.26, hm_box.height * 0.42)
+            cbar_x = left_edge - 0.055
+            cbar_y = hm_box.y0 + (hm_box.height - cbar_h) * 0.5
+            g.ax_cbar.set_position([cbar_x, cbar_y, cbar_w, cbar_h])
+            g.ax_cbar.set_ylabel(cbar_title, fontsize=9.5, fontweight='bold', labelpad=6)
+            g.ax_cbar.yaxis.set_ticks_position('left')
+            g.ax_cbar.yaxis.set_label_position('left')
+            g.ax_cbar.tick_params(labelsize=8.5)
+
+        # 2. 将分组与模式图例安置于最高组件正上方的独立空白区，绝不遮挡任何色条或散点
+        if legend_handles:
+            ncol_leg = min(5, max(2, len(legend_handles)))
+            g.fig.legend(
+                handles=legend_handles,
+                loc='lower left',
+                bbox_to_anchor=(hm_box.x0, top_edge + 0.02),
+                ncol=ncol_leg,
+                frameon=True,
+                facecolor='white',
+                edgecolor='#cccccc',
+                fontsize=9
+            )
+
+        # 同时导出 300 DPI PNG 与 出版级矢量 PDF 二进制流 (pad_inches 留出舒适白边)
         buf_png = io.BytesIO()
-        g.savefig(buf_png, format='png', dpi=300, bbox_inches='tight')
+        g.savefig(buf_png, format='png', dpi=300, bbox_inches='tight', pad_inches=0.25)
         png_bytes = buf_png.getvalue()
 
         buf_pdf = io.BytesIO()
-        g.savefig(buf_pdf, format='pdf', dpi=300, bbox_inches='tight')
+        g.savefig(buf_pdf, format='pdf', dpi=300, bbox_inches='tight', pad_inches=0.25)
         pdf_bytes = buf_pdf.getvalue()
 
         plt.close(g.fig)
@@ -709,7 +777,7 @@ def run_single_matrix_modeling(df_proc, df_unscaled_log2, feats, meta, group_col
     fig_perm.add_trace(go.Scatter(x=x_line, y=m_q2*x_line + b_q2, mode='lines', name=f'Q2 Line (Int: {b_q2:.2f})', line=dict(color='blue', dash='dash')))
     fig_perm.update_layout(template="simple_white", width=600, height=600, title={'text': f"{prefix}Permutation Test", 'y':0.95, 'x':0.5, 'xanchor': 'center'}, xaxis_title="Correlation", yaxis_title="R2 / Q2")
 
-    # 3. S-Plot (带模式名称提示)
+    # 3. S-Plot
     splot_df = stats_df.copy()
     splot_df['Color'] = np.where(splot_df['Is_Biomarker'], f'VIP>1 & P<{p_th}', 'NS')
     fig_splot = px.scatter(
@@ -720,7 +788,7 @@ def run_single_matrix_modeling(df_proc, df_unscaled_log2, feats, meta, group_col
     fig_splot.add_hline(y=0.5, line_dash="dash", line_color="gray"); fig_splot.add_hline(y=-0.5, line_dash="dash", line_color="gray")
     fig_splot = update_layout_square(fig_splot, f"{prefix}S-Plot", "Log2 Fold Change", "p(corr)")
 
-    # 4. VIP 图 (纵轴直接显示 化合物名 [模式])
+    # 4. VIP 图
     top_vip_df = stats_df.sort_values('VIP', ascending=True).tail(vip_show_num).copy()
     top_vip_df['VIP_Label'] = make_unique(top_vip_df['Name_With_Mode'].tolist())
     fig_vip = px.bar(top_vip_df, x="VIP", y="VIP_Label", orientation='h', color="VIP", hover_data=['Source_Mode', 'Log2_FC', 'P_Value'], color_continuous_scale="RdBu_r")
@@ -747,7 +815,7 @@ def run_single_matrix_modeling(df_proc, df_unscaled_log2, feats, meta, group_col
             fig_pca.add_hline(y=0, line_dash="dash", line_color="gray"); fig_pca.add_vline(x=0, line_dash="dash", line_color="gray")
             fig_pca = update_layout_square(fig_pca, f"{prefix}PCA Plot", f"PC1 ({var_all[0]:.1%})", f"PC2 ({var_all[1]:.1%})")
 
-    # 6. 默认火山图 (默认不显示静态文字标签，防遮挡)
+    # 6. 默认火山图
     fig_vol = build_volcano_figure(stats_df, p_th, fc_th, title=f"{prefix}Volcano Plot", show_labels=False, top_label_n=10)
 
     return {
@@ -885,7 +953,6 @@ if submit_button:
                 else:
                     out_df = pd.DataFrame(columns=['Metabolite', 'Name', 'Name_With_Mode', 'Search_Name', 'Source_Mode', 'Detected_Modes', 'Log2_FC', 'P_Value', 'FDR', 'VIP', 'p_corr'])
 
-                # 拼接对比组子矩阵（供列线图使用）与全样本矩阵（供全组别热图使用）
                 base_sub = mode_results[list(mode_results.keys())[0]]['df_sub'][['SampleID', group_col]].drop_duplicates(subset=['SampleID']).set_index('SampleID')
                 feat_frames = [s_df[s_feats] for s_df, s_feats in scaled_sub_dfs]
                 df_sub = pd.concat([base_sub] + feat_frames, axis=1, join='outer').fillna(0).reset_index()
@@ -1037,7 +1104,7 @@ if submit_button:
             with st.expander("点击查看详细报错日志"): st.code(traceback.format_exc())
 
 # ==========================================
-# 5. UI 展示层 (含火山图标签切换开关 & 4合1全样本热图工作台)
+# 5. UI 展示层 (含火山图标签切换开关 & 零重叠全样本热图工作台)
 # ==========================================
 if 'analysis_res' in st.session_state:
     res = st.session_state['analysis_res']
@@ -1171,7 +1238,7 @@ if 'analysis_res' in st.session_state:
                 st.plotly_chart(fig_v_global, key="vol_dyn_global")
             
     # ==========================================================
-    # 独立标签页 2：🔥 聚类热图工作台 (支持全组别趋势比较 + 4种热图类型 + PNG/PDF双格式稳定下载)
+    # 独立标签页 2：🔥 聚类热图工作台 (零重叠布局 + PNG/PDF双格式下载)
     # ==========================================================
     with tabs[6]:
         st.markdown("#### 🔥 差异代谢物多维热图工作台 (支持全组别比较与多类型热图切换)")
@@ -1246,7 +1313,6 @@ if 'analysis_res' in st.session_state:
                     key=f"dl_hm_pdf_{cur_type_code}_{cur_scope_code}_{hm_top_n}_{hm_show_mode_bar}_{hm_show_vals}"
                 )
             
-            # 使用独立内联 Base64 Data URI 渲染图片，彻底隔离 Streamlit MemoryMediaFileStorage 缓存冲突
             b64_inline = base64.b64encode(png_bytes).decode('utf-8')
             st.markdown(
                 f'<div style="text-align:center; margin-top:15px;">'
