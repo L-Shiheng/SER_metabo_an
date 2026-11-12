@@ -34,6 +34,7 @@ try:
         parse_manual_targeted_files,
         merge_multiple_dfs, 
         align_sample_info, 
+        make_unique,
         OPLS_DA, 
         run_pathway_enrichment, 
         build_kegg_dictionary
@@ -54,6 +55,7 @@ except ImportError:
 
 COLOR_PALETTE = {'Up': '#CD0000', 'Down': '#00008B', 'NS': '#E0E0E0'} 
 GROUP_COLORS = ['#E64B35', '#4DBBD5', '#00A087', '#3C5488', '#F39B7F', '#8491B4', '#91D1C2', '#DC0000', '#7E6148', '#B09C85']
+MODE_SYMBOLS = ['circle', 'square', 'diamond', 'cross', 'triangle-up', 'star']
 
 st.markdown("""
 <style>
@@ -81,6 +83,18 @@ if 'raw_df' not in st.session_state: st.session_state.raw_df = None
 if 'feature_meta' not in st.session_state: st.session_state.feature_meta = None
 if 'mode_datasets' not in st.session_state: st.session_state.mode_datasets = []
 if 'data_loaded' not in st.session_state: st.session_state.data_loaded = False
+
+DEFAULT_4_MODES = ["RP+", "RP-", "HILIC+", "HILIC-"]
+
+def infer_default_mode_name(filename, idx):
+    """根据文件名智能推断模式名，若文件名完全相同则按 RP+, RP-, HILIC+, HILIC- 顺序赋予默认值"""
+    fn_upper = os.path.splitext(filename)[0].upper()
+    if "HILIC" in fn_upper and ("POS" in fn_upper or "+" in fn_upper): return "HILIC+"
+    if "HILIC" in fn_upper and ("NEG" in fn_upper or "-" in fn_upper): return "HILIC-"
+    if "RP" in fn_upper and ("POS" in fn_upper or "+" in fn_upper): return "RP+"
+    if "RP" in fn_upper and ("NEG" in fn_upper or "-" in fn_upper): return "RP-"
+    if idx < len(DEFAULT_4_MODES): return DEFAULT_4_MODES[idx]
+    return f"Mode_{idx+1}"
 
 with st.sidebar:
     st.header("🛠️ 数据控制台")
@@ -162,6 +176,7 @@ with st.sidebar:
     st.markdown("#### 4. 上传分析数据")
     feature_scope = "全部特征"
     dict_files = None
+    custom_mode_tags = []
     
     if data_source == "1. MA 标准单表 (自带分组)":
         dict_files = st.file_uploader("关联 MetDNA 字典 (可选)", type=["csv", "xlsx"], accept_multiple_files=True, key="dict_files")
@@ -173,6 +188,17 @@ with st.sidebar:
     else:
         feature_scope = st.radio("特征范围", ["仅已注释特征", "全部特征"], index=0)
         uploaded_files = st.file_uploader("上传 MetDNA 结果表 (支持 4 模式同时上传)", type=["csv", "xlsx"], accept_multiple_files=True, key="data")
+        if uploaded_files:
+            st.markdown("##### 📌 采集模式标识 (用于图表与清单溯源)")
+            st.caption("即使上传的 4 个表格文件名完全相同，系统也会按以下模式名严格区分：")
+            cols_m = st.columns(2)
+            raw_tags = []
+            for idx, f_obj in enumerate(uploaded_files):
+                default_tag = infer_default_mode_name(f_obj.name, idx)
+                with cols_m[idx % 2]:
+                    t_val = st.text_input(f"文件 {idx+1} ({f_obj.name[:12]})", value=default_tag, key=f"mode_tag_{idx}")
+                    raw_tags.append(t_val.strip() if t_val.strip() else f"Mode_{idx+1}")
+            custom_mode_tags = make_unique(raw_tags)
         
     start_process = st.container().button("📥 加载数据矩阵", width='stretch', type="primary")
 
@@ -247,8 +273,11 @@ if start_process:
                 with st.spinner("启动 MetDNA 分模式独立质控与三级漏斗解析引擎..."):
                     parsed_results = []
                     for i, file in enumerate(uploaded_files):
-                        unique_name = f"{os.path.splitext(file.name)[0]}_{i}{os.path.splitext(file.name)[1]}"
-                        df_t, meta, err = parse_metdna_file(file, unique_name, valid_samples=candidate_samples, dedup_within_file=True)
+                        assigned_tag = custom_mode_tags[i] if i < len(custom_mode_tags) else infer_default_mode_name(file.name, i)
+                        df_t, meta, err = parse_metdna_file(
+                            file, file.name, valid_samples=candidate_samples,
+                            dedup_within_file=True, custom_mode_tag=assigned_tag
+                        )
                         
                         if not err:
                             if feature_scope.startswith("仅已注释"):
@@ -257,14 +286,13 @@ if start_process:
                                 df_t = df_t[keep_cols].copy()
                                 meta = meta.loc[meta.index.astype(str).isin([str(c) for c in df_t.columns])].copy()
                             
-                            mode_tag = str(df_t['Source_Files'].iloc[0]) if not df_t.empty else f"Mode_{i+1}"
                             df_t, meta = apply_single_table_qc_and_serrf(
-                                df_t, meta, mode_tag, info_df, user_sample_col, user_group_col,
+                                df_t, meta, assigned_tag, info_df, user_sample_col, user_group_col,
                                 excluded_samples, use_serrf, serrf_ready, run_order_col, sample_type_col, qc_label
                             )
-                            parsed_results.append((df_t, meta, mode_tag))
+                            parsed_results.append((df_t, meta, assigned_tag))
                         else:
-                            st.error(f"❌ 文件 {file.name} 解析失败: {err}")
+                            st.error(f"❌ 文件 {file.name} ({assigned_tag}) 解析失败: {err}")
                             
                         progress_bar.progress((i + 1) / len(uploaded_files))
                     
@@ -299,12 +327,12 @@ mode_datasets = st.session_state.get('mode_datasets', [])
 mode_count = len(mode_datasets)
 
 if mode_count > 1:
-    mode_summary_str = " | ".join([f"`{m_name}` ({len(m_df.columns)-3} 特征)" for m_df, _, m_name in mode_datasets])
-    st.info(f"📊 **多模式数据总览**: 已加载 **{mode_count}** 个独立采集模式 [{mode_summary_str}] &nbsp;➔&nbsp; 跨模式合并去重后共 **{len(raw_df)}** 样本 x **{len(raw_df.columns)-3}** 唯一代谢物")
+    mode_summary_str = " &nbsp;|&nbsp; ".join([f"**`{m_name}`** ({len(m_df.columns)-3} 特征)" for m_df, _, m_name in mode_datasets])
+    st.info(f"📊 **多模式数据总览**: 已成功加载 **{mode_count}** 个独立采集模式 [ {mode_summary_str} ] &nbsp;➔&nbsp; 跨模式合并去重后共 **{len(raw_df)}** 样本 x **{len(raw_df.columns)-3}** 唯一代谢物")
 else:
     st.info(f"📊 **数据总览**: {len(raw_df)} 样本 x {len(raw_df.columns)-3} 特征")
 
-st.download_button("📥 导出跨模式合并矩阵 (.csv)", raw_df.to_csv(index=False).encode('utf-8'), "MetaFlow_Merged_Matrix.csv", "text/csv")
+st.download_button("📥 导出跨模式合并矩阵 (.csv)", raw_df.to_csv(index=False).encode('utf-8-sig'), "MetaFlow_Merged_Matrix.csv", "text/csv")
 st.divider()
 
 with st.form(key='analysis_form'):
@@ -312,7 +340,6 @@ with st.form(key='analysis_form'):
     non_num = raw_df.select_dtypes(exclude=[np.number]).columns.tolist()
     group_col = st.selectbox("分组列", non_num, index=non_num.index('Group') if 'Group' in non_num else 0)
     
-    # 🌟 新增核心切换开关 1 & 2：多模式分析流派开关 + KEGG 富集背景开关
     c_sw1, c_sw2 = st.columns(2)
     with c_sw1:
         integration_mode = st.radio(
@@ -346,10 +373,11 @@ with st.form(key='analysis_form'):
         do_log = st.checkbox("Log2 对数转化", value=True)
 
     with st.expander("图表设置", expanded=False):
-        c_t1, c_t2, c_t3 = st.columns(3)
+        c_t1, c_t2, c_t3, c_t4 = st.columns(4)
         vip_show_num = c_t1.slider("VIP 展示数", 10, 50, 25)
-        nomo_num = c_t2.slider("列线图标志物数", 2, 8, 4)
-        pw_show_num = c_t3.slider("网络图通路数", 5, 30, 15)
+        vol_label_num = c_t2.slider("火山图直接标注数", 0, 30, 12, help="在火山图上直接显示『化合物名 [模式]』文字标签的 Top 差异物数量")
+        nomo_num = c_t3.slider("列线图标志物数", 2, 8, 4)
+        pw_show_num = c_t4.slider("网络图通路数", 5, 30, 15)
 
     cur_grps = sorted(raw_df[group_col].astype(str).unique())
     default_grps = [g for g in cur_grps if 'qc' not in g.lower()][:2]
@@ -364,9 +392,63 @@ with st.form(key='analysis_form'):
 
 
 # ==========================================
+# 辅助函数：构建带模式标注与形状区分的火山图
+# ==========================================
+def build_volcano_figure(stats_df, p_th, fc_th, title="Volcano Plot", top_label_n=12):
+    plot_df = stats_df.copy()
+    if 'Source_Mode' not in plot_df.columns:
+        plot_df['Source_Mode'] = 'Global'
+    if 'Detected_Modes' not in plot_df.columns:
+        plot_df['Detected_Modes'] = plot_df['Source_Mode']
+        
+    plot_df['Name_With_Mode'] = plot_df['Name'].astype(str) + " [" + plot_df['Source_Mode'].astype(str) + "]"
+    
+    unique_modes = plot_df['Source_Mode'].astype(str).unique().tolist()
+    if len(unique_modes) > 1:
+        fig_vol = px.scatter(
+            plot_df, x="Log2_FC", y="-Log10_P", color="Sig", symbol="Source_Mode",
+            color_discrete_map=COLOR_PALETTE, symbol_sequence=MODE_SYMBOLS,
+            hover_name="Name_With_Mode",
+            hover_data={'Source_Mode': True, 'Detected_Modes': True, 'VIP': ':.2f', 'Log2_FC': ':.2f', 'P_Value': ':.2e', 'FDR': ':.2e'}
+        )
+    else:
+        fig_vol = px.scatter(
+            plot_df, x="Log2_FC", y="-Log10_P", color="Sig",
+            color_discrete_map=COLOR_PALETTE,
+            hover_name="Name_With_Mode",
+            hover_data={'Source_Mode': True, 'VIP': ':.2f', 'Log2_FC': ':.2f', 'P_Value': ':.2e', 'FDR': ':.2e'}
+        )
+        
+    fig_vol.update_traces(marker=dict(size=9, opacity=0.85, line=dict(width=0.5, color='white')))
+    fig_vol.add_hline(y=-np.log10(p_th), line_dash="dash", line_color="gray")
+    fig_vol.add_vline(x=fc_th, line_dash="dash", line_color="gray")
+    fig_vol.add_vline(x=-fc_th, line_dash="dash", line_color="gray")
+
+    # 在火山图上直接为 Top 显著差异标志物标注 "化合物名 [采集模式]"
+    if top_label_n > 0:
+        sig_sub = plot_df[plot_df.get('Is_Biomarker', plot_df['Sig'] != 'NS')].copy()
+        if sig_sub.empty:
+            sig_sub = plot_df[plot_df['Sig'] != 'NS'].copy()
+        if not sig_sub.empty:
+            top_annot = sig_sub.sort_values(['P_Value', 'VIP'], ascending=[True, False]).head(top_label_n)
+            for _, r in top_annot.iterrows():
+                fig_vol.add_annotation(
+                    x=r['Log2_FC'], y=r['-Log10_P'],
+                    text=f"<b>{r['Name']}</b> [{r['Source_Mode']}]",
+                    showarrow=True, arrowhead=1, arrowsize=0.8, arrowwidth=1,
+                     arrowcolor="#555", ax=0, ay=-22,
+                    font=dict(size=10, color="#222"),
+                    bgcolor="rgba(255,255,255,0.75)"
+                )
+
+    fig_vol = update_layout_square(fig_vol, title, "Log2 FC", "-Log10(P)")
+    return fig_vol
+
+
+# ==========================================
 # 辅助函数：单矩阵统计建模与图表生成
 # ==========================================
-def run_single_matrix_modeling(df_proc, df_unscaled_log2, feats, meta, group_col, sel_grps, case, ctrl, p_th, fc_th, vip_show_num, mode_title=""):
+def run_single_matrix_modeling(df_proc, df_unscaled_log2, feats, meta, group_col, sel_grps, case, ctrl, p_th, fc_th, vip_show_num, vol_label_num=12, mode_title=""):
     prefix = f"[{mode_title}] " if mode_title else ""
     df_sub = df_proc[df_proc[group_col].isin(sel_grps)].copy()
     df_log_sub = df_unscaled_log2[df_unscaled_log2[group_col].isin(sel_grps)].copy()
@@ -374,13 +456,21 @@ def run_single_matrix_modeling(df_proc, df_unscaled_log2, feats, meta, group_col
     if len(df_sub) < 4: raise ValueError(f"{prefix}样本数太少 ({len(df_sub)}个)，无法建模。")
     if len(feats) < 2: raise ValueError(f"{prefix}有效特征太少 ({len(feats)}个)，无法建模。")
 
-    # 在未缩放的纯净 Log2 矩阵上计算准确的 Log2_FC 和 T 检验 P_Value
     stats_df = run_pairwise_statistics(df_sub, group_col, case, ctrl, feats, df_unscaled_log2=df_log_sub)
     
     if meta is not None and 'Clean_Name' in meta.columns: 
         merge_cols = [c for c in ['Clean_Name', 'Original_Name', 'KEGG_ID', 'Source_Mode', 'Detected_Modes'] if c in meta.columns]
-        stats_df = stats_df.merge(meta[merge_cols], left_on='Metabolite', right_index=True, how='left')
+        meta_dedup = meta[~meta.index.duplicated(keep='first')]
+        stats_df = stats_df.merge(meta_dedup[merge_cols], left_on='Metabolite', right_index=True, how='left')
         stats_df['Name'] = stats_df['Clean_Name'].fillna(stats_df['Metabolite'])
+        if 'Source_Mode' not in stats_df.columns:
+            stats_df['Source_Mode'] = mode_title or 'Global'
+        else:
+            stats_df['Source_Mode'] = stats_df['Source_Mode'].fillna(mode_title or 'Global')
+        if 'Detected_Modes' not in stats_df.columns:
+            stats_df['Detected_Modes'] = stats_df['Source_Mode']
+        else:
+            stats_df['Detected_Modes'] = stats_df['Detected_Modes'].fillna(stats_df['Source_Mode'])
         
         if 'KEGG_ID' in stats_df.columns:
             kegg_str = stats_df['KEGG_ID'].fillna('').astype(str).replace('nan', '').replace('None', '')
@@ -391,6 +481,7 @@ def run_single_matrix_modeling(df_proc, df_unscaled_log2, feats, meta, group_col
     else:
         stats_df['Name'] = stats_df['Search_Name'] = stats_df['Metabolite']
         stats_df['Source_Mode'] = mode_title or 'Global'
+        stats_df['Detected_Modes'] = stats_df['Source_Mode']
 
     stats_df['Sig'] = 'NS'
     stats_df.loc[(stats_df['P_Value'] < p_th) & (stats_df['Log2_FC'] > fc_th), 'Sig'] = 'Up'
@@ -408,6 +499,7 @@ def run_single_matrix_modeling(df_proc, df_unscaled_log2, feats, meta, group_col
 
     vip_df = pd.DataFrame({'Metabolite': feats, 'VIP': opls.vip, 'p_corr': opls.p_corr})
     stats_df = stats_df.merge(vip_df, on='Metabolite')
+    stats_df['Name_With_Mode'] = stats_df['Name'].astype(str) + " [" + stats_df['Source_Mode'].astype(str) + "]"
     stats_df['Is_Biomarker'] = (stats_df['VIP'] > 1.0) & (stats_df['P_Value'] < p_th) & (stats_df['Log2_FC'].abs() > fc_th)
     out_df = stats_df[stats_df['Is_Biomarker']].sort_values('VIP', ascending=False).copy()
 
@@ -434,18 +526,23 @@ def run_single_matrix_modeling(df_proc, df_unscaled_log2, feats, meta, group_col
     fig_perm.add_trace(go.Scatter(x=x_line, y=m_q2*x_line + b_q2, mode='lines', name=f'Q2 Line (Int: {b_q2:.2f})', line=dict(color='blue', dash='dash')))
     fig_perm.update_layout(template="simple_white", width=600, height=600, title={'text': f"{prefix}Permutation Test", 'y':0.95, 'x':0.5, 'xanchor': 'center'}, xaxis_title="Correlation", yaxis_title="R2 / Q2")
 
-    # 3. S-Plot
+    # 3. S-Plot (带模式名称提示)
     splot_df = stats_df.copy()
     splot_df['Color'] = np.where(splot_df['Is_Biomarker'], f'VIP>1 & P<{p_th}', 'NS')
-    fig_splot = px.scatter(splot_df, x='Log2_FC', y='p_corr', color='Color', hover_data=['Name', 'VIP', 'Source_Mode'], color_discrete_map={f'VIP>1 & P<{p_th}': '#CD0000', 'NS': '#E0E0E0'})
+    fig_splot = px.scatter(
+        splot_df, x='Log2_FC', y='p_corr', color='Color',
+        hover_name='Name_With_Mode', hover_data=['Source_Mode', 'VIP', 'P_Value'],
+        color_discrete_map={f'VIP>1 & P<{p_th}': '#CD0000', 'NS': '#E0E0E0'}
+    )
     fig_splot.add_hline(y=0.5, line_dash="dash", line_color="gray"); fig_splot.add_hline(y=-0.5, line_dash="dash", line_color="gray")
     fig_splot = update_layout_square(fig_splot, f"{prefix}S-Plot", "Log2 Fold Change", "p(corr)")
 
-    # 4. VIP 图
-    top_vip_df = stats_df.sort_values('VIP', ascending=True).tail(vip_show_num)
-    fig_vip = px.bar(top_vip_df, x="VIP", y="Name", orientation='h', color="VIP", color_continuous_scale="RdBu_r")
+    # 4. VIP 图 (纵轴直接显示 化合物名 [模式])
+    top_vip_df = stats_df.sort_values('VIP', ascending=True).tail(vip_show_num).copy()
+    top_vip_df['VIP_Label'] = make_unique(top_vip_df['Name_With_Mode'].tolist())
+    fig_vip = px.bar(top_vip_df, x="VIP", y="VIP_Label", orientation='h', color="VIP", hover_data=['Source_Mode', 'Log2_FC', 'P_Value'], color_continuous_scale="RdBu_r")
     fig_vip.add_vline(x=1.0, line_dash="dash", line_color="black")
-    fig_vip.update_layout(template="simple_white", width=800, height=700, title={'text': f"{prefix}Top VIP Scores", 'x':0.5, 'xanchor': 'center'}, coloraxis_showscale=False)
+    fig_vip.update_layout(template="simple_white", width=820, height=700, title={'text': f"{prefix}Top VIP Scores", 'x':0.5, 'xanchor': 'center'}, yaxis_title="Metabolite [Mode]", coloraxis_showscale=False)
 
     # 5. PCA 图
     fig_pca = None
@@ -467,11 +564,8 @@ def run_single_matrix_modeling(df_proc, df_unscaled_log2, feats, meta, group_col
             fig_pca.add_hline(y=0, line_dash="dash", line_color="gray"); fig_pca.add_vline(x=0, line_dash="dash", line_color="gray")
             fig_pca = update_layout_square(fig_pca, f"{prefix}PCA Plot", f"PC1 ({var_all[0]:.1%})", f"PC2 ({var_all[1]:.1%})")
 
-    # 6. 火山图
-    fig_vol = px.scatter(stats_df, x="Log2_FC", y="-Log10_P", color="Sig", color_discrete_map=COLOR_PALETTE, hover_data=['Name', 'VIP', 'Source_Mode'])
-    fig_vol.add_hline(y=-np.log10(p_th), line_dash="dash", line_color="gray")
-    fig_vol.add_vline(x=fc_th, line_dash="dash", line_color="gray"); fig_vol.add_vline(x=-fc_th, line_dash="dash", line_color="gray")
-    fig_vol = update_layout_square(fig_vol, f"{prefix}Volcano Plot", "Log2 FC", "-Log10(P)")
+    # 6. 火山图 (含模式形状区分与静态文字标签)
+    fig_vol = build_volcano_figure(stats_df, p_th, fc_th, title=f"{prefix}Volcano Plot", top_label_n=vol_label_num)
 
     return {
         'df_sub': df_sub, 'stats_df': stats_df, 'out_df': out_df,
@@ -497,6 +591,7 @@ if submit_button:
         try:
             mode_results = {}
             mode_summary_rows = []
+            fig_vol_merged_b = None
 
             if not use_mode_b:
                 # ==========================================================
@@ -505,7 +600,6 @@ if submit_button:
                 if len(mode_datasets) > 1:
                     normed_mode_list = []
                     for m_df, m_meta, m_tag in mode_datasets:
-                        # 先在单针进样模式内部独立完成缺失率过滤、KNN填充和样本归一化(PQN)
                         m_norm, m_feats = data_cleaning_pipeline(
                             m_df, group_col, missing_thresh=miss_th,
                             impute_method=impute_m, norm_method=norm_m,
@@ -516,10 +610,8 @@ if submit_button:
                     
                     merged_norm_df, meta, err = merge_multiple_dfs(normed_mode_list)
                     if err: raise RuntimeError(err)
-                    # 恢复分组列
                     grp_map = dict(zip(st.session_state.raw_df['SampleID'], st.session_state.raw_df[group_col]))
                     merged_norm_df[group_col] = merged_norm_df['SampleID'].map(grp_map).fillna('Unknown')
-                    # 对合并后的唯一代谢物矩阵统一做 Log2 转化与 Pareto 缩放
                     df_proc, feats, df_unscaled_log2 = data_cleaning_pipeline(
                         merged_norm_df, group_col, missing_thresh=1.0,
                         impute_method='zero', norm_method='None',
@@ -536,7 +628,7 @@ if submit_button:
 
                 global_res = run_single_matrix_modeling(
                     df_proc, df_unscaled_log2, feats, meta, group_col,
-                    sel_grps, case, ctrl, p_th, fc_th, vip_show_num
+                    sel_grps, case, ctrl, p_th, fc_th, vip_show_num, vol_label_num=vol_label_num
                 )
                 df_sub = global_res['df_sub']
                 stats_df = global_res['stats_df']
@@ -553,6 +645,7 @@ if submit_button:
                 # 轨道 B：各模式独立统计建模 ➔ 差异物按最小 P 值裁决去重 ➔ 通路富集
                 # ==========================================================
                 all_mode_out_dfs = []
+                all_mode_stats_dfs = []
                 all_mode_bg_names = set()
                 scaled_sub_dfs = []
 
@@ -564,55 +657,69 @@ if submit_button:
                     )
                     m_res = run_single_matrix_modeling(
                         m_proc, m_unscaled_log2, m_feats, m_meta, group_col,
-                        sel_grps, case, ctrl, p_th, fc_th, vip_show_num, mode_title=m_tag
+                        sel_grps, case, ctrl, p_th, fc_th, vip_show_num, vol_label_num=vol_label_num, mode_title=m_tag
                     )
                     mode_results[m_tag] = m_res
                     
+                    n_up = int((m_res['out_df']['Log2_FC'] > 0).sum()) if not m_res['out_df'].empty else 0
+                    n_down = int((m_res['out_df']['Log2_FC'] < 0).sum()) if not m_res['out_df'].empty else 0
                     diag_str = "优秀" if (m_res['b_q2'] < 0.05 and m_res['Q2'] > 0.5) else ("局部差异(未过拟合)" if m_res['b_q2'] < 0.05 else "过拟合风险")
                     mode_summary_rows.append({
                         '采集模式': m_tag,
                         '特征数': len(m_feats),
-                        '显著差异物数': len(m_res['out_df']),
+                        '显著差异物总数': len(m_res['out_df']),
+                        '上调 (Up)': n_up,
+                        '下调 (Down)': n_down,
                         'R2Y': m_res['R2Y'],
                         'Q2': m_res['Q2'],
                         'Q2截距': m_res['b_q2'],
                         '模型诊断': diag_str
                     })
                     all_mode_bg_names.update(m_res['stats_df']['Search_Name'].dropna().unique().tolist())
+                    all_mode_stats_dfs.append(m_res['stats_df'])
                     if not m_res['out_df'].empty:
                         all_mode_out_dfs.append(m_res['out_df'])
                     
                     m_sub_idx = m_res['df_sub'].set_index('SampleID')
                     scaled_sub_dfs.append((m_sub_idx, m_feats))
 
+                # 构建模式 B 跨模式汇总火山图 (展示所有模式的特征分布及模式来源)
+                if all_mode_stats_dfs:
+                    combined_all_stats = pd.concat(all_mode_stats_dfs, ignore_index=True)
+                    fig_vol_merged_b = build_volcano_figure(
+                        combined_all_stats, p_th, fc_th,
+                        title="Combined Volcano Plot (All Modes)", top_label_n=vol_label_num
+                    )
+
                 # 汇总四个模式的显著差异代谢物并按 Clean_Name 去重（最小 P 值优先裁决 + 记录所有显著模式）
                 if all_mode_out_dfs:
                     combined_sig = pd.concat(all_mode_out_dfs, ignore_index=True)
-                    sig_modes_map = combined_sig.groupby('Name')['Source_Mode'].apply(lambda s: ", ".join(sorted(set(s.astype(str))))).to_dict()
+                    sig_modes_map = combined_sig.groupby('Name')['Source_Mode'].apply(lambda s: ", ".join(list(dict.fromkeys(s.astype(str))))).to_dict()
                     combined_sig = combined_sig.sort_values(['P_Value', 'VIP'], ascending=[True, False])
                     out_df = combined_sig.drop_duplicates(subset=['Name'], keep='first').copy()
                     out_df['Detected_Modes'] = out_df['Name'].map(sig_modes_map)
+                    out_df['Name_With_Mode'] = out_df['Name'].astype(str) + " [" + out_df['Source_Mode'].astype(str) + "]"
                     out_df = out_df.sort_values('VIP', ascending=False).reset_index(drop=True)
                 else:
-                    out_df = pd.DataFrame(columns=['Metabolite', 'Name', 'Search_Name', 'Source_Mode', 'Detected_Modes', 'Log2_FC', 'P_Value', 'FDR', 'VIP', 'p_corr'])
+                    out_df = pd.DataFrame(columns=['Metabolite', 'Name', 'Name_With_Mode', 'Search_Name', 'Source_Mode', 'Detected_Modes', 'Log2_FC', 'P_Value', 'FDR', 'VIP', 'p_corr'])
 
                 # 拼接各模式缩放后的特征矩阵供全局热图与列线图提取代表特征使用
                 base_sub = mode_results[list(mode_results.keys())[0]]['df_sub'][['SampleID', group_col]].drop_duplicates(subset=['SampleID']).set_index('SampleID')
                 feat_frames = [s_df[s_feats] for s_df, s_feats in scaled_sub_dfs]
-                df_sub = pd.concat([base_sub] + feat_frames, axis=1, join='inner').reset_index()
+                df_sub = pd.concat([base_sub] + feat_frames, axis=1, join='outer').fillna(0).reset_index()
 
-                # 代表性指标取 Q2 最高的模式，并生成合并去重后的 Top VIP 图
                 best_m = max(mode_results.keys(), key=lambda k: mode_results[k]['Q2'])
                 R2Y, Q2, b_q2 = mode_results[best_m]['R2Y'], mode_results[best_m]['Q2'], mode_results[best_m]['b_q2']
                 fig_opls, fig_perm = mode_results[best_m]['fig_opls'], mode_results[best_m]['fig_perm']
-                fig_splot, fig_pca, fig_vol = mode_results[best_m]['fig_splot'], mode_results[best_m]['fig_pca'], mode_results[best_m]['fig_vol']
+                fig_splot, fig_pca = mode_results[best_m]['fig_splot'], mode_results[best_m]['fig_pca']
+                fig_vol = fig_vol_merged_b if fig_vol_merged_b is not None else mode_results[best_m]['fig_vol']
 
                 if not out_df.empty:
                     top_vip_merged = out_df.sort_values('VIP', ascending=True).tail(vip_show_num).copy()
-                    top_vip_merged['Display_Name'] = top_vip_merged['Name'] + " (" + top_vip_merged['Source_Mode'].astype(str) + ")"
-                    fig_vip = px.bar(top_vip_merged, x="VIP", y="Display_Name", orientation='h', color="VIP", color_continuous_scale="RdBu_r")
+                    top_vip_merged['Display_Name'] = make_unique(top_vip_merged['Name_With_Mode'].tolist())
+                    fig_vip = px.bar(top_vip_merged, x="VIP", y="Display_Name", orientation='h', color="VIP", hover_data=['Detected_Modes', 'Log2_FC', 'P_Value'], color_continuous_scale="RdBu_r")
                     fig_vip.add_vline(x=1.0, line_dash="dash", line_color="black")
-                    fig_vip.update_layout(template="simple_white", width=800, height=700, title={'text': "Merged Top Biomarkers VIP (Across Modes)", 'x':0.5, 'xanchor': 'center'}, yaxis_title="Metabolite (Best Mode)", coloraxis_showscale=False)
+                    fig_vip.update_layout(template="simple_white", width=820, height=700, title={'text': "Merged Top Biomarkers VIP (Across Modes)", 'x':0.5, 'xanchor': 'center'}, yaxis_title="Metabolite [Best Mode]", coloraxis_showscale=False)
                 else:
                     fig_vip = mode_results[best_m]['fig_vip']
 
@@ -622,35 +729,53 @@ if submit_button:
             mode_summary_df = pd.DataFrame(mode_summary_rows) if mode_summary_rows else None
 
             # ==========================================================
-            # 公共下游 1：300 DPI 高清聚类热图 (关闭列聚类，按组别物理顺序排列)
+            # 公共下游 1：300 DPI 高清聚类热图 (修复 col_colors 重复索引崩溃 Bug，行名附带模式标签)
             # ==========================================================
             hm_fig, hm_base64 = None, ""
             sig_mets = [m for m in out_df['Metabolite'].tolist() if m in df_sub.columns]
             if sig_mets:
                 hm_feats = sig_mets[:50]
-                name_lookup = dict(zip(out_df['Metabolite'], out_df['Name']))
-                df_sub_sorted = df_sub.sort_values(by=group_col)
-                hm_data = df_sub_sorted.set_index(group_col)[hm_feats].T
-                hm_data.index = [name_lookup.get(f, f) for f in hm_data.index]
+                label_lookup = dict(zip(out_df['Metabolite'], out_df.get('Name_With_Mode', out_df['Name'])))
+                df_sub_sorted = df_sub.sort_values(by=[group_col, 'SampleID']).reset_index(drop=True)
                 
-                lut = {g: GROUP_COLORS[i % len(GROUP_COLORS)] for i, g in enumerate(df_sub_sorted[group_col].unique())}
+                # 使用唯一的样本标签作为热图列名，彻底解决 Seaborn col_colors 因重复 Group 索引报错的问题
+                sample_col_labels = make_unique([f"{sid} ({grp})" for sid, grp in zip(df_sub_sorted['SampleID'], df_sub_sorted[group_col])])
+                hm_raw = df_sub_sorted[hm_feats].T.astype(float)
+                hm_raw.columns = sample_col_labels
+                hm_raw.index = make_unique([str(label_lookup.get(f, f)) for f in hm_raw.index])
+                
+                # 手动安全执行行方向 Z-score 标准化，避免常数行导致 clustermap 除以 0 崩溃
+                row_mean = hm_raw.mean(axis=1)
+                row_std = hm_raw.std(axis=1).replace(0, 1.0)
+                hm_z = hm_raw.sub(row_mean, axis=0).div(row_std, axis=0).replace([np.inf, -np.inf], np.nan).fillna(0)
+                
+                unique_grps = df_sub_sorted[group_col].unique().tolist()
+                lut = {g: GROUP_COLORS[i % len(GROUP_COLORS)] for i, g in enumerate(unique_grps)}
+                col_colors_series = pd.Series(
+                    [lut[g] for g in df_sub_sorted[group_col]],
+                    index=sample_col_labels,
+                    name="Group"
+                )
+                
                 try:
                     g = sns.clustermap(
-                        hm_data.astype(float), z_score=0, cmap="vlag", center=0, 
-                        col_colors=df_sub_sorted[group_col].map(lut), figsize=(8, 8),
+                        hm_z, z_score=None, cmap="vlag", center=0, 
+                        col_colors=col_colors_series,
+                        figsize=(9, max(6, min(14, len(hm_feats) * 0.28 + 3))),
                         row_cluster=(len(hm_feats) >= 2), col_cluster=False
                     )
                     g.ax_heatmap.set_xlabel("")
                     g.ax_heatmap.set_ylabel("")
-                    plt.setp(g.ax_heatmap.get_xticklabels(), rotation=45, ha="right")
+                    plt.setp(g.ax_heatmap.get_xticklabels(), rotation=45, ha="right", fontsize=9)
+                    plt.setp(g.ax_heatmap.get_yticklabels(), fontsize=9)
                     hm_fig = g.fig
                     
                     buf = io.BytesIO()
                     g.savefig(buf, format='png', dpi=300, bbox_inches='tight')
                     buf.seek(0)
                     hm_base64 = base64.b64encode(buf.read()).decode('utf-8')
-                except Exception:
-                    pass
+                except Exception as hm_err:
+                    st.warning(f"⚠️ 热图渲染提示: {str(hm_err)}")
 
             # ==========================================================
             # 公共下游 2：诊断列线图 (Nomogram)
@@ -659,12 +784,13 @@ if submit_button:
             if len(sig_mets) >= 2:
                 try:
                     nomo_sub_df = out_df[out_df['Metabolite'].isin(sig_mets)].head(min(nomo_num, len(sig_mets)))
-                    fig_nomogram = plot_nomogram(df_sub, nomo_sub_df['Metabolite'].tolist(), nomo_sub_df['Name'].tolist(), group_col, case)
+                    nomo_labels = nomo_sub_df.get('Name_With_Mode', nomo_sub_df['Name']).tolist()
+                    fig_nomogram = plot_nomogram(df_sub, nomo_sub_df['Metabolite'].tolist(), nomo_labels, group_col, case)
                 except Exception:
                     pass
 
             # ==========================================================
-            # 公共下游 3：KEGG 通路富集与机制网络图 (修复连线与节点匹配)
+            # 公共下游 3：KEGG 通路富集与机制网络图
             # ==========================================================
             pathway_df, filtered_db_df, fig_pathway, fig_network = pd.DataFrame(), pd.DataFrame(), None, None
             sig_mets_fullnames = out_df['Search_Name'].dropna().unique().tolist()
@@ -690,24 +816,26 @@ if submit_button:
                     if not sig_pws.empty:
                         G = nx.Graph()
                         fc_dict = {}
+                        mode_dict = {}
                         for _, r_row in out_df.iterrows():
                             k1 = str(r_row['Name']).split(';')[0].strip()
                             k2 = str(r_row['Search_Name']).split('|')[0].split(';')[0].strip()
-                            fc_dict[k1] = r_row['Log2_FC']
-                            fc_dict[k2] = r_row['Log2_FC']
+                            fc_dict[k1] = r_row['Log2_FC']; fc_dict[k2] = r_row['Log2_FC']
+                            mode_dict[k1] = r_row.get('Source_Mode', ''); mode_dict[k2] = r_row.get('Source_Mode', '')
                             
                         for _, row in sig_pws.iterrows():
                             pw_name = row['Pathway']
-                            G.add_node(pw_name, node_type='pathway', size=max(16, min(38, -np.log10(row['P_Value']) * 10)))
+                            G.add_node(pw_name, node_type='pathway', size=max(16, min(38, -np.log10(row['P_Value']) * 10)), disp_name=pw_name)
                             if pd.notna(row['Hit_Metabolites']) and str(row['Hit_Metabolites']).strip() != "":
                                 for hit in [m.strip() for m in str(row['Hit_Metabolites']).split(',') if m.strip()]:
                                     fc_val = fc_dict.get(hit, 0.0)
-                                    G.add_node(hit, node_type='metabolite', size=11, fc=fc_val, disp_name=hit)
+                                    m_tag_str = mode_dict.get(hit, '')
+                                    disp_label = f"{hit} [{m_tag_str}]" if m_tag_str else hit
+                                    G.add_node(hit, node_type='metabolite', size=11, fc=fc_val, disp_name=disp_label)
                                     G.add_edge(pw_name, hit)
                                     
                         if len(G.nodes) > 0:
                             pos = nx.spring_layout(G, k=0.75, seed=42)
-                            # 修复连线坐标：每条边之间必须插入 None 断开画笔，防止节点串连
                             edge_x, edge_y = [], []
                             for e0, e1 in G.edges():
                                 edge_x.extend([pos[e0][0], pos[e1][0], None])
@@ -728,7 +856,7 @@ if submit_button:
                                 )
                             )
                             fig_network = go.Figure(data=[edge_trace, node_trace])
-                            fig_network.update_layout(title={'text': "Mechanism Network (Pathway - Metabolite)", 'y':0.95, 'x':0.5, 'xanchor': 'center'}, showlegend=False, xaxis=dict(showgrid=False, zeroline=False, showticklabels=False), yaxis=dict(showgrid=False, zeroline=False, showticklabels=False), width=900, height=700, plot_bgcolor='white')
+                            fig_network.update_layout(title={'text': "Mechanism Network (Pathway - Metabolite [Mode])", 'y':0.95, 'x':0.5, 'xanchor': 'center'}, showlegend=False, xaxis=dict(showgrid=False, zeroline=False, showticklabels=False), yaxis=dict(showgrid=False, zeroline=False, showticklabels=False), width=900, height=700, plot_bgcolor='white')
 
             html_report = generate_offline_html(
                 case, ctrl, feats if not use_mode_b else [], p_th, fc_th, norm_m, scale_m, R2Y, Q2, b_q2,
@@ -743,6 +871,7 @@ if submit_button:
             st.session_state['analysis_res'] = {
                 'case': case, 'ctrl': ctrl, 'R2Y': R2Y, 'Q2': Q2, 'b_q2': b_q2,
                 'use_mode_b': use_mode_b, 'mode_results': mode_results, 'mode_summary_df': mode_summary_df,
+                'fig_vol_merged_b': fig_vol_merged_b,
                 'fig_opls': fig_opls, 'fig_perm': fig_perm, 'fig_splot': fig_splot,
                 'fig_vip': fig_vip, 'fig_pca': fig_pca, 'fig_vol': fig_vol,
                 'hm_fig': hm_fig, 'out_df': out_df, 'pathway_df': pathway_df,
@@ -755,7 +884,7 @@ if submit_button:
             with st.expander("点击查看详细报错日志"): st.code(traceback.format_exc())
 
 # ==========================================
-# 5. UI 展示层 (自动适配单模型与分模式子标签页)
+# 5. UI 展示层 (自动适配单模型与分模式独立图表及四表展示)
 # ==========================================
 if 'analysis_res' in st.session_state:
     res = st.session_state['analysis_res']
@@ -774,16 +903,26 @@ if 'analysis_res' in st.session_state:
         else:
             st.warning(f"⚠️ 警告：模型存在严重的过拟合风险，请谨慎解读 VIP 值！(Q²截距={b_q2_val:.3f} ≥ 0.05)")
 
-    def render_mode_chart(fig_key):
+    def render_mode_chart(fig_key, include_merged_vol=False):
         """若为模式 B 则自动生成各采集模式的切换子标签页"""
         if res.get('use_mode_b') and res.get('mode_results'):
             m_names = list(res['mode_results'].keys())
-            sub_tabs = st.tabs([f"🔬 {m}" for m in m_names])
-            for idx, m in enumerate(m_names):
-                with sub_tabs[idx]:
-                    fig_obj = res['mode_results'][m].get(fig_key)
-                    if fig_obj: st.plotly_chart(fig_obj, key=f"{fig_key}_{m}")
-                    else: st.warning("图表生成失败")
+            if include_merged_vol and res.get('fig_vol_merged_b') is not None:
+                sub_tabs = st.tabs(["🌐 四模式汇总火山图"] + [f"🔬 {m}" for m in m_names])
+                with sub_tabs[0]:
+                    st.plotly_chart(res['fig_vol_merged_b'], key="vol_merged_all_modes", width='stretch')
+                for idx, m in enumerate(m_names):
+                    with sub_tabs[idx + 1]:
+                        fig_obj = res['mode_results'][m].get(fig_key)
+                        if fig_obj: st.plotly_chart(fig_obj, key=f"{fig_key}_{m}", width='stretch')
+                        else: st.warning("图表生成失败")
+            else:
+                sub_tabs = st.tabs([f"🔬 {m}" for m in m_names])
+                for idx, m in enumerate(m_names):
+                    with sub_tabs[idx]:
+                        fig_obj = res['mode_results'][m].get(fig_key)
+                        if fig_obj: st.plotly_chart(fig_obj, key=f"{fig_key}_{m}")
+                        else: st.warning("图表生成失败")
         else:
             if res.get(fig_key): st.plotly_chart(res[fig_key], key=f"{fig_key}_global")
             else: st.warning("图表生成失败")
@@ -805,8 +944,18 @@ if 'analysis_res' in st.session_state:
     with tabs[3]:
         c1, c2 = st.columns([1, 6])
         with c2: 
-            if res['fig_vip']: st.plotly_chart(res['fig_vip'], key="vip_main")
-            else: st.warning("图表生成失败")
+            if res.get('use_mode_b') and res.get('mode_results'):
+                m_names = list(res['mode_results'].keys())
+                vip_tabs = st.tabs(["🏆 跨模式合并 Top VIP"] + [f"🔬 {m}" for m in m_names])
+                with vip_tabs[0]:
+                    if res['fig_vip']: st.plotly_chart(res['fig_vip'], key="vip_main")
+                for idx, m in enumerate(m_names):
+                    with vip_tabs[idx + 1]:
+                        if res['mode_results'][m].get('fig_vip'):
+                            st.plotly_chart(res['mode_results'][m]['fig_vip'], key=f"vip_{m}")
+            else:
+                if res['fig_vip']: st.plotly_chart(res['fig_vip'], key="vip_main")
+                else: st.warning("图表生成失败")
             
     with tabs[4]:
         c1, c2 = st.columns([1, 4])
@@ -814,16 +963,43 @@ if 'analysis_res' in st.session_state:
             
     with tabs[5]:
         c1, c2 = st.columns(2)
-        with c1: render_mode_chart('fig_vol')
+        with c1: render_mode_chart('fig_vol', include_merged_vol=True)
         with c2: 
+            st.markdown("##### 🔥 显著差异代谢物聚类热图 (含来源模式标识)")
             if res['hm_fig']: st.pyplot(res['hm_fig']) 
-            else: st.info("无满足要求的差异代谢物")
+            else: st.info("无满足要求的显著差异代谢物")
             
     with tabs[6]:
-        st.markdown("### 🏆 显著差异生物标志物清单")
         show_cols = [c for c in ['Name', 'Source_Mode', 'Detected_Modes', 'Log2_FC', 'P_Value', 'FDR', 'VIP', 'p_corr'] if c in res['out_df'].columns]
-        st.dataframe(res['out_df'][show_cols].style.format({"Log2_FC":"{:.2f}", "P_Value":"{:.3e}", "FDR":"{:.3e}", "VIP":"{:.2f}", "p_corr":"{:.2f}"}).background_gradient(subset=['VIP'], cmap="Reds"), width='stretch')
-        st.download_button("📥 导出差异代谢物清单 (.csv)", res['out_df'][show_cols].to_csv(index=False).encode('utf-8-sig'), f"Biomarkers_{res['case']}_vs_{res['ctrl']}.csv", "text/csv")
+        if res.get('use_mode_b') and res.get('mode_results'):
+            m_names = list(res['mode_results'].keys())
+            table_tabs = st.tabs(
+                [f"🏆 跨模式去重总表 ({len(res['out_df'])} 个)"] +
+                [f"🔬 {m} 独立统计结果 ({len(res['mode_results'][m]['out_df'])} 个)" for m in m_names]
+            )
+            with table_tabs[0]:
+                st.markdown("#### 🏆 跨模式汇总去重后的显著差异标志物清单 (以最小 P 值模式为代表)")
+                st.dataframe(res['out_df'][show_cols].style.format({"Log2_FC":"{:.2f}", "P_Value":"{:.3e}", "FDR":"{:.3e}", "VIP":"{:.2f}", "p_corr":"{:.2f}"}).background_gradient(subset=['VIP'], cmap="Reds"), width='stretch')
+                st.download_button("📥 导出跨模式去重总差异物表 (.csv)", res['out_df'][show_cols].to_csv(index=False).encode('utf-8-sig'), f"Merged_Biomarkers_{res['case']}_vs_{res['ctrl']}.csv", "text/csv", key="dl_merged_bio")
+                
+            for idx, m in enumerate(m_names):
+                with table_tabs[idx + 1]:
+                    m_out = res['mode_results'][m]['out_df']
+                    m_stats = res['mode_results'][m]['stats_df']
+                    m_cols = [c for c in ['Name', 'Source_Mode', 'Log2_FC', 'P_Value', 'FDR', 'VIP', 'p_corr', 'Sig'] if c in m_stats.columns]
+                    st.markdown(f"#### 🔬 模式 `{m}` 显著差异代谢物清单 (共 {len(m_out)} 个)")
+                    st.dataframe(m_out[m_cols].style.format({"Log2_FC":"{:.2f}", "P_Value":"{:.3e}", "FDR":"{:.3e}", "VIP":"{:.2f}", "p_corr":"{:.2f}"}).background_gradient(subset=['VIP'], cmap="Reds"), width='stretch')
+                    c_dl1, c_dl2 = st.columns(2)
+                    with c_dl1:
+                        st.download_button(f"📥 导出 [{m}] 显著差异代谢物 (.csv)", m_out[m_cols].to_csv(index=False).encode('utf-8-sig'), f"Biomarkers_{m}_{res['case']}_vs_{res['ctrl']}.csv", "text/csv", key=f"dl_sig_{m}")
+                    with c_dl2:
+                        st.download_button(f"📥 导出 [{m}] 全特征完整统计表 (.csv)", m_stats[m_cols].to_csv(index=False).encode('utf-8-sig'), f"All_Stats_{m}_{res['case']}_vs_{res['ctrl']}.csv", "text/csv", key=f"dl_all_{m}")
+                    with st.expander(f"展开查看模式 `{m}` 全部 {len(m_stats)} 个特征的统计结果"):
+                        st.dataframe(m_stats[m_cols].style.format({"Log2_FC":"{:.2f}", "P_Value":"{:.3e}", "FDR":"{:.3e}", "VIP":"{:.2f}", "p_corr":"{:.2f}"}), width='stretch')
+        else:
+            st.markdown("### 🏆 显著差异生物标志物清单")
+            st.dataframe(res['out_df'][show_cols].style.format({"Log2_FC":"{:.2f}", "P_Value":"{:.3e}", "FDR":"{:.3e}", "VIP":"{:.2f}", "p_corr":"{:.2f}"}).background_gradient(subset=['VIP'], cmap="Reds"), width='stretch')
+            st.download_button("📥 导出差异代谢物清单 (.csv)", res['out_df'][show_cols].to_csv(index=False).encode('utf-8-sig'), f"Biomarkers_{res['case']}_vs_{res['ctrl']}.csv", "text/csv", key="dl_single_bio")
         
     with tabs[7]:
         c1, c2 = st.columns([1, 6])
