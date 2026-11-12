@@ -6,9 +6,15 @@ def generate_ai_prompt(case, ctrl, norm_m, scale_m, R2Y, Q2, b_q2, p_th, fc_th, 
     if mode_summary_df is not None and not mode_summary_df.empty:
         mode_lines = []
         for _, r in mode_summary_df.iterrows():
+            sig_cnt = r.get('显著差异物总数', r.get('显著差异物数', 0))
+            up_cnt = r.get('上调 (Up)', None)
+            down_cnt = r.get('下调 (Down)', None)
+            up_down_str = f" (上调 {up_cnt} / 下调 {down_cnt})" if (up_cnt is not None and down_cnt is not None) else ""
             mode_lines.append(
-                f"  - **{r['采集模式']}**: 特征数={r['特征数']}, 显著差异物={r['显著差异物数']}, "
-                f"R²Y={r['R2Y']:.3f}, Q²={r['Q2']:.3f}, Q²截距={r['Q2截距']:.3f} ({r['模型诊断']})"
+                f"  - **{r.get('采集模式', 'Mode')}**: 特征数={r.get('特征数', 0)}, "
+                f"显著差异物={sig_cnt}{up_down_str}, "
+                f"R²Y={r.get('R2Y', 0.0):.3f}, Q²={r.get('Q2', 0.0):.3f}, "
+                f"Q²截距={r.get('Q2截距', 0.0):.3f} ({r.get('模型诊断', '')})"
             )
         model_eval_text = "采用多模式独立统计建模后去重策略 (Late-Integration)，各模式 OPLS-DA 表现如下：\n" + "\n".join(mode_lines)
     else:
@@ -55,7 +61,6 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
                          mode_results=None, mode_summary_df=None, integration_label="模式 A：全局统一建模"):
     """生成独立离线 HTML 报告，兼容单模型与分模式独立建模，所有 Plotly 图表支持 300DPI PNG 导出"""
     
-    # 仅在首个图表引入一次 Plotly CDN 脚本，避免多次重复加载
     first_plotly_rendered = [False]
     def safe_plotly_html(fig, default_msg="<p style='color:#999;text-align:center;'>图表生成失败或无数据</p>"):
         if fig is None:
@@ -65,7 +70,7 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
                 'displayModeBar': True,
                 'toImageButtonOptions': {
                     'format': 'png',
-                    'scale': 3,          # 3 倍缩放，确保导出图片为 300DPI 印刷级
+                    'scale': 3,
                     'filename': 'MetaFlow_Plot'
                 }
             }
@@ -77,7 +82,6 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
         except Exception as e:
             return f"<p style='color:red;text-align:center;'>图表渲染错误: {str(e)}</p>"
     
-    # ------------------- 模型评价动态文本 -------------------
     if b_q2 < 0.05 and Q2 > 0.5:
         model_eval_html = f"<div class='highlight-box success'><strong>模型评价：优秀。</strong> OPLS-DA 模型预测能力强且未过拟合 (Q²={Q2:.3f}, 截距={b_q2:.3f})，表明组间存在显著的代谢表型差异。</div>"
     elif b_q2 < 0.05 and Q2 <= 0.5:
@@ -85,17 +89,24 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
     else:
         model_eval_html = f"<div class='highlight-box warning'><strong>模型评价：过拟合风险。</strong> 置换检验截距={b_q2:.3f} ≥ 0.05，模型存在假阳性可能，结果解释需非常谨慎。</div>"
 
-    # 若为分模式独立统计 (模式 B)，生成汇总表与各模式独立图集区块
     mode_summary_html = ""
     if mode_summary_df is not None and not mode_summary_df.empty:
         mode_summary_html = "<h3>📊 各采集模式独立统计模型汇总表</h3>" + mode_summary_df.to_html(index=False, classes='summary-table', float_format=lambda x: f'{x:.3f}')
     
     if mode_results and len(mode_results) > 1:
-        sections = []
+        sections = [f"""
+        <div class="plot-container">
+            <h3 style="text-align:center;">🌐 四模式汇总火山图 (Combined Volcano Plot)</h3>
+            {safe_plotly_html(fig_vol)}
+        </div>
+        """]
         for m_name, m_res in mode_results.items():
+            m_out = m_res.get('out_df', pd.DataFrame())
+            m_cols = [c for c in ['Name', 'Source_Mode', 'Log2_FC', 'P_Value', 'FDR', 'VIP', 'p_corr'] if c in m_out.columns]
+            m_table_html = m_out[m_cols].head(20).to_html(index=False, classes='summary-table', float_format=lambda x: f'{x:.4g}') if not m_out.empty else "<p style='color:#999;'>该模式下无满足阈值的显著差异代谢物</p>"
             sections.append(f"""
             <div class="plot-container" style="background:#fcfdff; border-left: 4px solid #1e3c72;">
-                <h3>🔬 采集模式：{m_name} (R²Y={m_res['R2Y']:.3f}, Q²={m_res['Q2']:.3f}, 截距={m_res['b_q2']:.3f})</h3>
+                <h3>🔬 采集模式：{m_name} (显著差异物: {len(m_out)} 个 | R²Y={m_res['R2Y']:.3f}, Q²={m_res['Q2']:.3f}, 截距={m_res['b_q2']:.3f})</h3>
                 <div class="plot-row">
                     <div class="plot-container">{safe_plotly_html(m_res['fig_opls'])}</div>
                     <div class="plot-container">{safe_plotly_html(m_res['fig_perm'])}</div>
@@ -104,9 +115,11 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
                     <div class="plot-container">{safe_plotly_html(m_res['fig_vol'])}</div>
                     <div class="plot-container">{safe_plotly_html(m_res['fig_pca'])}</div>
                 </div>
+                <h4>📋 模式 {m_name} 独立筛选 Top 20 差异代谢物</h4>
+                <div style="overflow-x:auto;">{m_table_html}</div>
             </div>
             """)
-        per_mode_plots_html = "<h2>🔬 2. 各采集模式独立多元统计与火山图</h2>" + "".join(sections)
+        per_mode_plots_html = "<h2>🔬 2. 各采集模式独立多元统计、火山图与分表清单</h2>" + "".join(sections)
     else:
         per_mode_plots_html = f"""
         <h2>🧪 2. 多变量统计与模式识别 (OPLS-DA &amp; PCA)</h2>
@@ -128,7 +141,6 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
 
     disp_cols = [c for c in ['Name', 'Source_Mode', 'Detected_Modes', 'Log2_FC', 'P_Value', 'FDR', 'VIP', 'p_corr'] if c in out_df.columns]
 
-    # ------------------- 构建 HTML 内容 -------------------
     html_content = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -141,6 +153,7 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
         h1 {{ color: #1e3c72; border-bottom: 2px solid #1e3c72; padding-bottom: 10px; text-align: center; }}
         h2 {{ color: #2a5298; margin-top: 40px; border-left: 4px solid #2a5298; padding-left: 10px; }}
         h3 {{ color: #1e3c72; margin-top: 25px; }}
+        h4 {{ color: #2a5298; margin-top: 15px; }}
         .summary-table {{ width: 100%; border-collapse: collapse; margin-bottom: 20px; }}
         .summary-table th, .summary-table td {{ border: 1px solid #ddd; padding: 10px 12px; text-align: left; }}
         .summary-table th {{ background-color: #f2f2f2; color: #333; font-weight: bold; }}
@@ -205,7 +218,7 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
             {safe_plotly_html(fig_network)}
         </div>
 
-        <h2>📑 7. 显著差异代谢物清单</h2>
+        <h2>📑 7. 跨模式去重后显著差异代谢物总表 (Top 50)</h2>
         <div style="overflow-x:auto;">
             {out_df[disp_cols].head(50).to_html(index=False, classes='summary-table', float_format=lambda x: f'{x:.4g}') if not out_df.empty else '<p>无显著差异代谢物</p>'}
         </div>
