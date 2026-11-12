@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import re
 
 def generate_ai_prompt(case, ctrl, norm_m, scale_m, R2Y, Q2, b_q2, p_th, fc_th, out_df, pathway_df, mode_summary_df=None):
     """生成用于大模型交互分析的 Markdown 提示词，兼容全局建模与分模式独立建模"""
@@ -59,8 +60,12 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
                          hm_base64, fig_nomogram, fig_pathway, fig_network,
                          vip_show_num, pw_show_num, nomo_num,
                          mode_results=None, mode_summary_df=None, integration_label="模式 A：全局统一建模"):
-    """生成独立离线 HTML 报告，兼容单模型与分模式独立建模，所有 Plotly 图表支持 300DPI PNG 导出"""
+    """生成独立离线 HTML 报告，兼容单模型与分模式独立建模，支持 Blob 高清大图稳定下载"""
     
+    safe_case = re.sub(r'[^a-zA-Z0-9_\-\u4e00-\u9fa5]', '_', str(case))
+    safe_ctrl = re.sub(r'[^a-zA-Z0-9_\-\u4e00-\u9fa5]', '_', str(ctrl))
+    hm_filename = f"Heatmap_{safe_case}_vs_{safe_ctrl}_300DPI.png"
+
     first_plotly_rendered = [False]
     def safe_plotly_html(fig, default_msg="<p style='color:#999;text-align:center;'>图表生成失败或无数据</p>"):
         if fig is None:
@@ -71,7 +76,7 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
                 'toImageButtonOptions': {
                     'format': 'png',
                     'scale': 3,
-                    'filename': 'MetaFlow_Plot'
+                    'filename': f'MetaFlow_{safe_case}_vs_{safe_ctrl}'
                 }
             }
             inc_js = 'cdn' if not first_plotly_rendered[0] else False
@@ -166,8 +171,32 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
         .info {{ background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }}
         .warning {{ background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; }}
         .footer {{ margin-top: 50px; text-align: center; color: #777; font-size: 0.9em; border-top: 1px solid #ddd; padding-top: 20px; }}
-        .heatmap-img {{ max-width: 900px; width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px; }}
+        .heatmap-img {{ max-width: 950px; width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px; }}
+        .dl-btn {{ display:inline-block; padding:10px 18px; background-color:#2a5298; color:white; border:none; border-radius:4px; font-size:14px; font-weight:bold; cursor:pointer; }}
+        .dl-btn:hover {{ background-color:#1e3c72; }}
     </style>
+    <script>
+        function downloadHeatmapPNG() {{
+            const b64El = document.getElementById('hm-b64-img');
+            if (!b64El) return;
+            const b64Data = b64El.src.split(',')[1];
+            const byteCharacters = atob(b64Data);
+            const byteNumbers = new Array(byteCharacters.length);
+            for (let i = 0; i < byteCharacters.length; i++) {{
+                byteNumbers[i] = byteCharacters.charCodeAt(i);
+            }}
+            const byteArray = new Uint8Array(byteNumbers);
+            const blob = new Blob([byteArray], {{type: 'image/png'}});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = '{hm_filename}';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        }}
+    </script>
 </head>
 <body>
     <div class="container">
@@ -195,12 +224,11 @@ def generate_offline_html(case, ctrl, feats, p_th, fc_th, norm_m, scale_m, R2Y, 
         <h2>🔥 4. 差异代谢物热图</h2>
         <div class="plot-container" style="text-align:center;">
             {f'''
-            <img src="data:image/png;base64,{hm_base64}" class="heatmap-img" alt="Heatmap">
+            <img id="hm-b64-img" src="data:image/png;base64,{hm_base64}" class="heatmap-img" alt="Heatmap">
             <br><br>
-            <a href="data:image/png;base64,{hm_base64}" download="Heatmap_HighRes.png" 
-               style="display:inline-block; padding:8px 15px; background-color:#2a5298; color:white; text-decoration:none; border-radius:4px; font-size:14px; font-weight:bold;">
-               📸 下载高清热图 (PNG)
-            </a>
+            <button type="button" onclick="downloadHeatmapPNG()" class="dl-btn">
+               📸 下载 300 DPI 高清热图 (.png)
+            </button>
             ''' if hm_base64 else '<p style="color:#999;">无热图数据</p>'}
         </div>
 
