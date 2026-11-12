@@ -110,28 +110,67 @@ class OPLS_DA:
         return np.array(correlations), np.array(r2_perm), np.array(q2_perm), orig_R2Y, orig_Q2
 
 # ====================
-# 通用数据清洗管线 (支持同时返回未缩放的 Log2 矩阵供单变量统计使用)
+# 通用数据清洗管线 (全面对标 MetaboAnalyst 标准)
 # ====================
-def data_cleaning_pipeline(df, group_col, missing_thresh=0.2, impute_method='KNN', norm_method='PQN', log_transform=True, scale_method='Pareto', return_unscaled=False):
+def data_cleaning_pipeline(
+    df, group_col, missing_thresh=0.5, impute_method='lod_1_5',
+    norm_method='PQN', log_transform=True, scale_method='Pareto',
+    return_unscaled=False, target_groups=None, filter_mode='per_group'
+):
+    """
+    filter_mode:
+      - 'per_group': 修正组内过滤原则 (只要在任一对比组内的缺失率 <= missing_thresh 即保留，保护组特异标志物)
+      - 'global': 全局过滤原则 (在对比组整体样本中的缺失率 <= missing_thresh，同 MetaboAnalyst 默认)
+    impute_method:
+      - 'lod_1_5': 1/5 最小正值替换 (MetaboAnalyst 默认 LoD 检出限替换法)
+      - 'min': 1/2 最小正值替换
+      - 'KNN': K近邻插补
+      - 'mean': 均值替换
+      - 'zero': 极小常数替换
+    """
     numeric_cols = [c for c in df.select_dtypes(include=[np.number]).columns if c not in [group_col, 'SampleID', 'Source_Files']]
     meta_cols = [c for c in df.columns if c not in numeric_cols]
     data_df = df[numeric_cols].copy()
     meta_df = df[meta_cols].copy()
     
-    # 1. 缺失率过滤 (将 <= 0 或 NaN 视为质谱未检出缺失值进行统计)
+    # 1. 缺失率过滤：仅在当前关注的对比组 (target_groups) 上评估缺失率，防止无关组连坐误杀
     na_mask = data_df.isnull() | (data_df <= 0)
-    valid_cols = na_mask.mean()[na_mask.mean() <= missing_thresh].index
+    if target_groups and group_col in df.columns:
+        eval_row_mask = df[group_col].isin(target_groups)
+        if eval_row_mask.sum() >= 2:
+            na_eval = na_mask.loc[eval_row_mask]
+            grp_eval = df.loc[eval_row_mask, group_col]
+        else:
+            na_eval = na_mask
+            grp_eval = df[group_col] if group_col in df.columns else None
+    else:
+        na_eval = na_mask
+        grp_eval = df[group_col] if group_col in df.columns else None
+
+    if filter_mode == 'per_group' and grp_eval is not None and grp_eval.nunique() >= 2:
+        # 只要在任意一个对比组内缺失率 <= missing_thresh 即予保留
+        grp_missing_rates = na_eval.groupby(grp_eval).mean()
+        min_grp_missing = grp_missing_rates.min(axis=0)
+        valid_cols = min_grp_missing[min_grp_missing <= missing_thresh].index.tolist()
+    else:
+        global_missing = na_eval.mean(axis=0)
+        valid_cols = global_missing[global_missing <= missing_thresh].index.tolist()
+
     data_df = data_df[valid_cols].mask(data_df[valid_cols] <= 0, np.nan)
     
-    # 2. 缺失值填充
+    # 2. 缺失值填充 (严格按列独立计算最小正值)
     if data_df.isnull().sum().sum() > 0:
         non_empty_cols = data_df.columns[data_df.notna().any()].tolist()
         data_df = data_df[non_empty_cols]
         if not data_df.empty:
-            if impute_method == 'min':
-                data_df = data_df.fillna(data_df.min() * 0.5).fillna(1e-6)
+            if impute_method in ['lod_1_5', '1/5 Min (LoD)']:
+                col_mins = data_df.min(axis=0) * 0.2
+                data_df = data_df.fillna(col_mins).fillna(1e-6)
+            elif impute_method in ['min', '1/2 Min']:
+                col_mins = data_df.min(axis=0) * 0.5
+                data_df = data_df.fillna(col_mins).fillna(1e-6)
             elif impute_method == 'mean':
-                data_df = data_df.fillna(data_df.mean()).fillna(1e-6)
+                data_df = data_df.fillna(data_df.mean(axis=0)).fillna(1e-6)
             elif impute_method == 'KNN':
                 data_df = pd.DataFrame(
                     KNNImputer(n_neighbors=min(5, len(data_df))).fit_transform(data_df),
@@ -140,7 +179,7 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.2, impute_method='KNN
             else:
                 data_df = data_df.fillna(1e-6)
 
-    data_df = data_df.astype(float)
+    data_df = np.clip(data_df.astype(float), 1e-9, None)
 
     # 3. 样本归一化 (消除进样体积与电离效率误差)
     if norm_method == 'Sum':
@@ -150,20 +189,24 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.2, impute_method='KNN
         row_meds = data_df.median(axis=1).replace(0, 1e-9)
         data_df = data_df.div(row_meds, axis=0) * row_meds.mean()
     elif norm_method == 'PQN':
+        # 仅用对比组或非全零特征的中位数作为参考谱图，与 MetaboAnalyst PQN 一致
         ref = data_df.median(axis=0)
         ref[ref <= 0] = 1e-6
         quotients = data_df.div(ref, axis=1)
         factors = quotients.median(axis=1).replace(0, 1e-9)
         data_df = data_df.div(factors, axis=0)
 
-    # 4. 生成供单变量统计 (Log2_FC 与 T 检验) 使用的纯净未缩放 Log2 矩阵
-    unscaled_log2_df = np.log2(np.clip(data_df, 0, None) + 1.0)
+    # 保存归一化后、Log转化前的线性丰度矩阵 (供计算与 MetaboAnalyst 完全一致的算术均值比值 Fold Change)
+    linear_norm_df = data_df.replace([np.inf, -np.inf], np.nan).fillna(1e-9).copy()
+
+    # 4. 生成纯净未缩放的 Log2 矩阵 (不加 +1 偏移，避免压缩小丰度代谢物的倍数与 T 检验显著性)
+    unscaled_log2_df = np.log2(np.clip(linear_norm_df, 1e-9, None))
     unscaled_log2_df = unscaled_log2_df.replace([np.inf, -np.inf], np.nan).fillna(0)
 
     if log_transform:
         data_df = unscaled_log2_df.copy()
     else:
-        data_df = data_df.replace([np.inf, -np.inf], np.nan).fillna(0)
+        data_df = linear_norm_df.copy()
 
     # 5. 特征缩放 (供 PCA, OPLS-DA, 热图等使用)
     if scale_method != 'None':
@@ -173,13 +216,18 @@ def data_cleaning_pipeline(df, group_col, missing_thresh=0.2, impute_method='KNN
         elif scale_method == 'Pareto': data_df = (data_df - mean) / np.sqrt(std)
 
     data_df = data_df.replace([np.inf, -np.inf], np.nan).fillna(0)
-    valid_var_cols = data_df.columns[data_df.var() > 1e-9].tolist()
+    valid_var_cols = data_df.columns[data_df.var() > 1e-12].tolist()
     data_df = data_df[valid_var_cols]
     unscaled_log2_df = unscaled_log2_df[valid_var_cols]
+    linear_norm_df = linear_norm_df[valid_var_cols]
     
     proc_full = pd.concat([meta_df, data_df], axis=1)
     if return_unscaled:
         unscaled_full = pd.concat([meta_df, unscaled_log2_df], axis=1)
+        linear_full = pd.concat([meta_df, linear_norm_df], axis=1)
+        # 将线性归一化矩阵挂载在 unscaled_full.attrs 中，既保持 3 元组返回值向后兼容，又能供 stats_utils 提取
+        unscaled_full.attrs['linear_norm_df'] = linear_full
+        unscaled_full.attrs['log_transformed'] = log_transform
         return proc_full, valid_var_cols, unscaled_full
     return proc_full, valid_var_cols
 
@@ -384,7 +432,7 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积", mode_regex
         
         meta = pd.DataFrame(index=combined.index)
         meta['Clean_Name'] = [str(n).split(' | ')[0].split(';')[0].strip() for n in combined.index]
-        meta['Original_Name'] = combined.index
+        meta['Original_Name'] = combined_df_idx = combined.index
         meta['KEGG_ID'] = kegg_list
         meta['Source_Mode'] = 'MRM_Targeted'
         meta['Is_Annotated'] = True 
@@ -392,7 +440,7 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积", mode_regex
     except Exception as e: return None, None, f"MRM 拟靶向表格解析失败: {str(e)}"
 
 # ==============================================================================
-# 🚀 引擎 C：MetDNA 原生管线提取器 (支持自定义模式标签 RP+/RP-/HILIC+/HILIC-)
+# 🚀 引擎 C：MetDNA 原生管线提取器 (支持自定义模式标签与可选单文件去重)
 # ==============================================================================
 def rank_confidence(conf_str):
     s = str(conf_str).upper().strip()
@@ -427,7 +475,6 @@ def parse_metdna_file(file_buffer, file_name, valid_samples=None, dedup_within_f
     if not sample_cols: 
         return None, None, "未在数据表中找到与 Info 表匹配的样本列名。"
 
-    # 优先使用用户在侧边栏指定的模式名称 (如 RP+, RP-, HILIC+, HILIC-)，彻底杜绝同名文件互相覆盖
     if custom_mode_tag and str(custom_mode_tag).strip():
         clean_tag = str(custom_mode_tag).strip()
     else:
@@ -444,12 +491,17 @@ def parse_metdna_file(file_buffer, file_name, valid_samples=None, dedup_within_f
         rt_vals = df['rt'] if 'rt' in df.columns else df.index.astype(str)
         df['peak_name'] = [f"M{mz}_RT{rt}" for mz, rt in zip(mz_vals, rt_vals)]
     
-    final_ids = df['peak_name'].astype(str).str.strip() + "_" + safe_id_suffix
-    final_ids = make_unique(final_ids)
+    raw_peak_names = df['peak_name'].astype(str).str.strip()
+    final_ids = make_unique(raw_peak_names + "_" + safe_id_suffix)
     
     df['name'] = df['name'].fillna("").astype(str).str.strip()
     mask_annotated = (df['name'] != "") & (df['name'].str.lower() != "nan")
     clean_names = df['name'].str.split(';', expand=True)[0].str.strip()
+    
+    # 若用户关闭单文件内去重，为同名不同峰附加 Peak_Name 后缀以防跨表合并时被覆盖
+    if not dedup_within_file:
+        dup_name_mask = mask_annotated & clean_names.duplicated(keep=False)
+        clean_names = np.where(dup_name_mask, clean_names + " (" + raw_peak_names + ")", clean_names)
     
     kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
     if kegg_col:
@@ -463,7 +515,7 @@ def parse_metdna_file(file_buffer, file_name, valid_samples=None, dedup_within_f
 
     meta_df = pd.DataFrame({
         "Peak_Name": final_ids, 
-        "Original_Name": np.where(mask_annotated, clean_names, final_ids), 
+        "Original_Name": np.where(mask_annotated, df['name'].str.split(';', expand=True)[0].str.strip(), final_ids), 
         "Clean_Name": np.where(mask_annotated, clean_names, final_ids), 
         "Confidence_Level": df['confidence_level'], 
         "Total_Score": pd.to_numeric(df['total_score'], errors='coerce').fillna(0),
@@ -475,7 +527,6 @@ def parse_metdna_file(file_buffer, file_name, valid_samples=None, dedup_within_f
     meta_df.set_index('Peak_Name', inplace=True)
     df_data.index = meta_df.index
 
-    # 单文件（单模式）内优先对同名已注释化合物执行三级漏斗去重 (剔除加合离子/源内裂解冗余)
     if dedup_within_file:
         meta_df['__rank__'] = [rank_confidence(c) for c in meta_df['Confidence_Level']]
         anno_meta = meta_df[meta_df['Is_Annotated']].sort_values(
