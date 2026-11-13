@@ -652,7 +652,7 @@ def merge_multiple_dfs(results_list):
     return full_df, merged_meta, None
 
 # ==============================================================================
-# 🌟 严谨通路富集引擎 (支持核心代谢 vs 生理/信号/转运通路分级开关)
+# 🌟 严谨通路富集引擎 (支持 初级代谢 / 次生代谢天然产物 / 生理信号转运 三大类别)
 # ==============================================================================
 OVERVIEW_PATHWAYS = {
     'metabolic pathways',
@@ -675,16 +675,29 @@ SIGNALING_NAME_KEYWORDS = (
     'cholesterol metabolism', 'insulin resistance', 'cobalamin transport'
 )
 
+SECONDARY_NAME_KEYWORDS = (
+    'flavonoid', 'flavone', 'flavonol', 'anthocyanin', 'isoflavonoid',
+    'phenylpropanoid', 'stilbenoid', 'diarylheptanoid', 'gingerol',
+    'terpenoid', 'monoterpenoid', 'diterpenoid', 'sesquiterpenoid', 'triterpenoid',
+    'carotenoid', 'zeatin', 'brassinosteroid', 'limonene', 'pinene',
+    'alkaloid', 'glucosinolate', 'benzoxazinoid', 'betalain',
+    'plant secondary metabolites', 'polyketide', 'macrolide', 'ansamycin'
+)
+
 def infer_pathway_category(pw_name, raw_cat=None):
-    """识别通路所属功能类别：核心生化代谢 vs 生理/信号/转运"""
+    """识别通路所属三大功能类别：Metabolism / Secondary_Metabolism / Signaling_Physiological"""
     if raw_cat and str(raw_cat).strip().lower() not in ['nan', 'none', '']:
-        rc = str(raw_cat).strip()
-        if 'signaling' in rc.lower() or 'physio' in rc.lower():
+        rc = str(raw_cat).strip().lower()
+        if 'signaling' in rc or 'physio' in rc:
             return 'Signaling_Physiological'
+        if 'secondary' in rc:
+            return 'Secondary_Metabolism'
         return 'Metabolism'
     pw_lower = str(pw_name).strip().lower()
     if any(kw in pw_lower for kw in SIGNALING_NAME_KEYWORDS):
         return 'Signaling_Physiological'
+    if any(kw in pw_lower for kw in SECONDARY_NAME_KEYWORDS):
+        return 'Secondary_Metabolism'
     return 'Metabolism'
 
 def run_pathway_enrichment(
@@ -774,6 +787,12 @@ def run_pathway_enrichment(
     if N == 0 or K_drawn == 0:
         return pd.DataFrame(), pd.DataFrame()
     
+    cat_label_map = {
+        "Metabolism": "初级核心代谢 (Primary Metabolism)",
+        "Secondary_Metabolism": "次生代谢/天然产物 (Secondary Metabolism)",
+        "Signaling_Physiological": "生理/信号/转运 (Physiology & Signaling)"
+    }
+
     results, filtered_db_records = [], []
     for pw_name, pw_comps, pw_cat in parsed_pathways:
         exp_in_pw = pw_comps.intersection(set(exp_id_to_name.keys()))
@@ -797,7 +816,7 @@ def run_pathway_enrichment(
         expected = (K_drawn * M) / float(N)
         enrich_factor = k / expected if expected > 0 else 0.0
         hit_names = sorted(set(sig_id_to_name[cid] for cid in hit_ids))
-        cat_disp = "核心代谢 (Metabolism)" if pw_cat == "Metabolism" else "生理/信号/转运 (Physiology & Signaling)"
+        cat_disp = cat_label_map.get(pw_cat, "初级核心代谢 (Primary Metabolism)")
         
         results.append({
             'Pathway': pw_name,
