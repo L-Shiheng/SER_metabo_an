@@ -110,31 +110,61 @@ class OPLS_DA:
         return np.array(correlations), np.array(r2_perm), np.array(q2_perm), orig_R2Y, orig_Q2
 
 # ====================
-# 通用数据清洗管线 (全面对标 MetaboAnalyst 标准)
+# 通用数据清洗管线 (含 QC 稳定出峰与 RSD% 质控过滤 + 对标 MetaboAnalyst 标准)
 # ====================
 def data_cleaning_pipeline(
     df, group_col, missing_thresh=0.5, impute_method='lod_1_5',
     norm_method='PQN', log_transform=True, scale_method='Pareto',
-    return_unscaled=False, target_groups=None, filter_mode='per_group'
+    return_unscaled=False, target_groups=None, filter_mode='per_group',
+    use_qc_rsd=False, qc_rsd_thresh=30.0, qc_label='QC', qc_min_detect_rate=0.50
 ):
     """
-    filter_mode:
-      - 'per_group': 修正组内过滤原则 (只要在任一对比组内的缺失率 <= missing_thresh 即保留，保护组特异标志物)
-      - 'global': 全局过滤原则 (在对比组整体样本中的缺失率 <= missing_thresh，同 MetaboAnalyst 默认)
-    impute_method:
-      - 'lod_1_5': 1/5 最小正值替换 (MetaboAnalyst 默认 LoD 检出限替换法)
-      - 'min': 1/2 最小正值替换
-      - 'KNN': K近邻插补
-      - 'mean': 均值替换
-      - 'zero': 极小常数替换
+    新增 QC 质控参数:
+      - use_qc_rsd: 是否开启 QC 样本稳定性过滤
+      - qc_rsd_thresh: QC 样本最大允许 RSD% 阈值 (非靶向默认 30.0%, 拟靶向 20.0%)
+      - qc_label: QC 组别标识名称 (默认自动识别 'QC' 或包含 'qc' 的组别)
+      - qc_min_detect_rate: QC 样本最低检出率 (默认 0.50，即要求在至少 50% 的 QC 样本中稳定出峰)
     """
     numeric_cols = [c for c in df.select_dtypes(include=[np.number]).columns if c not in [group_col, 'SampleID', 'Source_Files']]
     meta_cols = [c for c in df.columns if c not in numeric_cols]
     data_df = df[numeric_cols].copy()
     meta_df = df[meta_cols].copy()
     
-    # 1. 缺失率过滤：仅在当前关注的对比组 (target_groups) 上评估缺失率，防止无关组连坐误杀
     na_mask = data_df.isnull() | (data_df <= 0)
+
+    # ----------------------------------------------------------
+    # 0. 计算全特征 QC 样本 RSD% 与检出率 (在线性尺度、插补前计算，与 MetaboAnalyst R 包一致)
+    # ----------------------------------------------------------
+    qc_rsd_map = {}
+    qc_filtered_out_count = 0
+    has_valid_qc = False
+
+    if group_col in df.columns:
+        grp_str_series = df[group_col].astype(str).str.strip()
+        qc_row_mask = (grp_str_series.str.lower() == str(qc_label).strip().lower()) | grp_str_series.str.lower().str.contains('qc')
+        n_qc_samples = int(qc_row_mask.sum())
+        
+        if n_qc_samples >= 2:
+            has_valid_qc = True
+            qc_raw_sub = data_df.loc[qc_row_mask].mask(na_mask.loc[qc_row_mask], np.nan)
+            qc_detect_rate = qc_raw_sub.notna().mean(axis=0)
+            qc_valid_cnt = qc_raw_sub.notna().sum(axis=0)
+            qc_means = qc_raw_sub.mean(axis=0)
+            qc_stds = qc_raw_sub.std(axis=0, ddof=1)
+            qc_rsds = (qc_stds / qc_means.replace(0, np.nan)) * 100.0
+            qc_rsd_map = qc_rsds.to_dict()
+
+            if use_qc_rsd:
+                # 满足“稳定出峰”的双重条件：1) QC检出率 >= 50% (且至少2针QC检出)；2) QC RSD% <= 阈值
+                qc_pass_mask = (qc_detect_rate >= qc_min_detect_rate) & (qc_valid_cnt >= 2) & (qc_rsds <= float(qc_rsd_thresh))
+                qc_keep_cols = qc_pass_mask[qc_pass_mask].index.tolist()
+                qc_filtered_out_count = len(data_df.columns) - len(qc_keep_cols)
+                data_df = data_df[qc_keep_cols]
+                na_mask = na_mask[qc_keep_cols]
+
+    # ----------------------------------------------------------
+    # 1. 缺失率过滤：仅在当前关注的对比组 (target_groups) 上评估缺失率，防止无关组连坐误杀
+    # ----------------------------------------------------------
     if target_groups and group_col in df.columns:
         eval_row_mask = df[group_col].isin(target_groups)
         if eval_row_mask.sum() >= 2:
@@ -148,7 +178,6 @@ def data_cleaning_pipeline(
         grp_eval = df[group_col] if group_col in df.columns else None
 
     if filter_mode == 'per_group' and grp_eval is not None and grp_eval.nunique() >= 2:
-        # 只要在任意一个对比组内缺失率 <= missing_thresh 即予保留
         grp_missing_rates = na_eval.groupby(grp_eval).mean()
         min_grp_missing = grp_missing_rates.min(axis=0)
         valid_cols = min_grp_missing[min_grp_missing <= missing_thresh].index.tolist()
@@ -158,7 +187,9 @@ def data_cleaning_pipeline(
 
     data_df = data_df[valid_cols].mask(data_df[valid_cols] <= 0, np.nan)
     
+    # ----------------------------------------------------------
     # 2. 缺失值填充 (严格按列独立计算最小正值)
+    # ----------------------------------------------------------
     if data_df.isnull().sum().sum() > 0:
         non_empty_cols = data_df.columns[data_df.notna().any()].tolist()
         data_df = data_df[non_empty_cols]
@@ -181,7 +212,9 @@ def data_cleaning_pipeline(
 
     data_df = np.clip(data_df.astype(float), 1e-9, None)
 
+    # ----------------------------------------------------------
     # 3. 样本归一化 (消除进样体积与电离效率误差)
+    # ----------------------------------------------------------
     if norm_method == 'Sum':
         row_sums = data_df.sum(axis=1).replace(0, 1e-9)
         data_df = data_df.div(row_sums, axis=0) * row_sums.mean()
@@ -189,17 +222,17 @@ def data_cleaning_pipeline(
         row_meds = data_df.median(axis=1).replace(0, 1e-9)
         data_df = data_df.div(row_meds, axis=0) * row_meds.mean()
     elif norm_method == 'PQN':
-        # 仅用对比组或非全零特征的中位数作为参考谱图，与 MetaboAnalyst PQN 一致
         ref = data_df.median(axis=0)
         ref[ref <= 0] = 1e-6
         quotients = data_df.div(ref, axis=1)
         factors = quotients.median(axis=1).replace(0, 1e-9)
         data_df = data_df.div(factors, axis=0)
 
-    # 保存归一化后、Log转化前的线性丰度矩阵 (供计算与 MetaboAnalyst 完全一致的算术均值比值 Fold Change)
     linear_norm_df = data_df.replace([np.inf, -np.inf], np.nan).fillna(1e-9).copy()
 
-    # 4. 生成纯净未缩放的 Log2 矩阵 (不加 +1 偏移，避免压缩小丰度代谢物的倍数与 T 检验显著性)
+    # ----------------------------------------------------------
+    # 4. 生成纯净未缩放的 Log2 矩阵
+    # ----------------------------------------------------------
     unscaled_log2_df = np.log2(np.clip(linear_norm_df, 1e-9, None))
     unscaled_log2_df = unscaled_log2_df.replace([np.inf, -np.inf], np.nan).fillna(0)
 
@@ -208,7 +241,9 @@ def data_cleaning_pipeline(
     else:
         data_df = linear_norm_df.copy()
 
+    # ----------------------------------------------------------
     # 5. 特征缩放 (供 PCA, OPLS-DA, 热图等使用)
+    # ----------------------------------------------------------
     if scale_method != 'None':
         mean = data_df.mean()
         std = data_df.std().replace(0, 1e-9) 
@@ -222,12 +257,18 @@ def data_cleaning_pipeline(
     linear_norm_df = linear_norm_df[valid_var_cols]
     
     proc_full = pd.concat([meta_df, data_df], axis=1)
+    proc_full.attrs['qc_rsd_map'] = qc_rsd_map
+    proc_full.attrs['qc_filtered_out_count'] = qc_filtered_out_count
+    proc_full.attrs['has_valid_qc'] = has_valid_qc
+
     if return_unscaled:
         unscaled_full = pd.concat([meta_df, unscaled_log2_df], axis=1)
         linear_full = pd.concat([meta_df, linear_norm_df], axis=1)
-        # 将线性归一化矩阵挂载在 unscaled_full.attrs 中，既保持 3 元组返回值向后兼容，又能供 stats_utils 提取
         unscaled_full.attrs['linear_norm_df'] = linear_full
         unscaled_full.attrs['log_transformed'] = log_transform
+        unscaled_full.attrs['qc_rsd_map'] = qc_rsd_map
+        unscaled_full.attrs['qc_filtered_out_count'] = qc_filtered_out_count
+        unscaled_full.attrs['has_valid_qc'] = has_valid_qc
         return proc_full, valid_var_cols, unscaled_full
     return proc_full, valid_var_cols
 
@@ -432,7 +473,7 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积", mode_regex
         
         meta = pd.DataFrame(index=combined.index)
         meta['Clean_Name'] = [str(n).split(' | ')[0].split(';')[0].strip() for n in combined.index]
-        meta['Original_Name'] = combined_df_idx = combined.index
+        meta['Original_Name'] = combined.index
         meta['KEGG_ID'] = kegg_list
         meta['Source_Mode'] = 'MRM_Targeted'
         meta['Is_Annotated'] = True 
@@ -498,7 +539,6 @@ def parse_metdna_file(file_buffer, file_name, valid_samples=None, dedup_within_f
     mask_annotated = (df['name'] != "") & (df['name'].str.lower() != "nan")
     clean_names = df['name'].str.split(';', expand=True)[0].str.strip()
     
-    # 若用户关闭单文件内去重，为同名不同峰附加 Peak_Name 后缀以防跨表合并时被覆盖
     if not dedup_within_file:
         dup_name_mask = mask_annotated & clean_names.duplicated(keep=False)
         clean_names = np.where(dup_name_mask, clean_names + " (" + raw_peak_names + ")", clean_names)
