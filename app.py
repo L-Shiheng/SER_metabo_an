@@ -66,10 +66,13 @@ SPECIES_OPTIONS = {
     "🐷 猪 - Pig (ssc)": "ssc",
     "🐮 牛 - Cow (bta)": "bta",
     "🐶 犬 - Dog (cfa)": "cfa",
-    "🌿 拟南芥 - Arabidopsis [植物/中药通用基准] (ath)": "ath",
+    "🌿 中药材/药用植物全景库 - TCM & Medicinal Plants (tcm)": "tcm",
+    "🍷 葡萄酒/果酒发酵双系统库 - Wine & Fermentation (wine)": "wine",
+    "🍇 酿酒葡萄 - Grapevine (vvi)": "vvi",
+    "🌱 拟南芥 - Arabidopsis [模式植物基准] (ath)": "ath",
     "🌾 水稻 - Rice (osa)": "osa",
     "🌽 玉米 - Maize (zma)": "zma",
-    "🌱 大豆 - Soybean (gmx)": "gmx",
+    "🫘 大豆 - Soybean (gmx)": "gmx",
     "🍅 番茄 - Tomato (sly)": "sly",
     "🐟 斑马鱼 - Zebrafish [环境/水生毒理] (dre)": "dre",
     "🪰 黑腹果蝇 - Fruit fly (dme)": "dme",
@@ -183,8 +186,8 @@ with st.sidebar:
         ex_str = st.text_input("2. 样本剔除 (选填，逗号分隔)")
         if ex_str: excluded_samples = [s.strip() for s in ex_str.split(',') if s.strip()]
 
-    st.markdown("#### 3. KEGG 物种与通路配置")
-    species_label = st.selectbox("选择研究物种 (含动物/植物/微生物)", list(SPECIES_OPTIONS.keys()), index=0)
+    st.markdown("#### 3. KEGG 物种与专项通路库")
+    species_label = st.selectbox("选择研究物种或专项库 (动物/中药/葡萄酒/微生物)", list(SPECIES_OPTIONS.keys()), index=0)
     selected_code = SPECIES_OPTIONS[species_label]
     if selected_code == "custom":
         custom_sp_input = st.text_input(
@@ -200,8 +203,8 @@ with st.sidebar:
     custom_pathway_file = st.file_uploader("或上传自定义通路库 (.csv)", type=["csv", "gmt"], key="pathway_db")
     
     db_sync_msg = st.session_state.get('_db_sync_msg', '')
-    if st.button(f"🔄 同步 {species_code} 通路库 (代谢+信号)", width='stretch'):
-        with st.spinner(f"⏳ 正在连接 KEGG 官方服务器抓取 [{species_code}] 核心代谢与生理/信号通路（约需 1-2 分钟）..."):
+    if st.button(f"🔄 同步 {species_code} 通路库 (3线程加速)", width='stretch'):
+        with st.spinner(f"⏳ 正在并发连接 KEGG 服务器构建 [{species_code}] 专属通路库（约需 15-25 秒）..."):
             try:
                 res_sub = subprocess.run([sys.executable, "get_kegg_db.py", species_code], capture_output=True, text=True)
                 if res_sub.returncode == 0:
@@ -223,15 +226,20 @@ with st.sidebar:
             _n_pws = len(_kegg_df)
             _uniq_cpds = len(set(c.strip() for comp_str in _kegg_df['Compounds'].dropna() for c in str(comp_str).split(';') if c.strip()))
             if 'Category' in _kegg_df.columns:
-                _n_sig = int((_kegg_df['Category'].astype(str).str.contains('Signaling', case=False)).sum())
-                _n_met = _n_pws - _n_sig
-                st.caption(f"📦 当前库：`{db_filename}`（共 **{_n_pws}** 条：核心代谢 **{_n_met}** + 生理/信号/转运 **{_n_sig}** | 覆盖 **{_uniq_cpds}** 个唯一化合物）")
+                _cat_s = _kegg_df['Category'].astype(str)
+                _n_sec = int(_cat_s.str.contains('Secondary', case=False).sum())
+                _n_sig = int(_cat_s.str.contains('Signaling', case=False).sum())
+                _n_prim = _n_pws - _n_sec - _n_sig
+                st.caption(
+                    f"📦 当前库：`{db_filename}`（共 **{_n_pws}** 条：初级代谢 **{_n_prim}** + "
+                    f"次生代谢 **{_n_sec}** + 生理/信号 **{_n_sig}** | 覆盖 **{_uniq_cpds}** 个唯一化合物）"
+                )
             else:
-                st.caption(f"📦 当前库：`{db_filename}`（{_n_pws} 条核心代谢通路 | 覆盖 {_uniq_cpds} 个唯一化合物）💡 *点击上方同步按钮可追加铁死亡/胆固醇代谢等信号与转运通路*")
+                st.caption(f"📦 当前库：`{db_filename}`（{_n_pws} 条通路 | 覆盖 {_uniq_cpds} 个唯一化合物）💡 *点击上方同步按钮可升级为分级库*")
         except Exception:
             st.caption(f"📦 当前库：`{db_filename}`")
     else:
-        st.caption(f"⚠️ 本地尚未生成 `{db_filename}`，请点击上方 **🔄 同步 {species_code} 通路库** 按钮自动抓取。")
+        st.caption(f"⚠️ 本地尚未生成 `{db_filename}`，请点击上方 **🔄 同步 {species_code} 通路库** 按钮自动构建。")
 
     st.markdown("#### 4. 上传分析数据")
     feature_scope = "全部特征"
@@ -434,7 +442,7 @@ with st.form(key='analysis_form'):
         include_signaling_pw = st.checkbox(
             "🧬 纳入生理/信号/转运相关代谢通路 (如铁死亡 Ferroptosis、胆固醇代谢、ABC转运蛋白、神经配体、植物激素信号等)",
             value=True,
-            help="开启后，除 <01100 的纯酶促代谢通路外，还会将包含小分子代谢物的关键生理、转运与信号通路纳入富集分析；取消勾选则仅分析纯酶促生化代谢通路。"
+            help="开启后，除初级与次生代谢通路外，还会将包含小分子代谢物的关键生理、转运与信号通路纳入富集分析；取消勾选则仅分析纯生化代谢通路。"
         )
     
     with st.expander("数据预处理与 QC 质控配置 (已对齐 MetaboAnalyst 标准)", expanded=True):
@@ -932,7 +940,7 @@ def run_single_matrix_modeling(
 
 
 # ==========================================
-# 4. 执行核心分析计算 (支持模式 A 与模式 B 双轨运行 + QC 质控 + 双类别 KEGG 富集)
+# 4. 执行核心分析计算 (支持模式 A 与模式 B 双轨运行 + QC 质控 + 三类别 KEGG 富集)
 # ==========================================
 if submit_button:
     if len(sel_grps) != 2 or case == ctrl: 
@@ -1144,7 +1152,7 @@ if submit_button:
                     pass
 
             # ==========================================================
-            # 公共下游 3：KEGG 通路富集与机制网络图 (支持双类别通路筛选)
+            # 公共下游 3：KEGG 通路富集与机制网络图 (支持三大类别通路筛选)
             # ==========================================================
             pathway_df, filtered_db_df, fig_pathway, fig_network = pd.DataFrame(), pd.DataFrame(), None, None
             sig_mets_fullnames = out_df['Search_Name'].dropna().unique().tolist()
