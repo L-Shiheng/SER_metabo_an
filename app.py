@@ -59,6 +59,28 @@ GROUP_COLORS = ['#E64B35', '#4DBBD5', '#00A087', '#3C5488', '#F39B7F', '#8491B4'
 MODE_COLORS = ['#2b5c8f', '#d95f02', '#7570b3', '#1b9e77', '#e7298a', '#66a61e']
 MODE_SYMBOLS = ['circle', 'square', 'diamond', 'cross', 'triangle-up', 'star']
 
+SPECIES_OPTIONS = {
+    "🧑 人类 - Human (hsa)": "hsa",
+    "🐭 小鼠 - Mouse (mmu)": "mmu",
+    "🐀 大鼠 - Rat (rno)": "rno",
+    "🐷 猪 - Pig (ssc)": "ssc",
+    "🐮 牛 - Cow (bta)": "bta",
+    "🐶 犬 - Dog (cfa)": "cfa",
+    "🌿 拟南芥 - Arabidopsis [植物/中药通用基准] (ath)": "ath",
+    "🌾 水稻 - Rice (osa)": "osa",
+    "🌽 玉米 - Maize (zma)": "zma",
+    "🌱 大豆 - Soybean (gmx)": "gmx",
+    "🍅 番茄 - Tomato (sly)": "sly",
+    "🐟 斑马鱼 - Zebrafish [环境/水生毒理] (dre)": "dre",
+    "🪰 黑腹果蝇 - Fruit fly (dme)": "dme",
+    "🪱 秀丽隐杆线虫 - Nematode (cel)": "cel",
+    "🦠 大肠杆菌 - E. coli [肠道菌群/原核] (eco)": "eco",
+    "🍺 酿酒酵母 - Yeast [真菌/发酵工程] (sce)": "sce",
+    "🧫 枯草芽孢杆菌 - B. subtilis (bsu)": "bsu",
+    "🌐 通用跨物种参考全库 - General (map)": "map",
+    "✏️ 自定义任意 KEGG 物种代码 (Custom)...": "custom"
+}
+
 st.markdown("""
 <style>
     .block-container {padding-top: 2rem !important; padding-bottom: 3rem !important;}
@@ -161,20 +183,30 @@ with st.sidebar:
         ex_str = st.text_input("2. 样本剔除 (选填，逗号分隔)")
         if ex_str: excluded_samples = [s.strip() for s in ex_str.split(',') if s.strip()]
 
-    st.markdown("#### 3. KEGG 通路配置")
-    species = st.selectbox("物种背景", ["Human (Homo sapiens)", "Mouse (Mus musculus)", "Rat (Rattus norvegicus)", "General (所有物种)"], index=0)
-    species_code = {"Human (Homo sapiens)": "hsa", "Mouse (Mus musculus)": "mmu", "Rat (Rattus norvegicus)": "rno", "General (所有物种)": "map"}[species]
+    st.markdown("#### 3. KEGG 物种与通路配置")
+    species_label = st.selectbox("选择研究物种 (含动物/植物/微生物)", list(SPECIES_OPTIONS.keys()), index=0)
+    selected_code = SPECIES_OPTIONS[species_label]
+    if selected_code == "custom":
+        custom_sp_input = st.text_input(
+            "输入 KEGG 物种代码 (3~4字母，如 gga 鸡 / cit 柑橘 / xla 爪蟾)",
+            value="gga",
+            help="可在 KEGG Organism 列表查询任意物种缩写代码，点击下方同步按钮即可自动抓取建库。"
+        )
+        species_code = re.sub(r'[^a-z0-9]', '', custom_sp_input.strip().lower()) or "hsa"
+    else:
+        species_code = selected_code
+
     db_filename = f"kegg_{species_code}.csv"
-    custom_pathway_file = st.file_uploader("自定义通路库 (.csv)", type=["csv", "gmt"], key="pathway_db")
+    custom_pathway_file = st.file_uploader("或上传自定义通路库 (.csv)", type=["csv", "gmt"], key="pathway_db")
     
     db_sync_msg = st.session_state.get('_db_sync_msg', '')
-    if st.button(f"🔄 同步 {species_code} 通路库", width='stretch'):
-        with st.spinner(f"⏳ 正在后台解析 KGML 抓取 {species_code} 核心代谢通路（约需 1-2 分钟）..."):
+    if st.button(f"🔄 同步 {species_code} 通路库 (代谢+信号)", width='stretch'):
+        with st.spinner(f"⏳ 正在连接 KEGG 官方服务器抓取 [{species_code}] 核心代谢与生理/信号通路（约需 1-2 分钟）..."):
             try:
                 res_sub = subprocess.run([sys.executable, "get_kegg_db.py", species_code], capture_output=True, text=True)
                 if res_sub.returncode == 0:
-                    st.session_state['_db_sync_msg'] = f"✅ {species_code} 库同步成功！\n*(更新时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})*"
-                    st.toast("✅ 库同步成功！")
+                    st.session_state['_db_sync_msg'] = f"✅ `{species_code}` 库同步成功！\n*(更新时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})*"
+                    st.toast(f"✅ {species_code} 库同步成功！")
                     st.rerun() 
                 else:
                     st.session_state['_db_sync_msg'] = f"❌ 更新脚本执行报错:\n```text\n{res_sub.stderr or res_sub.stdout}\n```"
@@ -189,12 +221,17 @@ with st.sidebar:
         try:
             _kegg_df = pd.read_csv(db_filename)
             _n_pws = len(_kegg_df)
-            _n_cpds = sum(len(str(c).split(';')) for c in _kegg_df['Compounds'].dropna())
-            st.caption(f"📦 当前库：`{db_filename}`（{_n_pws} 条通路 | {_n_cpds} 个物种特异反应节点）")
+            _uniq_cpds = len(set(c.strip() for comp_str in _kegg_df['Compounds'].dropna() for c in str(comp_str).split(';') if c.strip()))
+            if 'Category' in _kegg_df.columns:
+                _n_sig = int((_kegg_df['Category'].astype(str).str.contains('Signaling', case=False)).sum())
+                _n_met = _n_pws - _n_sig
+                st.caption(f"📦 当前库：`{db_filename}`（共 **{_n_pws}** 条：核心代谢 **{_n_met}** + 生理/信号/转运 **{_n_sig}** | 覆盖 **{_uniq_cpds}** 个唯一化合物）")
+            else:
+                st.caption(f"📦 当前库：`{db_filename}`（{_n_pws} 条核心代谢通路 | 覆盖 {_uniq_cpds} 个唯一化合物）💡 *点击上方同步按钮可追加铁死亡/胆固醇代谢等信号与转运通路*")
         except Exception:
             st.caption(f"📦 当前库：`{db_filename}`")
     else:
-        st.caption(f"⚠️ 未找到 `{db_filename}`，请点击上方同步按钮。")
+        st.caption(f"⚠️ 本地尚未生成 `{db_filename}`，请点击上方 **🔄 同步 {species_code} 通路库** 按钮自动抓取。")
 
     st.markdown("#### 4. 上传分析数据")
     feature_scope = "全部特征"
@@ -345,7 +382,7 @@ if start_process:
             st.rerun()
 
 # ==========================================
-# 3. 统计与可视化参数设置 (含 QC RSD% 过滤与 MetaboAnalyst 对齐参数)
+# 3. 统计与可视化参数设置 (含 QC RSD% 过滤与 KEGG 通路范围开关)
 # ==========================================
 if not st.session_state.data_loaded:
     st.info("👈 请在左侧控制台按对应数据格式上传数据。")
@@ -369,7 +406,6 @@ with st.form(key='analysis_form'):
     non_num = raw_df.select_dtypes(exclude=[np.number]).columns.tolist()
     group_col = st.selectbox("分组列", non_num, index=non_num.index('Group') if 'Group' in non_num else 0)
     
-    # 自动检测当前数据集中是否包含 QC 样本
     all_grp_vals = raw_df[group_col].astype(str).unique().tolist()
     has_qc_in_data = any('qc' in g.lower() for g in all_grp_vals)
 
@@ -395,9 +431,13 @@ with st.form(key='analysis_form'):
             index=0,
             help="物种全库参考背景以当前物种 KEGG 代谢网络全集为 N；实验实测背景以本次上传表格中检出的 KEGG 代谢物为 N。"
         )
+        include_signaling_pw = st.checkbox(
+            "🧬 纳入生理/信号/转运相关代谢通路 (如铁死亡 Ferroptosis、胆固醇代谢、ABC转运蛋白、神经配体、植物激素信号等)",
+            value=True,
+            help="开启后，除 <01100 的纯酶促代谢通路外，还会将包含小分子代谢物的关键生理、转运与信号通路纳入富集分析；取消勾选则仅分析纯酶促生化代谢通路。"
+        )
     
     with st.expander("数据预处理与 QC 质控配置 (已对齐 MetaboAnalyst 标准)", expanded=True):
-        # 第一行：QC 稳定性过滤 + 样本缺失率过滤
         c_qc1, c_qc2, c_p1, c_p2 = st.columns([1.3, 1.3, 1.3, 1.5])
         use_qc_rsd_filter = c_qc1.checkbox(
             "启用 QC 样本 RSD% 过滤",
@@ -424,7 +464,6 @@ with st.form(key='analysis_form'):
             help="『组内修正过滤』可完美保留在某一组 100% 检出、另一组未检出的全有/全无型特异生物标志物。"
         )
 
-        # 第二行：插补、归一化、缩放与 T 检验假设
         c_p3, c_p4, c_p5, c_p6 = st.columns(4)
         impute_label = c_p3.selectbox(
             "缺失值填充方法",
@@ -793,7 +832,6 @@ def run_single_matrix_modeling(
         stats_df['Source_Mode'] = mode_title or 'Global'
         stats_df['Detected_Modes'] = stats_df['Source_Mode']
 
-    # 补充或映射每个特征在 QC 样本中的 RSD%
     if 'QC_RSD' not in stats_df.columns:
         stats_df['QC_RSD'] = stats_df['Metabolite'].map(qc_rsd_map)
     else:
@@ -894,7 +932,7 @@ def run_single_matrix_modeling(
 
 
 # ==========================================
-# 4. 执行核心分析计算 (支持模式 A 与模式 B 双轨运行 + QC RSD% 过滤)
+# 4. 执行核心分析计算 (支持模式 A 与模式 B 双轨运行 + QC 质控 + 双类别 KEGG 富集)
 # ==========================================
 if submit_button:
     if len(sel_grps) != 2 or case == ctrl: 
@@ -1106,7 +1144,7 @@ if submit_button:
                     pass
 
             # ==========================================================
-            # 公共下游 3：KEGG 通路富集与机制网络图
+            # 公共下游 3：KEGG 通路富集与机制网络图 (支持双类别通路筛选)
             # ==========================================================
             pathway_df, filtered_db_df, fig_pathway, fig_network = pd.DataFrame(), pd.DataFrame(), None, None
             sig_mets_fullnames = out_df['Search_Name'].dropna().unique().tolist()
@@ -1114,18 +1152,22 @@ if submit_button:
                 pathway_df, filtered_db_df = run_pathway_enrichment(
                     sig_mets_fullnames, bg_universe_list,
                     custom_db_source=custom_pathway_file if custom_pathway_file else db_filename,
-                    bg_mode=bg_mode_key
+                    bg_mode=bg_mode_key,
+                    include_signaling=include_signaling_pw
                 )
                 if not pathway_df.empty and 'Error' not in pathway_df.columns:
                     plot_pw_df = pathway_df[pathway_df['Hits'] > 0].head(pw_show_num)
+                    pw_hover = {'Hit_Metabolites': True, 'P_Value': ':.4f', 'FDR': ':.4f'}
+                    if 'Category' in plot_pw_df.columns:
+                        pw_hover['Category'] = True
                     fig_pathway = px.scatter(
                         plot_pw_df, x='Enrichment_Factor', y='-Log10_P', size='Hits', color='P_Value',
-                        hover_name='Pathway', hover_data={'Hit_Metabolites': True, 'P_Value': ':.4f', 'FDR': ':.4f'},
+                        hover_name='Pathway', hover_data=pw_hover,
                         color_continuous_scale='Reds_r', size_max=40
                     )
                     fig_pathway.update_traces(marker=dict(line=dict(width=1, color='black'), opacity=0.75))
                     fig_pathway.add_hline(y=-np.log10(0.05), line_dash="dash", line_color="gray")
-                    fig_pathway.update_layout(template="simple_white", width=800, height=600, title={'text': "KEGG Pathway Enrichment", 'x':0.5, 'xanchor': 'center'}, xaxis_title="Enrichment Factor", yaxis_title="-Log10(P)")
+                    fig_pathway.update_layout(template="simple_white", width=800, height=600, title={'text': f"KEGG Pathway Enrichment ({species_code.upper()})", 'x':0.5, 'xanchor': 'center'}, xaxis_title="Enrichment Factor", yaxis_title="-Log10(P)")
                     
                     sig_pws = pathway_df[pathway_df['P_Value'] < 0.05].head(pw_show_num)
                     if sig_pws.empty: sig_pws = pathway_df.head(min(5, len(pathway_df)))
