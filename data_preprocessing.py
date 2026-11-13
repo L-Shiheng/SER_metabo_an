@@ -118,13 +118,6 @@ def data_cleaning_pipeline(
     return_unscaled=False, target_groups=None, filter_mode='per_group',
     use_qc_rsd=False, qc_rsd_thresh=30.0, qc_label='QC', qc_min_detect_rate=0.50
 ):
-    """
-    新增 QC 质控参数:
-      - use_qc_rsd: 是否开启 QC 样本稳定性过滤
-      - qc_rsd_thresh: QC 样本最大允许 RSD% 阈值 (非靶向默认 30.0%, 拟靶向 20.0%)
-      - qc_label: QC 组别标识名称 (默认自动识别 'QC' 或包含 'qc' 的组别)
-      - qc_min_detect_rate: QC 样本最低检出率 (默认 0.50，即要求在至少 50% 的 QC 样本中稳定出峰)
-    """
     numeric_cols = [c for c in df.select_dtypes(include=[np.number]).columns if c not in [group_col, 'SampleID', 'Source_Files']]
     meta_cols = [c for c in df.columns if c not in numeric_cols]
     data_df = df[numeric_cols].copy()
@@ -133,7 +126,7 @@ def data_cleaning_pipeline(
     na_mask = data_df.isnull() | (data_df <= 0)
 
     # ----------------------------------------------------------
-    # 0. 计算全特征 QC 样本 RSD% 与检出率 (在线性尺度、插补前计算，与 MetaboAnalyst R 包一致)
+    # 0. 计算全特征 QC 样本 RSD% 与检出率 (在线性尺度、插补前计算)
     # ----------------------------------------------------------
     qc_rsd_map = {}
     qc_filtered_out_count = 0
@@ -155,7 +148,6 @@ def data_cleaning_pipeline(
             qc_rsd_map = qc_rsds.to_dict()
 
             if use_qc_rsd:
-                # 满足“稳定出峰”的双重条件：1) QC检出率 >= 50% (且至少2针QC检出)；2) QC RSD% <= 阈值
                 qc_pass_mask = (qc_detect_rate >= qc_min_detect_rate) & (qc_valid_cnt >= 2) & (qc_rsds <= float(qc_rsd_thresh))
                 qc_keep_cols = qc_pass_mask[qc_pass_mask].index.tolist()
                 qc_filtered_out_count = len(data_df.columns) - len(qc_keep_cols)
@@ -163,7 +155,7 @@ def data_cleaning_pipeline(
                 na_mask = na_mask[qc_keep_cols]
 
     # ----------------------------------------------------------
-    # 1. 缺失率过滤：仅在当前关注的对比组 (target_groups) 上评估缺失率，防止无关组连坐误杀
+    # 1. 缺失率过滤：仅在当前关注的对比组 (target_groups) 上评估缺失率
     # ----------------------------------------------------------
     if target_groups and group_col in df.columns:
         eval_row_mask = df[group_col].isin(target_groups)
@@ -660,7 +652,7 @@ def merge_multiple_dfs(results_list):
     return full_df, merged_meta, None
 
 # ==============================================================================
-# 🌟 严谨通路富集引擎 (统一唯一 C-number 量纲 + 支持全库/实测双背景切换)
+# 🌟 严谨通路富集引擎 (支持核心代谢 vs 生理/信号/转运通路分级开关)
 # ==============================================================================
 OVERVIEW_PATHWAYS = {
     'metabolic pathways',
@@ -675,7 +667,30 @@ OVERVIEW_PATHWAYS = {
     'overview of biosynthetic pathways'
 }
 
-def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_source=None, bg_mode="reference"):
+SIGNALING_NAME_KEYWORDS = (
+    'abc transporters', 'two-component system', 'phosphotransferase system',
+    'signaling pathway', 'signaling system', 'signal transduction',
+    'neuroactive ligand-receptor', 'ferroptosis', 'synapse',
+    'digestion and absorption', 'bile secretion', 'mineral absorption',
+    'cholesterol metabolism', 'insulin resistance', 'cobalamin transport'
+)
+
+def infer_pathway_category(pw_name, raw_cat=None):
+    """识别通路所属功能类别：核心生化代谢 vs 生理/信号/转运"""
+    if raw_cat and str(raw_cat).strip().lower() not in ['nan', 'none', '']:
+        rc = str(raw_cat).strip()
+        if 'signaling' in rc.lower() or 'physio' in rc.lower():
+            return 'Signaling_Physiological'
+        return 'Metabolism'
+    pw_lower = str(pw_name).strip().lower()
+    if any(kw in pw_lower for kw in SIGNALING_NAME_KEYWORDS):
+        return 'Signaling_Physiological'
+    return 'Metabolism'
+
+def run_pathway_enrichment(
+    sig_metabolites, background_metabolites,
+    custom_db_source=None, bg_mode="reference", include_signaling=True
+):
     db = pd.DataFrame()
     if custom_db_source is not None:
         try:
@@ -688,9 +703,14 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
             return pd.DataFrame(), pd.DataFrame()
             
     if not db.empty and len(db.columns) >= 2:
-        db = db.rename(columns={0: 'Pathway', 1: 'Compounds'})
+        col_map = {0: 'Pathway', 1: 'Compounds'}
+        if len(db.columns) >= 3:
+            col_map[2] = 'Category'
+        db = db.rename(columns=col_map)
         if str(db.iloc[0]['Pathway']).strip().lower() == 'pathway':
             db = db.iloc[1:].reset_index(drop=True)
+        if 'Category' not in db.columns:
+            db['Category'] = None
     else:
         return pd.DataFrame(), pd.DataFrame() 
 
@@ -701,13 +721,18 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
         pw_clean = re.sub(r'\s+-\s+[^-]+$', '', pw_raw).strip()
         if pd.isna(row['Compounds']) or pw_clean.lower() in OVERVIEW_PATHWAYS:
             continue
+            
+        pw_cat = infer_pathway_category(pw_clean, row.get('Category', None))
+        if (not include_signaling) and pw_cat == 'Signaling_Physiological':
+            continue
+
         pw_comps = set()
         for c in str(row['Compounds']).split(';'):
             c_clean = re.sub(r'[^a-z0-9]', '', c.lower())
             if c_clean:
                 pw_comps.add(c_clean)
         if len(pw_comps) >= 2:
-            parsed_pathways.append((pw_clean, pw_comps))
+            parsed_pathways.append((pw_clean, pw_comps, pw_cat))
             all_db_comps.update(pw_comps)
 
     if not all_db_comps:
@@ -750,7 +775,7 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
         return pd.DataFrame(), pd.DataFrame()
     
     results, filtered_db_records = [], []
-    for pw_name, pw_comps in parsed_pathways:
+    for pw_name, pw_comps, pw_cat in parsed_pathways:
         exp_in_pw = pw_comps.intersection(set(exp_id_to_name.keys()))
         if len(exp_in_pw) >= 1:
             filtered_db_records.append({
@@ -772,9 +797,11 @@ def run_pathway_enrichment(sig_metabolites, background_metabolites, custom_db_so
         expected = (K_drawn * M) / float(N)
         enrich_factor = k / expected if expected > 0 else 0.0
         hit_names = sorted(set(sig_id_to_name[cid] for cid in hit_ids))
+        cat_disp = "核心代谢 (Metabolism)" if pw_cat == "Metabolism" else "生理/信号/转运 (Physiology & Signaling)"
         
         results.append({
             'Pathway': pw_name,
+            'Category': cat_disp,
             'Total_in_Pathway': M,
             'Hits': k,
             'P_Value': np.clip(p_val, 1e-300, 1.0),
