@@ -33,6 +33,7 @@ if os.path.exists("simhei.ttf"):
 
 plt.rcParams['font.sans-serif'] = ['SimHei', 'PingFang SC', 'Microsoft YaHei', 'Arial Unicode MS', 'DejaVu Sans', 'sans-serif']
 plt.rcParams['axes.unicode_minus'] = False
+
 try:
     from data_preprocessing import (
         data_cleaning_pipeline, 
@@ -798,7 +799,7 @@ def generate_custom_heatmap(
 
 
 # ==========================================
-# 辅助函数 3：单矩阵统计建模与图表生成 (含 QC_RSD 映射)
+# 辅助函数 3：单矩阵统计建模与图表生成 (含 QC_RSD 映射与 Search_Name 防重拼接)
 # ==========================================
 def run_single_matrix_modeling(
     df_proc, df_unscaled_log2, feats, meta, group_col,
