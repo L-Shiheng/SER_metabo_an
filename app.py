@@ -16,6 +16,7 @@ import plotly.graph_objects as go
 import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import matplotlib.font_manager as fm
 import networkx as nx
 from sklearn.decomposition import PCA
 
@@ -24,9 +25,14 @@ from sklearn.decomposition import PCA
 # ==========================================
 st.set_page_config(page_title="MetaFlow Studio", page_icon="🧬", layout="wide")
 
-plt.rcParams['font.sans-serif'] = ['PingFang SC', 'SimHei', 'Microsoft YaHei', 'Arial Unicode MS', 'sans-serif']
-plt.rcParams['axes.unicode_minus'] = False
+if os.path.exists("simhei.ttf"):
+    try:
+        fm.fontManager.addfont("simhei.ttf")
+    except Exception:
+        pass
 
+plt.rcParams['font.sans-serif'] = ['SimHei', 'PingFang SC', 'Microsoft YaHei', 'Arial Unicode MS', 'DejaVu Sans', 'sans-serif']
+plt.rcParams['axes.unicode_minus'] = False
 try:
     from data_preprocessing import (
         data_cleaning_pipeline, 
@@ -831,7 +837,7 @@ def run_single_matrix_modeling(
         
         if 'KEGG_ID' in stats_df.columns:
             kegg_str = stats_df['KEGG_ID'].fillna('').astype(str).replace('nan', '').replace('None', '')
-            orig_str = stats_df['Original_Name'].fillna(stats_df['Name']).astype(str)
+            orig_str = stats_df['Original_Name'].fillna(stats_df['Name']).astype(str).str.split('|').str[0].str.strip()
             stats_df['Search_Name'] = np.where(kegg_str != '', orig_str + '|' + kegg_str, orig_str)
         else:
             stats_df['Search_Name'] = stats_df['Original_Name'].fillna(stats_df['Name'])
