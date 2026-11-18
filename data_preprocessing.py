@@ -10,7 +10,7 @@ from sklearn.metrics import r2_score
 from scipy.stats import hypergeom
 
 # ====================
-# SIMCA: OPLS-DA 算法与置换检验 (含正交矩阵剥离 Deflation)
+# SIMCA: OPLS-DA 算法与置换检验 (含正交矩阵剥离 Deflation 与缩放空间对齐)
 # ====================
 class OPLS_DA:
     def __init__(self):
@@ -76,16 +76,18 @@ class OPLS_DA:
     def evaluate(self, X, y, n_splits=7):
         n_samples = len(y)
         cv_splits = min(n_splits, n_samples)
-        if cv_splits < 2: return 0, 0
+        if cv_splits < 2: return 0.0, 0.0
             
-        pls = PLSRegression(n_components=min(2, X.shape[1], n_samples - 1))
+        n_comp = min(2, X.shape[1], n_samples - 1)
+        # 显式指定 scale=False，严格保留上游已完成的 Pareto / Auto 缩放空间
+        pls = PLSRegression(n_components=n_comp, scale=False)
         pls.fit(X, y)
         y_pred_fit = pls.predict(X).flatten()
-        self.R2Y = r2_score(y, y_pred_fit)
+        self.R2Y = float(np.clip(r2_score(y, y_pred_fit), 0.0, 1.0))
         
         kf = KFold(n_splits=cv_splits, shuffle=True, random_state=42)
         y_cv = cross_val_predict(pls, X, y, cv=kf).flatten()
-        self.Q2 = r2_score(y, y_cv)
+        self.Q2 = float(np.clip(r2_score(y, y_cv), -2.0, 1.0))
         return self.R2Y, self.Q2
 
     def permutation_test(self, X, y, n_permutations=100):
@@ -94,23 +96,25 @@ class OPLS_DA:
         r2_perm, q2_perm, correlations = [], [], []
         
         n_comp = min(2, X.shape[1], len(y) - 1)
-        pls = PLSRegression(n_components=n_comp)
+        pls = PLSRegression(n_components=n_comp, scale=False)
         cv_splits = min(7, len(y))
         kf = KFold(n_splits=cv_splits, shuffle=True, random_state=42)
         
         for _ in range(n_permutations):
             y_shuffled = np.random.permutation(y)
             corr = np.abs(np.corrcoef(y, y_shuffled)[0, 1])
-            correlations.append(0.0 if np.isnan(corr) else corr)
+            correlations.append(0.0 if np.isnan(corr) else float(corr))
             
             pls.fit(X, y_shuffled)
-            r2_perm.append(r2_score(y_shuffled, pls.predict(X).flatten()))
-            q2_perm.append(r2_score(y_shuffled, cross_val_predict(pls, X, y_shuffled, cv=kf).flatten()))
+            r2_val = float(np.clip(r2_score(y_shuffled, pls.predict(X).flatten()), -1.0, 1.0))
+            q2_val = float(np.clip(r2_score(y_shuffled, cross_val_predict(pls, X, y_shuffled, cv=kf).flatten()), -2.0, 1.0))
+            r2_perm.append(r2_val)
+            q2_perm.append(q2_val)
             
         return np.array(correlations), np.array(r2_perm), np.array(q2_perm), orig_R2Y, orig_Q2
 
 # ====================
-# 通用数据清洗管线 (含 QC 稳定出峰与 RSD% 质控过滤 + 对标 MetaboAnalyst 标准)
+# 通用数据清洗管线 (含 QC 稳定出峰与 RSD% 质控过滤 + 真实检出掩码 PQN + 对标 MetaboAnalyst)
 # ====================
 def data_cleaning_pipeline(
     df, group_col, missing_thresh=0.5, impute_method='lod_1_5',
@@ -179,12 +183,16 @@ def data_cleaning_pipeline(
 
     data_df = data_df[valid_cols].mask(data_df[valid_cols] <= 0, np.nan)
     
+    # 保存插补前的真实检出值掩码，供 PQN 归一化排除插补常数干扰使用
+    obs_valid_mask = data_df.notna()
+
     # ----------------------------------------------------------
     # 2. 缺失值填充 (严格按列独立计算最小正值)
     # ----------------------------------------------------------
     if data_df.isnull().sum().sum() > 0:
         non_empty_cols = data_df.columns[data_df.notna().any()].tolist()
         data_df = data_df[non_empty_cols]
+        obs_valid_mask = obs_valid_mask[non_empty_cols]
         if not data_df.empty:
             if impute_method in ['lod_1_5', '1/5 Min (LoD)']:
                 col_mins = data_df.min(axis=0) * 0.2
@@ -205,7 +213,7 @@ def data_cleaning_pipeline(
     data_df = np.clip(data_df.astype(float), 1e-9, None)
 
     # ----------------------------------------------------------
-    # 3. 样本归一化 (消除进样体积与电离效率误差)
+    # 3. 样本归一化 (PQN 优先基于真实检出值计算稀释因子，避免插补常数扭曲比值)
     # ----------------------------------------------------------
     if norm_method == 'Sum':
         row_sums = data_df.sum(axis=1).replace(0, 1e-9)
@@ -214,10 +222,12 @@ def data_cleaning_pipeline(
         row_meds = data_df.median(axis=1).replace(0, 1e-9)
         data_df = data_df.div(row_meds, axis=0) * row_meds.mean()
     elif norm_method == 'PQN':
-        ref = data_df.median(axis=0)
+        obs_only_df = data_df.where(obs_valid_mask, np.nan)
+        ref = obs_only_df.median(axis=0).fillna(data_df.median(axis=0))
         ref[ref <= 0] = 1e-6
-        quotients = data_df.div(ref, axis=1)
-        factors = quotients.median(axis=1).replace(0, 1e-9)
+        quotients_obs = obs_only_df.div(ref, axis=1)
+        quotients_all = data_df.div(ref, axis=1)
+        factors = quotients_obs.median(axis=1).fillna(quotients_all.median(axis=1)).replace(0, 1e-9)
         data_df = data_df.div(factors, axis=0)
 
     linear_norm_df = data_df.replace([np.inf, -np.inf], np.nan).fillna(1e-9).copy()
@@ -234,7 +244,7 @@ def data_cleaning_pipeline(
         data_df = linear_norm_df.copy()
 
     # ----------------------------------------------------------
-    # 5. 特征缩放 (供 PCA, OPLS-DA, 热图等使用)
+    # 5. 特征缩放 (供 PCA, OPLS-DA 等多变量分析使用)
     # ----------------------------------------------------------
     if scale_method != 'None':
         mean = data_df.mean()
@@ -254,7 +264,8 @@ def data_cleaning_pipeline(
     proc_full.attrs['has_valid_qc'] = has_valid_qc
 
     if return_unscaled:
-        unscaled_full = pd.concat([meta_df, unscaled_log2_df], axis=1)
+        target_unscaled_df = unscaled_log2_df if log_transform else linear_norm_df
+        unscaled_full = pd.concat([meta_df, target_unscaled_df], axis=1)
         linear_full = pd.concat([meta_df, linear_norm_df], axis=1)
         unscaled_full.attrs['linear_norm_df'] = linear_full
         unscaled_full.attrs['log_transformed'] = log_transform
@@ -320,12 +331,14 @@ def build_kegg_dictionary(dict_files):
                 for _, row in df.iterrows():
                     k = str(row[kegg_col]).strip()
                     if k and k.lower() not in ['nan', 'none', '']:
-                        k_clean = k.split(';')[0].strip() 
-                        names_str = str(row[name_col])
-                        for n_part in names_str.split(';'):
-                            n_clean = n_part.strip().lower()
-                            if n_clean and n_clean != 'nan':
-                                kegg_mapping[n_clean] = k_clean
+                        k_parts = [p.strip() for p in k.split(';') if p.strip() and p.strip().lower() not in ['nan', 'none']]
+                        if k_parts:
+                            k_clean = ";".join(k_parts)
+                            names_str = str(row[name_col])
+                            for n_part in names_str.split(';'):
+                                n_clean = n_part.strip().lower()
+                                if n_clean and n_clean != 'nan':
+                                    kegg_mapping[n_clean] = k_clean
         except Exception: pass
     return kegg_mapping
 
@@ -384,6 +397,7 @@ def parse_universal_single_table(file_list, external_kegg_dict=None):
             orig_names.append(f"{n} | {mapped_kegg}" if mapped_kegg else str(n))
             kegg_list.append(mapped_kegg)
                 
+        orig_names = make_unique(orig_names)
         combined_df.index = orig_names
         df_t = combined_df.T
         df_t.index.name = 'SampleID'
@@ -419,7 +433,9 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积", mode_regex
                 for _, row in df.iterrows():
                     n = str(row[comp_col]).strip(); k = str(row[kegg_col]).strip()
                     if k and k.lower() not in ['nan', 'none', '']:
-                        local_kegg_mapping[n.lower()] = k.split(';')[0].strip()
+                        k_parts = [p.strip() for p in k.split(';') if p.strip() and p.strip().lower() not in ['nan', 'none']]
+                        if k_parts:
+                            local_kegg_mapping[n.lower()] = ";".join(k_parts)
                     
             metric_cols = [c for c in df.columns if metric_suffix in str(c)]
             if not metric_cols: continue 
@@ -456,6 +472,7 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积", mode_regex
             orig_names.append(f"{n} | {mapped_kegg}" if mapped_kegg else str(n))
             kegg_list.append(mapped_kegg)
                 
+        orig_names = make_unique(orig_names)
         combined.index = orig_names
         df_t = combined.T
         df_t.index.name = 'SampleID'
@@ -473,7 +490,7 @@ def parse_manual_targeted_files(file_list, metric_suffix=" : 面积", mode_regex
     except Exception as e: return None, None, f"MRM 拟靶向表格解析失败: {str(e)}"
 
 # ==============================================================================
-# 🚀 引擎 C：MetDNA 原生管线提取器 (支持自定义模式标签与可选单文件去重)
+# 🚀 引擎 C：MetDNA 原生管线提取器 (支持自定义模式标签、多候选 KEGG ID 与可选单文件去重)
 # ==============================================================================
 def rank_confidence(conf_str):
     s = str(conf_str).upper().strip()
@@ -537,7 +554,10 @@ def parse_metdna_file(file_buffer, file_name, valid_samples=None, dedup_within_f
     
     kegg_col = next((c for c in df.columns if 'KEGG' in str(c).upper()), None)
     if kegg_col:
-        kegg_ids = df[kegg_col].fillna('').astype(str).apply(lambda s: s.split(';')[0].strip() if s.lower() not in ['nan', 'none'] else '')
+        def _clean_kegg_candidates(val):
+            parts = [p.strip() for p in str(val).split(';') if p.strip() and p.strip().lower() not in ['nan', 'none', 'null']]
+            return ";".join(parts)
+        kegg_ids = df[kegg_col].fillna('').apply(_clean_kegg_candidates)
     else:
         kegg_ids = pd.Series([""] * len(df))
 
@@ -641,7 +661,8 @@ def merge_multiple_dfs(results_list):
     merged_meta = merged_meta[~merged_meta.index.duplicated(keep='first')]
     merged_meta = merged_meta.loc[final_ids].copy()
     
-    rename_map = {fid: str(merged_meta.loc[fid, 'Clean_Name']) for fid in final_ids}
+    unique_clean_names = make_unique([str(merged_meta.loc[fid, 'Clean_Name']) for fid in final_ids])
+    rename_map = dict(zip(final_ids, unique_clean_names))
     full_df.rename(columns=rename_map, inplace=True)
     
     merged_meta.reset_index(inplace=True)
@@ -652,7 +673,7 @@ def merge_multiple_dfs(results_list):
     return full_df, merged_meta, None
 
 # ==============================================================================
-# 🌟 严谨通路富集引擎 (支持 初级代谢 / 次生代谢天然产物 / 生理信号转运 三大类别)
+# 🌟 严谨通路富集引擎 (支持 初级代谢 / 次生代谢天然产物 / 生理信号转运 三大类别与多候选ID映射)
 # ==============================================================================
 OVERVIEW_PATHWAYS = {
     'metabolic pathways',
@@ -754,13 +775,16 @@ def run_pathway_enrichment(
     def extract_primary_id_and_name(full_str):
         parts = str(full_str).split('|')
         disp_name = parts[0].split(';')[0].strip()
-        if len(parts) > 1 and parts[1].strip():
-            kegg_c = re.sub(r'[^a-z0-9]', '', parts[1].split(';')[0].lower())
-            if kegg_c in all_db_comps:
-                return disp_name, kegg_c
-        name_clean = re.sub(r'[^a-z0-9]', '', disp_name.lower())
-        if name_clean in all_db_comps:
-            return disp_name, name_clean
+        if len(parts) > 1:
+            for seg in parts[1:]:
+                for cand in seg.split(';'):
+                    kegg_c = re.sub(r'[^a-z0-9]', '', cand.lower())
+                    if kegg_c and kegg_c in all_db_comps:
+                        return disp_name, kegg_c
+        for name_cand in parts[0].split(';'):
+            name_clean = re.sub(r'[^a-z0-9]', '', name_cand.strip().lower())
+            if name_clean and name_clean in all_db_comps:
+                return disp_name, name_clean
         return disp_name, None
 
     exp_id_to_name = {}
